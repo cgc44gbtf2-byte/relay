@@ -337,6 +337,42 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
+  test("returns 404 without writing audit activity for unknown channel maintenance targets", async () => {
+    const unknownChannelId = -1;
+    const beforeAudit = await pool.query(
+      "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+    );
+
+    const topicUpdate = await apiRequest(
+      adminSession,
+      `/admin/channels/${unknownChannelId}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Unknown topic" }),
+      },
+    );
+    const clearMessages = await apiRequest(
+      adminSession,
+      `/admin/channels/${unknownChannelId}/messages`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+
+    for (const response of [topicUpdate, clearMessages]) {
+      assert.equal(response.status, 404, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Channel not found." });
+    }
+
+    const afterAudit = await pool.query(
+      "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+    );
+    assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+  });
+
   test("a non-admin cannot read the overview or update roles", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);
