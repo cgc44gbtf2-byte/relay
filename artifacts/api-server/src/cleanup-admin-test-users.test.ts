@@ -9,6 +9,7 @@ import {
   type CleanupClerkClient,
   type CleanupDatabase,
   type CleanupDependencies,
+  type CleanupFailureNotification,
 } from "./cleanup-admin-test-users";
 import {
   TEST_EMAIL_DOMAIN,
@@ -281,5 +282,66 @@ describe("admin test-user cleanup safeguards", () => {
     );
 
     assert.equal(result, 1);
+  });
+
+  test("notifies maintenance with affected users without Clerk credentials", async () => {
+    const username = `${TEST_USERNAME_PREFIX}alert`;
+    const clerkSecret = "sk_test_alert_secret";
+    let notification: CleanupFailureNotification | undefined;
+    const clerk = createClerk({
+      getUserList: async () => ({
+        data: [
+          createUser("alert-user", username, [
+            `${username}@${TEST_EMAIL_DOMAIN}`,
+          ]),
+        ],
+      }),
+      deleteUser: async () => {
+        throw new Error(`delete failed: ${clerkSecret}`);
+      },
+    });
+    const dependencies: CleanupDependencies = {
+      clerk,
+      database: createDatabase(),
+      notifyFailure: (value) => {
+        notification = value;
+      },
+    };
+
+    const result = await withSafeCleanupEnvironment(() =>
+      runCleanup(["--apply"], dependencies),
+    );
+
+    assert.equal(result, 1);
+    assert.deepEqual(notification, {
+      affectedUserCount: 1,
+      affectedUsers: [{ id: "alert-user", username }],
+    });
+    assert.doesNotMatch(JSON.stringify(notification), /sk_test_alert_secret/);
+  });
+
+  test("notifies maintenance when listing abandoned users fails", async () => {
+    let notification: CleanupFailureNotification | undefined;
+    const dependencies: CleanupDependencies = {
+      clerk: createClerk({
+        getUserList: async () => {
+          throw new Error("user listing failed");
+        },
+      }),
+      database: createDatabase(),
+      notifyFailure: (value) => {
+        notification = value;
+      },
+    };
+
+    const result = await withSafeCleanupEnvironment(() =>
+      runCleanup(["--apply"], dependencies),
+    );
+
+    assert.equal(result, 1);
+    assert.deepEqual(notification, {
+      affectedUserCount: 0,
+      affectedUsers: [],
+    });
   });
 });

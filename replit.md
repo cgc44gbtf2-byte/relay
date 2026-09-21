@@ -66,7 +66,9 @@ pnpm --filter @workspace/api-server run cleanup:test-users:scheduled
 The scheduled entry point always applies cleanup, but the same safeguards still
 require test Clerk keys and the disposable test database. Its structured log
 records the matching user IDs/usernames and a `dry_run`, `started`, `succeeded`,
-or `failed` status; credentials are never included in the log.
+or `failed` status; credentials are never included in the log. A failed apply
+also emits a maintenance alert with the affected-user count and safe IDs or
+usernames, while diagnostic Clerk key values are redacted.
 
 GitHub Actions runs the scheduled cleanup every six hours in the
 `cleanup-abandoned-test-users` job. The job starts a disposable PostgreSQL

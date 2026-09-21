@@ -53,7 +53,20 @@ export type CleanupDatabase = {
 export type CleanupDependencies = {
   clerk: CleanupClerkClient;
   database: CleanupDatabase;
+  notifyFailure?: CleanupFailureNotifier;
 };
+
+export type CleanupFailureNotification = {
+  affectedUserCount: number;
+  affectedUsers: Array<{
+    id: string;
+    username: string | null;
+  }>;
+};
+
+export type CleanupFailureNotifier = (
+  notification: CleanupFailureNotification,
+) => void;
 
 const defaultDependencies: CleanupDependencies = {
   clerk: clerkClient as unknown as CleanupClerkClient,
@@ -237,7 +250,24 @@ export async function cleanupUsers(
 }
 
 function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return redactClerkCredentials(message);
+}
+
+function redactClerkCredentials(message: string): string {
+  const clerkKeyPattern = /\b(?:sk|pk)_(?:test|live)_[A-Za-z0-9_-]+/g;
+  let redacted = message.replace(clerkKeyPattern, "[REDACTED_CLERK_KEY]");
+
+  for (const key of [
+    process.env.CLERK_SECRET_KEY,
+    process.env.CLERK_PUBLISHABLE_KEY,
+  ]) {
+    if (key) {
+      redacted = redacted.split(key).join("[REDACTED_CLERK_KEY]");
+    }
+  }
+
+  return redacted;
 }
 
 function summarizeUsers(users: CleanupUser[]): Array<{
@@ -245,6 +275,39 @@ function summarizeUsers(users: CleanupUser[]): Array<{
   username: string | null;
 }> {
   return users.map(({ id, username }) => ({ id, username }));
+}
+
+function createFailureNotification(
+  users: CleanupUser[],
+): CleanupFailureNotification {
+  return {
+    affectedUserCount: users.length,
+    affectedUsers: summarizeUsers(users),
+  };
+}
+
+function formatFailureNotification(
+  notification: CleanupFailureNotification,
+): string {
+  const users = notification.affectedUsers
+    .map(({ id, username }) => (username ? `${username} (${id})` : id))
+    .join(", ");
+  const userLabel = notification.affectedUserCount === 1 ? "user" : "users";
+
+  return `Scheduled admin test-user cleanup failed for ${notification.affectedUserCount} affected ${userLabel}: ${
+    users || "none found"
+  }.`;
+}
+
+function notifyCleanupFailure(
+  notification: CleanupFailureNotification,
+): void {
+  const message = formatFailureNotification(notification);
+  if (process.env.GITHUB_ACTIONS === "true") {
+    console.error(`::error title=Abandoned test-user cleanup failed::${message}`);
+    return;
+  }
+  console.error(`ALERT: ${message}`);
 }
 
 function logCleanupEvent(
@@ -269,8 +332,18 @@ export async function main(
   assertSupportedArguments(args);
   assertSafeCleanupEnvironment();
 
-  const users = await listMatchingUsers(dependencies.clerk);
   const apply = args.includes(APPLY_FLAG);
+  let users: CleanupUser[] = [];
+  try {
+    users = await listMatchingUsers(dependencies.clerk);
+  } catch (error) {
+    if (apply) {
+      const notification = createFailureNotification(users);
+      (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
+      logCleanupEvent("failed", users, error);
+    }
+    throw error;
+  }
 
   console.log(
     `Found ${users.length} admin regression test user(s) matching ${TEST_USERNAME_PREFIX}.`,
@@ -294,6 +367,8 @@ export async function main(
   try {
     await cleanupUsers(users, dependencies);
   } catch (error) {
+    const notification = createFailureNotification(users);
+    (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
     logCleanupEvent("failed", users, error);
     throw error;
   }
