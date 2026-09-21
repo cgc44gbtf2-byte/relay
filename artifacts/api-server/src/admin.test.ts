@@ -862,6 +862,102 @@ describe("admin access controls", () => {
     }
   });
 
+  test("paginates activity in bounded ordered pages without changing actor fields", async () => {
+    const marker = `activity_page_${randomUUID().replaceAll("-", "")}`;
+    const rowCount = 23;
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (let index = 0; index < rowCount; index += 1) {
+      const offset = parameters.length;
+      values.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`,
+      );
+      parameters.push(
+        adminSession.userId,
+        "Pagination actor",
+        `${marker}_${String(index).padStart(2, "0")}`,
+        `${marker}_target_${index}`,
+        `${marker} label ${index}`,
+        `Pagination detail ${index}`,
+        new Date(Date.UTC(2099, 0, 1, 0, 0, index)),
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+       VALUES ${values.join(", ")}`,
+      parameters,
+    );
+
+    try {
+      const pageResponses = [];
+      for (const offset of [0, 8, 16]) {
+        const response = await apiRequest(
+          adminSession,
+          `/admin/overview?activityLimit=8&activityOffset=${offset}`,
+        );
+        assert.equal(response.status, 200, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        pageResponses.push(
+          response.body as {
+            activity: Array<{
+              id: number;
+              actorId: string;
+              action: string;
+              actor: string | null;
+              createdAt: string;
+            }>;
+            activityPagination: {
+              limit: number;
+              offset: number;
+              hasMore: boolean;
+              nextOffset: number | null;
+            };
+          },
+        );
+      }
+
+      assert.deepEqual(
+        pageResponses.map((page) => page.activity.length),
+        [8, 8, 7],
+      );
+      assert.deepEqual(
+        pageResponses.map((page) => page.activityPagination),
+        [
+          { limit: 8, offset: 0, hasMore: true, nextOffset: 8 },
+          { limit: 8, offset: 8, hasMore: true, nextOffset: 16 },
+          { limit: 8, offset: 16, hasMore: false, nextOffset: null },
+        ],
+      );
+
+      const activity = pageResponses.flatMap((page) => page.activity);
+      assert.equal(new Set(activity.map((entry) => entry.id)).size, rowCount);
+      assert.deepEqual(
+        activity.map((entry) => entry.action),
+        Array.from({ length: rowCount }, (_, index) => `${marker}_${String(rowCount - index - 1).padStart(2, "0")}`),
+      );
+      assert.ok(activity.every((entry) => entry.actorId === adminSession.userId));
+      assert.ok(activity.every((entry) => entry.actor === "Pagination actor"));
+      assert.ok(
+        activity.every(
+          (entry, index) =>
+            index === 0 || entry.createdAt <= activity[index - 1].createdAt,
+        ),
+      );
+
+      const invalidLimit = await apiRequest(
+        adminSession,
+        "/admin/overview?activityLimit=51",
+      );
+      assert.equal(invalidLimit.status, 400, JSON.stringify(invalidLimit));
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
   test("records a successful promotion with the acting admin in activity", async () => {
     try {
       await pool.query(

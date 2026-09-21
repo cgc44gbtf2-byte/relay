@@ -19,6 +19,9 @@ import { PRIMARY_ROLES } from "../lib/permissions";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
+const DEFAULT_ACTIVITY_LIMIT = 20;
+const MAX_ACTIVITY_LIMIT = 50;
+const MAX_ACTIVITY_OFFSET = 10_000;
 
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
@@ -39,6 +42,19 @@ function isUniqueViolation(error: unknown): boolean {
         : undefined;
   }
   return false;
+}
+
+function parseActivityQueryInteger(
+  value: unknown,
+  fallback: number,
+  maximum: number,
+  minimum = 0,
+): number | null {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) return null;
+  return parsed;
 }
 
 async function adminProfile(req: AuthenticatedRequest) {
@@ -112,6 +128,23 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const activityLimit = parseActivityQueryInteger(
+    req.query.activityLimit,
+    DEFAULT_ACTIVITY_LIMIT,
+    MAX_ACTIVITY_LIMIT,
+    1,
+  );
+  const activityOffset = parseActivityQueryInteger(
+    req.query.activityOffset,
+    0,
+    MAX_ACTIVITY_OFFSET,
+  );
+  if (activityLimit === null || activityOffset === null) {
+    res.status(400).json({
+      error: `activityLimit must be between 1 and ${MAX_ACTIVITY_LIMIT}, and activityOffset must be between 0 and ${MAX_ACTIVITY_OFFSET}.`,
+    });
+    return;
+  }
   const [[userCount], [channelCount], [messageCount], [onlineCount]] = await Promise.all([
     db.select({ value: count() }).from(usersTable),
     db.select({ value: count() }).from(channelsTable),
@@ -173,8 +206,11 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       actor: adminAuditLogsTable.actorDisplayName,
     })
     .from(adminAuditLogsTable)
-    .orderBy(desc(adminAuditLogsTable.createdAt))
-    .limit(20);
+    .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+    .limit(activityLimit + 1)
+    .offset(activityOffset);
+  const hasMoreActivity = activity.length > activityLimit;
+  if (hasMoreActivity) activity.pop();
   res.json({
     stats: {
       users: Number(userCount?.value ?? 0),
@@ -187,6 +223,12 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     channels,
     recentMessages,
     activity,
+    activityPagination: {
+      limit: activityLimit,
+      offset: activityOffset,
+      hasMore: hasMoreActivity,
+      nextOffset: hasMoreActivity ? activityOffset + activityLimit : null,
+    },
   });
 });
 

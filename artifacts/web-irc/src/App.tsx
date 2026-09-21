@@ -645,6 +645,7 @@ type ConsoleOverview = {
   channels: Array<{ id: number; name: string; topic: string; memberCount: number; createdAt: string }>;
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
+  activityPagination: { limit: number; offset: number; hasMore: boolean; nextOffset: number | null };
 };
 
 function EmptyAdminState({ label }: { label: string }) {
@@ -685,6 +686,7 @@ function AdminConsole() {
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
   const [health, setHealth] = useState<ConsoleHealth | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -696,7 +698,26 @@ function AdminConsole() {
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [topicDraft, setTopicDraft] = useState("");
   const [pendingClear, setPendingClear] = useState<{ id: number; name: string } | null>(null);
-  const load = async () => { setError(""); try { const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>("/admin/overview"), api<ConsoleHealth>("/admin/health")]); setOverview(nextOverview); setHealth(nextHealth); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load the operations console"); } };
+  const load = async (activityOffset = 0, appendActivity = false) => {
+    setError("");
+    try {
+      const overviewPath = activityOffset > 0 ? `/admin/overview?activityOffset=${activityOffset}` : "/admin/overview";
+      const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
+      if (!appendActivity) {
+        setOverview(nextOverview);
+      } else {
+        setOverview((current) => {
+          if (!current) return nextOverview;
+          const existingIds = new Set(current.activity.map((item) => item.id));
+          const activity = [...current.activity, ...nextOverview.activity.filter((item) => !existingIds.has(item.id))];
+          return { ...nextOverview, activity };
+        });
+      }
+      setHealth(nextHealth);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load the operations console");
+    }
+  };
   useEffect(() => { api<AdminStatus>("/admin/status").then(setStatus).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load admin status")).finally(() => setLoading(false)); }, []);
   useEffect(() => { if (status?.isAdmin) void load(); }, [status?.isAdmin]);
   useEffect(() => {
@@ -713,6 +734,16 @@ function AdminConsole() {
   const updateRole = async () => { if (!pendingRole) return; setWorking(true); try { await api(`/admin/users/${pendingRole.id}/role`, { method: "PATCH", body: JSON.stringify({ role: pendingRole.role }) }); setNotice(`Role updated for ${pendingRole.label}.`); setPendingRole(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update role"); } finally { setWorking(false); } };
   const saveTopic = async (id: number) => { setWorking(true); try { await api(`/admin/channels/${id}`, { method: "PATCH", body: JSON.stringify({ topic: topicDraft }) }); setEditingChannel(null); setNotice("Channel topic saved."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save channel topic"); } finally { setWorking(false); } };
   const clearHistory = async () => { if (!pendingClear) return; setWorking(true); try { await api(`/admin/channels/${pendingClear.id}/messages`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }); setNotice(`History cleared for ${pendingClear.name}.`); setPendingClear(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not clear channel history"); } finally { setWorking(false); } };
+  const loadOlderActivity = async () => {
+    const nextOffset = overview?.activityPagination.nextOffset;
+    if (nextOffset === null || nextOffset === undefined || loadingOlderActivity) return;
+    setLoadingOlderActivity(true);
+    try {
+      await load(nextOffset, true);
+    } finally {
+      setLoadingOlderActivity(false);
+    }
+  };
   const accounts = (directoryLoaded ? directory : overview?.users ?? []).filter((account) => { const q = query.trim().toLowerCase(); return (!q || account.username.toLowerCase().includes(q) || account.displayName.toLowerCase().includes(q)) && (roleFilter === "all" || account.role === roleFilter) && (statusFilter === "all" || account.status === statusFilter); });
   const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "overview", LayoutDashboard], ["accounts", "accounts", Users], ["channels", "channels", Hash], ["activity", "activity", Activity], ["system", "system status", Server]];
   const title = nav.find(([key]) => key === section)?.[1] ?? "overview";
@@ -747,7 +778,7 @@ function AdminConsole() {
               <div className="grid gap-5 xl:grid-cols-[1.12fr_.88fr]"><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">recent activity</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">The last operational changes</p></div><button onClick={() => setSection("activity")} className="font-mono text-[10px] text-primary hover:underline">view all</button></div><div className="divide-y divide-border">{overview.activity.slice(0, 6).map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} />)}{overview.activity.length === 0 && <EmptyAdminState label="No activity recorded yet." />}</div></section><div className="space-y-5"><AdminHealthCard health={health} onOpen={() => setSection("system")} /><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">recent messages</h2></div><div className="divide-y divide-border">{overview.recentMessages.slice(0, 5).map((message) => <div key={message.id} className="px-5 py-3"><div className="flex justify-between gap-3 font-mono text-[10px]"><span className="truncate text-secondary-foreground">{message.sender}</span><span className="shrink-0 text-muted-foreground">{timeLabel(message.createdAt)}</span></div><p className="mt-1 truncate text-xs">{message.body}</p></div>)}{overview.recentMessages.length === 0 && <EmptyAdminState label="No messages have been sent yet." />}</div></section></div></div>
             </div>
            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} /> : section === "activity" ? (
-            <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity yet." />}</div></section>
+            <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity yet." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>
           )}
