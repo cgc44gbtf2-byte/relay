@@ -596,9 +596,73 @@ describe("admin test-user cleanup safeguards", () => {
       assert.equal(result, 1);
       assert.equal(requests.length, 1);
       const output = errors.join("\n");
+      assert.match(output, /::error title=Abandoned test-user cleanup failed::/);
       assert.match(output, /HTTP 400/);
+      assert.match(output, /delete failed/);
       assert.doesNotMatch(output, /notifications\.example\.invalid/);
       assert.doesNotMatch(output, /sk_test_permanent_webhook_secret/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("preserves the cleanup failure when the webhook request is rejected", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-rejected`;
+    const clerkSecret = "sk_test_rejected_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const originalConsoleError = console.error;
+    const errors: string[] = [];
+    const webhookUrl = "https://notifications.example.invalid/rejected";
+    let requests = 0;
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL = webhookUrl;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    globalThis.fetch = async () => {
+      requests += 1;
+      throw new Error(`fetch failed for ${webhookUrl}`);
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-rejected-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests, 3);
+      const output = errors.join("\n");
+      assert.match(output, /::error title=Abandoned test-user cleanup failed::/);
+      assert.match(output, /Failed to deliver cleanup failure notification/);
+      assert.match(output, /delete failed/);
+      assert.doesNotMatch(output, /notifications\.example\.invalid/);
+      assert.doesNotMatch(output, /sk_test_rejected_webhook_secret/);
     } finally {
       globalThis.fetch = originalFetch;
       console.error = originalConsoleError;

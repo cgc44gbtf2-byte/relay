@@ -412,6 +412,19 @@ function logCleanupEvent(
   );
 }
 
+async function notifyFailureWithoutMaskingCleanupError(
+  notifier: CleanupFailureNotifier,
+  notification: CleanupFailureNotification,
+): Promise<void> {
+  try {
+    await notifier(notification);
+  } catch {
+    console.error(
+      "Failed to deliver cleanup failure notification; preserving the cleanup error.",
+    );
+  }
+}
+
 export async function main(
   args: string[] = process.argv.slice(2),
   dependencies: CleanupDependencies = defaultDependencies,
@@ -426,7 +439,10 @@ export async function main(
   } catch (error) {
     if (apply) {
       const notification = createFailureNotification(users);
-      await (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
+      await notifyFailureWithoutMaskingCleanupError(
+        dependencies.notifyFailure ?? notifyCleanupFailure,
+        notification,
+      );
       logCleanupEvent("failed", users, error);
     }
     throw error;
@@ -455,7 +471,10 @@ export async function main(
     await cleanupUsers(users, dependencies);
   } catch (error) {
     const notification = createFailureNotification(users);
-    await (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
+    await notifyFailureWithoutMaskingCleanupError(
+      dependencies.notifyFailure ?? notifyCleanupFailure,
+      notification,
+    );
     logCleanupEvent("failed", users, error);
     throw error;
   }
