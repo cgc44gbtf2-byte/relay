@@ -1304,8 +1304,15 @@ describe("admin access controls", () => {
     }
   });
 
-  test("returns 404 without changing roles or audit activity for an unknown user", async () => {
-    const unknownUserId = `unknown_${randomUUID()}`;
+  test("returns 404 without changing roles or audit activity after the target disappears", async () => {
+    const targetSession = await createTestSession("removed_role_target");
+    const profile = await apiRequest(targetSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    await pool.query(
+      "DELETE FROM irc_users WHERE clerk_id = $1",
+      [targetSession.userId],
+    );
+
     const beforeUsers = await pool.query(
       "SELECT clerk_id, role FROM irc_users ORDER BY clerk_id",
     );
@@ -1315,7 +1322,7 @@ describe("admin access controls", () => {
 
     const response = await apiRequest(
       adminSession,
-      `/admin/users/${unknownUserId}/role`,
+      `/admin/users/${targetSession.userId}/role`,
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
