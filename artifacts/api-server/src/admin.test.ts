@@ -370,6 +370,54 @@ async function userOwnedRows(userId: string): Promise<unknown[]> {
   ];
 }
 
+async function communityOwnedRows(): Promise<unknown[]> {
+  const [
+    communities,
+    categories,
+    channels,
+    communityMembers,
+    channelMembers,
+    permissionDefinitions,
+    rolePermissions,
+    userRoles,
+    announcements,
+    notifications,
+    auditLogs,
+  ] = await Promise.all([
+    pool.query("SELECT * FROM irc_communities ORDER BY id"),
+    pool.query("SELECT * FROM irc_categories ORDER BY id"),
+    pool.query("SELECT * FROM irc_channels ORDER BY id"),
+    pool.query(
+      "SELECT * FROM irc_community_members ORDER BY community_id, user_id",
+    ),
+    pool.query(
+      "SELECT * FROM irc_channel_members ORDER BY channel_id, user_id",
+    ),
+    pool.query("SELECT * FROM irc_permission_definitions ORDER BY id"),
+    pool.query(
+      "SELECT * FROM irc_role_permissions ORDER BY role, permission_id",
+    ),
+    pool.query("SELECT * FROM irc_user_roles ORDER BY id"),
+    pool.query("SELECT * FROM irc_server_announcements ORDER BY id"),
+    pool.query("SELECT * FROM irc_notifications ORDER BY id"),
+    pool.query("SELECT * FROM irc_admin_audit_logs ORDER BY id"),
+  ]);
+
+  return [
+    communities.rows,
+    categories.rows,
+    channels.rows,
+    communityMembers.rows,
+    channelMembers.rows,
+    permissionDefinitions.rows,
+    rolePermissions.rows,
+    userRoles.rows,
+    announcements.rows,
+    notifications.rows,
+    auditLogs.rows,
+  ];
+}
+
 function ircRequests(
   userId: string,
   query: string,
@@ -438,6 +486,77 @@ function ircRequests(
     [`/search/messages?q=${encodeURIComponent(query)}`],
     ["/notifications"],
     ["/notifications/1/read", { method: "POST" }],
+  ];
+}
+
+function communityRequests(
+  userId: string,
+): Array<[string, RequestInit?]> {
+  return [
+    ["/permissions/me"],
+    ["/permissions/catalog"],
+    ["/communities"],
+    [
+      "/communities",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Should not be created",
+          slug: `invalid-community-${randomUUID()}`,
+        }),
+      },
+    ],
+    ["/communities/1"],
+    [
+      "/communities/1/categories",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "invalid category" }),
+      },
+    ],
+    [
+      "/communities/1/categories/1",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "updated category" }),
+      },
+    ],
+    [
+      "/communities/1",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Should not change" }),
+      },
+    ],
+    [
+      "/communities/1/channels",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "invalid-channel" }),
+      },
+    ],
+    [
+      `/communities/1/members/${userId}/role`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "member" }),
+      },
+    ],
+    [
+      "/communities/1/announcements",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Should not be published" }),
+      },
+    ],
+    ["/communities/1/moderation-logs"],
   ];
 }
 
@@ -706,6 +825,33 @@ describe("admin access controls", () => {
     }
 
     const afterRows = await userOwnedRows(invalidSession.userId);
+    assert.deepEqual(afterRows, beforeRows);
+  });
+
+  test("rejects malformed and expired Clerk credentials across community routes without changing community records", async () => {
+    const invalidSession = await createTestSession("invalid_community");
+    const profile = await apiRequest(invalidSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+
+    const credentials = [
+      "malformed-clerk-token",
+      createExpiredToken(invalidSession.userId),
+    ];
+    const beforeRows = await communityOwnedRows();
+    const responses = await Promise.all(
+      credentials.flatMap((token) =>
+        communityRequests(invalidSession.userId).map(([path, init]) =>
+          apiRequestWithToken(token, path, init),
+        ),
+      ),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const afterRows = await communityOwnedRows();
     assert.deepEqual(afterRows, beforeRows);
   });
 
