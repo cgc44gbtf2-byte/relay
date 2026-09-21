@@ -155,6 +155,30 @@ describe("admin access controls", () => {
     assert.deepEqual(roleUpdate.body, { error: "Admin access required." });
   });
 
+  test("rejects unsupported role payloads without changing an account's role", async () => {
+    for (const payload of [{ role: "owner" }, { role: "ADMIN" }, {}]) {
+      const response = await apiRequest(
+        adminSession,
+        `/admin/users/${adminSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.body, {
+        error: "Role must be either admin or member.",
+      });
+    }
+
+    const result = await pool.query(
+      "SELECT role FROM irc_users WHERE clerk_id = $1",
+      [adminSession.userId],
+    );
+    assert.equal(result.rows[0]?.role, "admin");
+  });
+
   test("an admin cannot demote their own account", async () => {
     const response = await apiRequest(
       adminSession,

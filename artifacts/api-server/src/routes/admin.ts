@@ -253,7 +253,11 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
     return;
   }
   const targetUserId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
-  const role = req.body.role === "admin" ? "admin" : "member";
+  const role = req.body?.role;
+  if (role !== "admin" && role !== "member") {
+    res.status(400).json({ error: "Role must be either admin or member." });
+    return;
+  }
   if (targetUserId === actor.clerkId && role !== "admin") {
     res.status(400).json({ error: "You cannot remove your own admin access." });
     return;
