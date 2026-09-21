@@ -93,6 +93,13 @@ type Member = Profile & { role: string; mutedUntil?: string | null };
 type JoinRequest = { id: number; status: string; createdAt: string; user: Profile };
 type Notification = { id: number; type: string; body: string; readAt?: string | null; createdAt: string };
 
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -100,8 +107,18 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error ?? "Something went wrong");
+  if (!response.ok) throw new ApiError(data.error ?? "Something went wrong", response.status);
   return data as T;
+}
+
+function isMissingChannelError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.message === "Channel not found.";
+}
+
+function preferredChannel(channels: Channel[]): Channel | null {
+  return channels.find((channel) => channel.joined)
+    ?? channels.find((channel) => !channel.isPrivate && channel.accessStatus !== "pending")
+    ?? null;
 }
 
 function timeLabel(value: string): string {
@@ -163,19 +180,43 @@ function PreviewMessage({ name, text, color }: { name: string; text: string; col
   return <div className="flex gap-3"><div className="flex h-8 w-8 items-center justify-center rounded-md font-mono text-[10px] font-bold text-background" style={{ backgroundColor: color }}>{initials(name)}</div><div><div className="font-mono text-xs font-bold" style={{ color }}>{name} <span className="ml-2 text-[10px] font-normal text-muted-foreground">03:14 PM</span></div><p className="mt-1 text-sm text-foreground/85">{text}</p></div></div>;
 }
 
-function useRoomData(channelId: number | null, activeDm: Profile | null) {
+function useRoomData(channelId: number | null, activeDm: Profile | null, onMissingChannel?: (channelId: number) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
+  const onMissingChannelRef = useRef(onMissingChannel);
+  onMissingChannelRef.current = onMissingChannel;
+
   useEffect(() => {
-    if (!channelId && !activeDm) return;
+    setMessages([]);
+    setMembers([]);
+    if (!channelId && !activeDm) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     const promise = activeDm
       ? api<{ messages: ChatMessage[] }>(`/dm/${activeDm.id}/messages`)
       : api<{ messages: ChatMessage[] }>(`/channels/${channelId}/messages`);
-    promise.then((data) => { if (!cancelled) setMessages(data.messages); }).catch(() => { if (!cancelled) setMessages([]); }).finally(() => { if (!cancelled) setLoading(false); });
-    if (channelId && !activeDm) api<Member[]>(`/channels/${channelId}/members`).then((data) => { if (!cancelled) setMembers(data); }).catch(() => setMembers([]));
+    promise.then((data) => {
+      if (!cancelled) setMessages(data.messages);
+    }).catch((error) => {
+      if (cancelled) return;
+      setMessages([]);
+      if (channelId && !activeDm && isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    if (channelId && !activeDm) {
+      api<Member[]>(`/channels/${channelId}/members`).then((data) => {
+        if (!cancelled) setMembers(data);
+      }).catch((error) => {
+        if (cancelled) return;
+        setMembers([]);
+        if (isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
+      });
+    }
     return () => { cancelled = true; };
   }, [channelId, activeDm]);
   return { messages, setMessages, members, setMembers, loading };
@@ -216,7 +257,56 @@ function ChatApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [connection, setConnection] = useState("connecting");
-  const room = useRoomData(currentChannelId, activeDm);
+  const [channelRefreshError, setChannelRefreshError] = useState("");
+  const currentChannelIdRef = useRef<number | null>(currentChannelId);
+  const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
+  const channelRefreshRef = useRef<Promise<Channel[]> | null>(null);
+  currentChannelIdRef.current = currentChannelId;
+  activeDmIdRef.current = activeDm?.id ?? null;
+
+  const refreshChannels = async (): Promise<Channel[]> => {
+    if (channelRefreshRef.current) return channelRefreshRef.current;
+    const request = api<Channel[]>("/channels").then((list) => {
+      setChannels(list);
+      setChannelRefreshError("");
+      return list;
+    }).finally(() => {
+      if (channelRefreshRef.current === request) channelRefreshRef.current = null;
+    });
+    channelRefreshRef.current = request;
+    return request;
+  };
+
+  const recoverFromMissingChannel = async (channelId: number) => {
+    if (currentChannelIdRef.current !== channelId) return;
+    currentChannelIdRef.current = null;
+    setCurrentChannelId(null);
+    setActiveDm(null);
+    setJoinRequests([]);
+    setShowRequests(false);
+    setTypingUsers({});
+    try {
+      const list = await refreshChannels();
+      if (currentChannelIdRef.current !== null) return;
+      const next = preferredChannel(list);
+      if (!next) return;
+      currentChannelIdRef.current = next.id;
+      setCurrentChannelId(next.id);
+      if (!next.joined && !next.isPrivate) {
+        api<{ status: "member" | "pending" }>(`/channels/${next.id}/join`, { method: "POST", body: "{}" })
+          .then((result) => {
+            if (result.status === "member") {
+              setChannels((items) => items.map((item) => item.id === next.id ? { ...item, joined: true, accessStatus: "member" } : item));
+            }
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      setChannelRefreshError("Could not refresh the channel list.");
+    }
+  };
+
+  const room = useRoomData(currentChannelId, activeDm, recoverFromMissingChannel);
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
@@ -232,7 +322,7 @@ function ChatApp() {
   useEffect(() => {
     Promise.all([api<Profile>("/me"), api<Channel[]>("/channels"), api<Category[]>("/categories"), api<Notification[]>("/notifications")]).then(([me, list, categoryList, notices]) => {
       setProfile(me); setChannels(list); setCategories(categoryList); setNotifications(notices);
-      const first = list.find((channel) => channel.joined) ?? list.find((channel) => !channel.isPrivate) ?? list[0];
+      const first = preferredChannel(list);
       if (first) setCurrentChannelId(first.id);
       if (first && !first.joined && !first.isPrivate) api(`/channels/${first.id}/join`, { method: "POST", body: "{}" }).then(() => setChannels((items) => items.map((item) => item.id === first.id ? { ...item, joined: true, accessStatus: "member" } : item)));
     }).catch(() => undefined);
@@ -295,11 +385,24 @@ function ChatApp() {
     event.preventDefault();
     const body = draft.trim();
     if (!body) return;
+    const channelId = activeDm ? null : currentChannelId;
+    const dmId = activeDm?.id ?? null;
+    if (!activeDm && channelId === null) return;
     setDraft("");
     try {
-      const sent = activeDm ? await api<ChatMessage>(`/dm/${activeDm.id}/messages`, { method: "POST", body: JSON.stringify({ body }) }) : await api<ChatMessage>(`/channels/${currentChannelId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
-      room.setMessages((items) => items.some((item) => item.id === sent.id) ? items : [...items, sent]);
-    } catch (error) { setDraft(body); window.alert(error instanceof Error ? error.message : "Message could not be sent"); }
+      const sent = activeDm ? await api<ChatMessage>(`/dm/${activeDm.id}/messages`, { method: "POST", body: JSON.stringify({ body }) }) : await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
+      if (activeDmIdRef.current === dmId && currentChannelIdRef.current === channelId) {
+        room.setMessages((items) => items.some((item) => item.id === sent.id) ? items : [...items, sent]);
+      }
+    } catch (error) {
+      if (channelId !== null && isMissingChannelError(error)) {
+        setDraft("");
+        await recoverFromMissingChannel(channelId);
+      } else {
+        setDraft(body);
+        window.alert(error instanceof Error ? error.message : "Message could not be sent");
+      }
+    }
   };
   const sendTyping = (value: string) => {
     setDraft(value);
@@ -359,10 +462,21 @@ function ChatApp() {
   };
   const editTopic = async () => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
+    const channelId = currentChannel.id;
     const topic = window.prompt("Channel topic", currentChannel.topic);
     if (topic === null) return;
-    const updated = await api<Channel>(`/channels/${currentChannel.id}`, { method: "PATCH", body: JSON.stringify({ topic }) });
-    setChannels((items) => items.map((item) => item.id === updated.id ? { ...item, topic: updated.topic } : item));
+    try {
+      const updated = await api<Channel>(`/channels/${channelId}`, { method: "PATCH", body: JSON.stringify({ topic }) });
+      if (currentChannelIdRef.current === channelId) {
+        setChannels((items) => items.map((item) => item.id === updated.id ? { ...item, topic: updated.topic } : item));
+      }
+    } catch (error) {
+      if (isMissingChannelError(error)) {
+        await recoverFromMissingChannel(channelId);
+      } else {
+        window.alert(error instanceof Error ? error.message : "Channel topic could not be saved");
+      }
+    }
   };
   const deleteMessage = async (message: ChatMessage) => {
     try {
@@ -380,16 +494,25 @@ function ChatApp() {
     } catch (error) { window.alert(error instanceof Error ? error.message : "Reaction could not be changed"); }
   };
   const sendAttachment = async (file: File) => {
-    if (!currentChannelId || activeDm) return;
+    const channelId = currentChannelId;
+    if (channelId === null || activeDm) return;
     setUploading(true);
     try {
-      const sent = await api<ChatMessage>(`/channels/${currentChannelId}/messages`, { method: "POST", body: JSON.stringify({ body: file.name }) });
+      const sent = await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body: file.name }) });
       const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }) });
       const uploaded = await fetch(upload.uploadURL, { method: "PUT", body: file, headers: { "content-type": file.type || "application/octet-stream" } });
       if (!uploaded.ok) throw new Error("File upload failed");
       const attachment = await api<NonNullable<ChatMessage["attachments"]>[number]>(`/messages/${sent.id}/attachments`, { method: "POST", body: JSON.stringify({ objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }) });
-      room.setMessages((items) => [...items, { ...sent, attachments: [attachment] }]);
-    } catch (error) { window.alert(error instanceof Error ? error.message : "File could not be shared"); }
+      if (currentChannelIdRef.current === channelId) {
+        room.setMessages((items) => [...items, { ...sent, attachments: [attachment] }]);
+      }
+    } catch (error) {
+      if (isMissingChannelError(error)) {
+        await recoverFromMissingChannel(channelId);
+      } else {
+        window.alert(error instanceof Error ? error.message : "File could not be shared");
+      }
+    }
     finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ""; }
   };
   const moderate = async (member: Member, action: "mute" | "kick" | "ban" | "moderator") => {
@@ -423,7 +546,7 @@ function ChatApp() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-[76px] items-center justify-between border-b border-border bg-card/80 px-4 backdrop-blur sm:px-6">
-           <div className="min-w-0">{activeDm ? <><p className="font-mono text-[10px] uppercase tracking-[.15em] text-secondary-foreground">direct message</p><h1 className="truncate font-mono text-base font-bold">@{activeDm.username}</h1></> : <><div className="flex items-center gap-2"><Hash className="h-4 w-4 text-primary" /><h1 className="truncate font-mono text-base font-bold">{currentChannel?.name ?? "#lobby"}</h1><span className="rounded bg-chart-4/10 px-1.5 py-0.5 font-mono text-[9px] uppercase text-chart-4">{currentChannel?.isPrivate ? "private" : "public"}</span>{["owner", "moderator"].includes(actorRole ?? "") && <button onClick={editTopic} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit channel topic" aria-label="Edit channel topic"><Settings className="h-3.5 w-3.5" /></button>}</div><p className="mt-1 truncate text-[11px] text-muted-foreground">{currentChannel?.description || currentChannel?.topic}</p></>}</div>
+           <div className="min-w-0">{activeDm ? <><p className="font-mono text-[10px] uppercase tracking-[.15em] text-secondary-foreground">direct message</p><h1 className="truncate font-mono text-base font-bold">@{activeDm.username}</h1></> : <><div className="flex items-center gap-2"><Hash className="h-4 w-4 text-primary" /><h1 className="truncate font-mono text-base font-bold">{currentChannel?.name ?? (channels.length > 0 ? "select a channel" : "no channels")}</h1>{currentChannel && <span className="rounded bg-chart-4/10 px-1.5 py-0.5 font-mono text-[9px] uppercase text-chart-4">{currentChannel.isPrivate ? "private" : "public"}</span>}{["owner", "moderator"].includes(actorRole ?? "") && <button onClick={editTopic} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit channel topic" aria-label="Edit channel topic"><Settings className="h-3.5 w-3.5" /></button>}</div><p className="mt-1 truncate text-[11px] text-muted-foreground">{currentChannel?.description || currentChannel?.topic}</p></>}</div>
            <div className="flex items-center gap-1.5">
             <form onSubmit={searchHistory} className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 sm:flex"><Search className="h-3.5 w-3.5 text-muted-foreground" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="search history" className="h-8 w-28 bg-transparent font-mono text-[10px] outline-none" /></form>
              {!activeDm && joinRequests.length > 0 && <button onClick={() => setShowRequests(true)} className="rounded-md border border-primary/40 px-2 py-1.5 font-mono text-[10px] text-primary hover:bg-primary/10">{joinRequests.length} request{joinRequests.length === 1 ? "" : "s"}</button>}
@@ -435,10 +558,10 @@ function ChatApp() {
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-              {room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{room.messages.map((message) => <div key={message.id} className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}><Avatar user={message.sender} size="sm" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-baseline gap-2"><span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span><span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>{message.sender?.id === profile.id && message.kind !== "deleted" && <button onClick={() => deleteMessage(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}</div><p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>{message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}{message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => { const reaction = message.reactions?.find((item) => item.emoji === emoji); return <button key={emoji} onClick={() => toggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>; })}</div>}</div></div>)}</div>}
+              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{room.messages.map((message) => <div key={message.id} className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}><Avatar user={message.sender} size="sm" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-baseline gap-2"><span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span><span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>{message.sender?.id === profile.id && message.kind !== "deleted" && <button onClick={() => deleteMessage(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}</div><p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>{message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}{message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => { const reaction = message.reactions?.find((item) => item.emoji === emoji); return <button key={emoji} onClick={() => toggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>; })}</div>}</div></div>)}</div>}
               {Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>
-             <div className="border-t border-border bg-card/70 px-3 pb-4 pt-3 sm:px-6"><form onSubmit={sendMessage} className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary"><input ref={fileInputRef} type="file" accept="image/*,text/*,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void sendAttachment(file); }} /><button type="button" onClick={() => fileInputRef.current?.click()} disabled={!currentChannelId || Boolean(activeDm) || uploading} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-40" aria-label="Share a file"><Paperclip className="h-4 w-4" /></button><textarea value={draft} onChange={(event) => sendTyping(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} maxLength={500} placeholder={activeDm ? `message @${activeDm.username}` : `message ${currentChannel?.name ?? "#lobby"}`} className="max-h-28 min-h-[28px] flex-1 resize-none bg-transparent px-2 py-1 font-mono text-xs outline-none placeholder:text-muted-foreground/60" /><button type="submit" disabled={!draft.trim() || uploading} className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground disabled:opacity-40"><MessageCircle className="h-4 w-4" /></button></form><div className="mt-2 flex justify-between px-1 font-mono text-[9px] text-muted-foreground"><span><b>enter</b> send · <b>shift + enter</b> new line · <b>paperclip</b> share</span><span className={connection === "live" ? "text-chart-4" : "text-primary"}>● {uploading ? "uploading" : connection}</span></div></div>
+             <div className="border-t border-border bg-card/70 px-3 pb-4 pt-3 sm:px-6"><form onSubmit={sendMessage} className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary"><input ref={fileInputRef} type="file" accept="image/*,text/*,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void sendAttachment(file); }} /><button type="button" onClick={() => fileInputRef.current?.click()} disabled={!currentChannelId || Boolean(activeDm) || uploading} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-40" aria-label="Share a file"><Paperclip className="h-4 w-4" /></button><textarea disabled={!activeDm && !currentChannelId} value={draft} onChange={(event) => sendTyping(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} maxLength={500} placeholder={activeDm ? `message @${activeDm.username}` : currentChannel?.name ? `message ${currentChannel.name}` : "Select a channel to message"} className="max-h-28 min-h-[28px] flex-1 resize-none bg-transparent px-2 py-1 font-mono text-xs outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed" /><button type="submit" disabled={!draft.trim() || uploading || (!activeDm && !currentChannelId)} className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground disabled:opacity-40"><MessageCircle className="h-4 w-4" /></button></form><div className="mt-2 flex justify-between px-1 font-mono text-[9px] text-muted-foreground"><span><b>enter</b> send · <b>shift + enter</b> new line · <b>paperclip</b> share</span><span className={connection === "live" ? "text-chart-4" : "text-primary"}>● {uploading ? "uploading" : connection}</span></div></div>
           </section>
           {showMembers && !activeDm && <aside className="hidden w-[285px] shrink-0 border-l border-border bg-card/70 lg:flex lg:flex-col"><div className="border-b border-border px-4 py-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">in the room</p><p className="mt-1 font-mono text-lg font-bold">{room.members.length} <span className="text-xs font-normal text-muted-foreground">people</span></p></div><div className="flex-1 overflow-y-auto p-3">{room.members.map((member) => <div key={member.id} className="group rounded-md px-2 py-2 hover:bg-muted"><div className="flex items-center gap-2"><Avatar user={member} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName} {member.status === "online" ? <span className="ml-1 text-chart-4">●</span> : <span className="ml-1 text-muted-foreground">○</span>}</p><p className="font-mono text-[9px] text-muted-foreground">@{member.username} · {member.role}</p></div><button onClick={() => setActiveDm(member)} className="rounded p-1 text-muted-foreground hover:text-primary" aria-label={`Message ${member.displayName}`}><MessageCircle className="h-3.5 w-3.5" /></button></div>{member.id !== profile.id && <div className="mt-2 hidden gap-1 group-hover:flex"><button onClick={() => blockUser(member)} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-accent hover:text-accent">block</button>{actorRole === "owner" && member.role === "member" && <button onClick={() => moderate(member, "moderator")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-secondary-foreground hover:text-secondary-foreground">mod</button>}{["owner", "moderator"].includes(actorRole ?? "") && member.role === "member" && <><button onClick={() => moderate(member, "mute")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">mute</button><button onClick={() => moderate(member, "kick")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">kick</button><button onClick={() => moderate(member, "ban")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-destructive hover:text-destructive">ban</button></>}</div>}</div>)}</div></aside>}
         </div>
