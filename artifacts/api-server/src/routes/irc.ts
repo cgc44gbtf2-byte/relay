@@ -20,6 +20,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
+import { channelNotFoundError } from "./errors";
 
 const router: IRouter = Router();
 
@@ -155,7 +156,7 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const ban = await db.query.channelBansTable.findFirst({
@@ -177,7 +178,7 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, userId)));
@@ -188,7 +189,7 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
 router.get("/channels/:channelId/members", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const rows = await db
@@ -215,7 +216,7 @@ router.get("/channels/:channelId/members", requireAuth, async (req: Authenticate
 router.get("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -230,7 +231,7 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const member = await membership(channel.id, userId);
@@ -257,7 +258,7 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const member = await membership(channel.id, userId);
@@ -274,9 +275,13 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
 router.post("/channels/:channelId/moderation", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
   const targetUserId = typeof req.body.targetUserId === "string" ? req.body.targetUserId : "";
   const action = req.body.action;
-  if (!channel || !targetUserId || !["mute", "kick", "ban", "moderator"].includes(action)) {
+  if (!targetUserId || !["mute", "kick", "ban", "moderator"].includes(action)) {
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }

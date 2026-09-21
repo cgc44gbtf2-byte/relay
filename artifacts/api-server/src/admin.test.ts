@@ -516,6 +516,47 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
+  test("uses the same missing-channel response across public and admin routes", async () => {
+    const unknownChannelId = -1;
+    const requests: Array<Promise<ApiResponse>> = [
+      apiRequest(memberSession, `/channels/${unknownChannelId}/join`, { method: "POST" }),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/leave`, { method: "POST" }),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/members`),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/messages`),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Unknown channel message" }),
+      }),
+      apiRequest(memberSession, `/channels/${unknownChannelId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Unknown channel topic" }),
+      }),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/moderation`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "mute", targetUserId: memberSession.userId }),
+      }),
+      apiRequest(adminSession, `/admin/channels/${unknownChannelId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Unknown channel topic" }),
+      }),
+      apiRequest(adminSession, `/admin/channels/${unknownChannelId}/messages`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    ];
+
+    const responses = await Promise.all(requests);
+    for (const response of responses) {
+      assert.equal(response.status, 404, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Channel not found." });
+    }
+  });
+
   test("a non-admin cannot read the overview or update roles", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);

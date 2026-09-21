@@ -9,6 +9,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
+import { channelNotFoundError } from "./errors";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -286,7 +287,7 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     .where(eq(channelsTable.id, channelId))
     .returning();
   if (!updated) {
-    res.status(404).json({ error: "Channel not found." });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   await writeAudit(actor.clerkId, "updated_channel_topic", String(channelId), updated.name, topic || "Cleared channel topic");
@@ -314,7 +315,7 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
     .from(channelsTable)
     .where(eq(channelsTable.id, channelId));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found." });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   const deleted = await db
