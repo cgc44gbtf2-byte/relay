@@ -82,11 +82,14 @@ for this job. Cleanup failures POST only the redacted affected-user summary to
 the configured webhook; the webhook URL and Clerk credentials are never
 included in the message.
 
-The authenticated `api-tests` job and the scheduled cleanup use the same
-GitHub Actions concurrency group for the shared test Clerk environment.
-`cancel-in-progress: false` makes a run wait rather than canceling an active
-run, so cleanup cannot delete test identities while authenticated API tests are
-using them.
+The authenticated `api-tests` job and the scheduled cleanup use separate
+GitHub Actions concurrency groups because they use separate disposable Clerk
+test environments. The API tests use `CLERK_SECRET_KEY` and
+`CLERK_PUBLISHABLE_KEY`; cleanup uses the dedicated `CLERK_TEST_SECRET_KEY`
+and `CLERK_TEST_PUBLISHABLE_KEY` secrets. This lets scheduled maintenance run
+without waiting behind an API regression run. Each group keeps
+`cancel-in-progress: false` so repeated runs wait rather than canceling an
+active run within the same Clerk environment.
 
 ## Stack
 

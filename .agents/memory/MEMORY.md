@@ -6,3 +6,4 @@
 - [App Storage sidecar](storage-sidecar.md) — use the local signer with normalized object paths when root-level SDK installation is blocked.
 - [Workspace type declarations](workspace-type-declarations.md) — rebuild referenced library declarations after shared schema changes before checking dependent packages.
 - [Business workspace isolation](business-workspace-isolation.md) — legacy IRC endpoints default global; every business-facing read and interaction needs an explicit workspace check.
+- [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.
