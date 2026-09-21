@@ -1576,4 +1576,164 @@ describe("admin access controls", () => {
       ]);
     }
   });
+
+  test("keeps room and direct-message attachments behind message access", async () => {
+    const ownerSession = await createTestSession("attachment_owner");
+    const memberSession = await createTestSession("attachment_member");
+    const outsiderSession = await createTestSession("attachment_outsider");
+    const channelIds: number[] = [];
+    let directMessageId: string | undefined;
+    const originalFetch = globalThis.fetch;
+    const previousPrivateObjectDir = process.env.PRIVATE_OBJECT_DIR;
+
+    try {
+      for (const session of [ownerSession, memberSession, outsiderSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `files-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Private attachment access",
+          isPrivate: true,
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [channelId, memberSession.userId],
+      );
+
+      const roomMessage = await apiRequest(
+        memberSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Room file" }),
+        },
+      );
+      assert.equal(roomMessage.status, 201, JSON.stringify(roomMessage));
+      assert.ok(roomMessage.body && typeof roomMessage.body === "object");
+      const roomMessageId = (roomMessage.body as { id?: unknown }).id;
+      assert.equal(typeof roomMessageId, "string");
+
+      const roomAttachment = await apiRequest(
+        memberSession,
+        `/messages/${roomMessageId}/attachments`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            objectPath: "/objects/uploads/private-room-file",
+            fileName: "room.txt",
+            contentType: "text/plain",
+            fileSize: 12,
+          }),
+        },
+      );
+      assert.equal(roomAttachment.status, 201, JSON.stringify(roomAttachment));
+      assert.ok(roomAttachment.body && typeof roomAttachment.body === "object");
+      const roomAttachmentId = (roomAttachment.body as { id?: unknown }).id;
+      assert.equal(typeof roomAttachmentId, "number");
+
+      process.env.PRIVATE_OBJECT_DIR = "private";
+      globalThis.fetch = async (input, init) => {
+        const requestUrl = typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+        if (requestUrl === "http://127.0.0.1:1106/object-storage/signed-object-url") {
+          return new Response(JSON.stringify({ signed_url: "https://storage.example/signed" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+
+      const memberRoomDownload = await apiRequest(
+        memberSession,
+        `/attachments/${roomAttachmentId}`,
+        { redirect: "manual" },
+      );
+      assert.equal(memberRoomDownload.status, 302, JSON.stringify(memberRoomDownload));
+
+      const outsiderRoomDownload = await apiRequest(
+        outsiderSession,
+        `/attachments/${roomAttachmentId}`,
+      );
+      assert.equal(outsiderRoomDownload.status, 404, JSON.stringify(outsiderRoomDownload));
+      assert.deepEqual(outsiderRoomDownload.body, { error: "Attachment not found." });
+
+      const threadKey = [ownerSession.userId, memberSession.userId].sort().join(":");
+      directMessageId = randomUUID();
+      await pool.query(
+        `INSERT INTO irc_messages (id, sender_id, recipient_id, thread_key, body)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          directMessageId,
+          ownerSession.userId,
+          memberSession.userId,
+          threadKey,
+          "Direct file",
+        ],
+      );
+
+      const directAttachment = await apiRequest(
+        ownerSession,
+        `/messages/${directMessageId}/attachments`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            objectPath: "/objects/uploads/direct-file",
+            fileName: "direct.txt",
+            contentType: "text/plain",
+            fileSize: 14,
+          }),
+        },
+      );
+      assert.equal(directAttachment.status, 201, JSON.stringify(directAttachment));
+      assert.ok(directAttachment.body && typeof directAttachment.body === "object");
+      const directAttachmentId = (directAttachment.body as { id?: unknown }).id;
+      assert.equal(typeof directAttachmentId, "number");
+
+      const directRecipientDownload = await apiRequest(
+        memberSession,
+        `/attachments/${directAttachmentId}`,
+        { redirect: "manual" },
+      );
+      assert.equal(directRecipientDownload.status, 302, JSON.stringify(directRecipientDownload));
+
+      const outsiderDirectDownload = await apiRequest(
+        outsiderSession,
+        `/attachments/${directAttachmentId}`,
+      );
+      assert.equal(outsiderDirectDownload.status, 404, JSON.stringify(outsiderDirectDownload));
+      assert.deepEqual(outsiderDirectDownload.body, { error: "Attachment not found." });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousPrivateObjectDir === undefined) delete process.env.PRIVATE_OBJECT_DIR;
+      else process.env.PRIVATE_OBJECT_DIR = previousPrivateObjectDir;
+      if (directMessageId) {
+        await pool.query("DELETE FROM irc_messages WHERE id = $1", [directMessageId]);
+      }
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        memberSession.userId,
+        outsiderSession.userId,
+      ]);
+    }
+  });
 });
