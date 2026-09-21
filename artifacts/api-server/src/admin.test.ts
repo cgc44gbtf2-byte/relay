@@ -5,9 +5,10 @@ import { after, before, describe, test } from "node:test";
 import { clerkClient } from "@clerk/express";
 import { pool } from "@workspace/db";
 import app from "./app";
-
-const TEST_USERNAME_PREFIX = "admin_access_test_";
-const TEST_EMAIL_DOMAIN = "example.com";
+import {
+  TEST_EMAIL_DOMAIN,
+  TEST_USERNAME_PREFIX,
+} from "./admin-test-identity";
 
 type TestSession = {
   userId: string;

@@ -34,6 +34,23 @@ the run, pushes the schema with `push:test`, runs the API tests, and drops the d
 even when setup or tests fail. The command never reads `DATABASE_URL` or a pre-existing
 `TEST_DATABASE_URL`, so development and preview databases cannot be used by accident.
 
+If an authenticated admin test run is interrupted, its Clerk users may survive after
+the test process stops. The test users are identified by the exact
+`admin_access_test_` username plus matching `@example.com` email convention. With
+the test Clerk keys and disposable test database configured, inspect leftovers with:
+
+```sh
+NODE_ENV=test TEST_DATABASE_URL='postgres://.../web_irc_test' \
+  CLERK_SECRET_KEY='sk_test_...' CLERK_PUBLISHABLE_KEY='pk_test_...' \
+  pnpm --filter @workspace/api-server run cleanup:test-users
+```
+
+The command is dry-run by default. Add `-- --apply` only after confirming the
+listed users belong to an interrupted regression run. It refuses non-test Clerk
+keys, requires `NODE_ENV=test`, revokes active sessions, deletes only matching
+test users, and removes their rows from the disposable database. Run it only when
+no admin regression test is still using the test Clerk environment.
+
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
