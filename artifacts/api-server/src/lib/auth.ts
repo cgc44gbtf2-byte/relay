@@ -5,15 +5,22 @@ import { db, usersTable, type User } from "@workspace/db";
 
 export type AuthenticatedRequest = Request & { userId?: string; user?: User };
 
-export function requireAuth(
+export async function requireAuth(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const auth = getAuth(req);
   const userId = auth.userId;
   if (!userId) {
     res.status(401).json({ error: "Sign in to continue" });
+    return;
+  }
+  const profile = await db.query.usersTable.findFirst({
+    where: eq(usersTable.clerkId, userId),
+  });
+  if (profile?.accountStatus === "suspended") {
+    res.status(403).json({ error: "This account is suspended." });
     return;
   }
   req.userId = userId;

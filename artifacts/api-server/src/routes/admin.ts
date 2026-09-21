@@ -145,6 +145,8 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     });
     return;
   }
+  const activityActor = typeof req.query.activityActor === "string" ? req.query.activityActor.trim() : "";
+  const activityAction = typeof req.query.activityAction === "string" ? req.query.activityAction.trim() : "";
   const [[userCount], [channelCount], [messageCount], [onlineCount]] = await Promise.all([
     db.select({ value: count() }).from(usersTable),
     db.select({ value: count() }).from(channelsTable),
@@ -164,6 +166,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       status: usersTable.status,
       createdAt: usersTable.createdAt,
       lastSeenAt: usersTable.lastSeenAt,
+      accountStatus: usersTable.accountStatus,
     })
     .from(usersTable)
     .orderBy(desc(usersTable.createdAt))
@@ -206,6 +209,10 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       actor: adminAuditLogsTable.actorDisplayName,
     })
     .from(adminAuditLogsTable)
+    .where(and(
+      activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
+      activityAction ? eq(adminAuditLogsTable.action, activityAction) : undefined,
+    ))
     .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
     .limit(activityLimit + 1)
     .offset(activityOffset);
@@ -252,6 +259,14 @@ router.post("/admin/announcements", requireAuth, async (req: AuthenticatedReques
       body,
     })));
   }
+  await writeAudit(
+    actor.clerkId,
+    actor.displayName,
+    "published_server_announcement",
+    String(announcement.id),
+    "server announcement",
+    body,
+  );
   res.status(201).json(announcement);
 });
 
@@ -266,6 +281,7 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     ? requestedRole as typeof PRIMARY_ROLES[number]
     : "";
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
+  const accountStatus = req.query.accountStatus === "active" || req.query.accountStatus === "suspended" ? req.query.accountStatus : "";
   const filters = [
     query
       ? or(
@@ -275,6 +291,7 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
       : undefined,
     role ? eq(usersTable.role, role) : undefined,
     status ? eq(usersTable.status, status) : undefined,
+      accountStatus ? eq(usersTable.accountStatus, accountStatus) : undefined,
   ].filter((filter): filter is NonNullable<typeof filter> => Boolean(filter));
   const users = await db
     .select({
@@ -285,12 +302,53 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
       status: usersTable.status,
       createdAt: usersTable.createdAt,
       lastSeenAt: usersTable.lastSeenAt,
+      accountStatus: usersTable.accountStatus,
     })
     .from(usersTable)
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(desc(usersTable.createdAt))
     .limit(100);
   res.json(users);
+});
+
+router.patch("/admin/users/:userId/account-status", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const targetUserId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
+  const accountStatus = req.body?.accountStatus;
+  if (accountStatus !== "active" && accountStatus !== "suspended") {
+    res.status(400).json({ error: "Account status must be active or suspended." });
+    return;
+  }
+  if (targetUserId === actor.clerkId) {
+    res.status(400).json({ error: "You cannot suspend your own account." });
+    return;
+  }
+  const [updated] = await db
+    .update(usersTable)
+    .set({ accountStatus, status: accountStatus === "suspended" ? "offline" : undefined })
+    .where(eq(usersTable.clerkId, targetUserId))
+    .returning({
+      id: usersTable.clerkId,
+      accountStatus: usersTable.accountStatus,
+      status: usersTable.status,
+    });
+  if (!updated) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  await writeAudit(
+    actor.clerkId,
+    actor.displayName,
+    accountStatus === "suspended" ? "suspended_user" : "restored_user",
+    updated.id,
+    targetUserId,
+    `Account status changed to ${accountStatus}`,
+  );
+  res.json(updated);
 });
 
 router.patch("/admin/users/:userId/role", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -375,6 +433,19 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
   res.json(assignments);
 });
 
+router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const [communities, categories, channels] = await Promise.all([
+    db.select({ id: communitiesTable.id, name: communitiesTable.name }).from(communitiesTable).orderBy(asc(communitiesTable.name)),
+    db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId }).from(categoriesTable).orderBy(asc(categoriesTable.name)),
+    db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).orderBy(asc(channelsTable.name)),
+  ]);
+  res.json({ communities, categories, channels });
+});
+
 router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const actor = await adminProfile(req);
   if (!actor) {
@@ -404,6 +475,31 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     res.status(400).json({ error: "The selected scope is required." });
     return;
   }
+  if (scopeType === "platform" && (communityId !== null || categoryId !== null || channelId !== null)) {
+    res.status(400).json({ error: "Platform assignments cannot include a community, category, or channel." });
+    return;
+  }
+  if (scopeType === "community") {
+    const [community] = await db.select({ id: communitiesTable.id }).from(communitiesTable).where(eq(communitiesTable.id, communityId!));
+    if (!community) {
+      res.status(404).json({ error: "Community not found." });
+      return;
+    }
+  }
+  if (scopeType === "category") {
+    const [category] = await db.select({ id: categoriesTable.id, communityId: categoriesTable.communityId }).from(categoriesTable).where(eq(categoriesTable.id, categoryId!));
+    if (!category || (communityId !== null && category.communityId !== communityId)) {
+      res.status(400).json({ error: "Category does not match the selected community." });
+      return;
+    }
+  }
+  if (scopeType === "channel") {
+    const [channel] = await db.select({ id: channelsTable.id, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).where(eq(channelsTable.id, channelId!));
+    if (!channel || (communityId !== null && channel.communityId !== communityId) || (categoryId !== null && channel.categoryId !== categoryId)) {
+      res.status(400).json({ error: "Channel does not match the selected scope." });
+      return;
+    }
+  }
   const target = await db.query.usersTable.findFirst({ where: eq(usersTable.clerkId, userId) });
   if (!target) {
     res.status(404).json({ error: "User not found." });
@@ -418,7 +514,7 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     channelId,
     grantedBy: actor.clerkId,
   }).returning();
-  await writeAudit(actor.clerkId, "granted_scoped_role", userId, target.displayName, `${role} on ${scopeType}`);
+  await writeAudit(actor.clerkId, actor.displayName, "granted_scoped_role", userId, target.displayName, `${role} on ${scopeType}`);
   res.status(201).json(assignment);
 });
 
@@ -438,7 +534,7 @@ router.delete("/admin/role-assignments/:assignmentId", requireAuth, async (req: 
     res.status(404).json({ error: "Role assignment not found." });
     return;
   }
-  await writeAudit(actor.clerkId, "revoked_scoped_role", removed.userId, removed.role, `Assignment ${assignmentId}`);
+  await writeAudit(actor.clerkId, actor.displayName, "revoked_scoped_role", removed.userId, removed.role, `Assignment ${assignmentId}`);
   res.json({ ok: true });
 });
 
