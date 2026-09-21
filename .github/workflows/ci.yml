@@ -16,6 +16,88 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Validate Clerk job concurrency
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/ci.yml").read_text()
+          jobs = {}
+          current_job = None
+
+          for line in workflow.splitlines():
+              job_match = re.match(r"^  ([A-Za-z0-9_-]+):$", line)
+              if job_match:
+                  current_job = job_match.group(1)
+                  jobs[current_job] = {
+                      "uses_clerk": False,
+                      "group": None,
+                      "cancel_in_progress": None,
+                  }
+                  continue
+
+              if current_job is None:
+                  continue
+
+              if re.match(r"^      CLERK_[A-Za-z0-9_]+:", line):
+                  jobs[current_job]["uses_clerk"] = True
+              elif re.match(r"^      group:", line):
+                  jobs[current_job]["group"] = line.split(":", 1)[1].strip()
+              elif re.match(r"^      cancel-in-progress:", line):
+                  jobs[current_job]["cancel_in_progress"] = line.split(":", 1)[1].strip()
+
+          clerk_jobs = {
+              name: settings
+              for name, settings in jobs.items()
+              if settings["uses_clerk"]
+          }
+
+          if len(clerk_jobs) < 2:
+              raise SystemExit(
+                  "Expected at least two Clerk-using jobs, found "
+                  f"{len(clerk_jobs)}: {', '.join(clerk_jobs) or 'none'}"
+              )
+
+          missing_concurrency = [
+              name
+              for name, settings in clerk_jobs.items()
+              if settings["group"] is None
+              or settings["cancel_in_progress"] is None
+          ]
+          if missing_concurrency:
+              raise SystemExit(
+                  "Clerk-using jobs must define concurrency settings: "
+                  + ", ".join(missing_concurrency)
+              )
+
+          groups = {settings["group"] for settings in clerk_jobs.values()}
+          if len(groups) != 1:
+              details = ", ".join(
+                  f"{name}={settings['group']}"
+                  for name, settings in clerk_jobs.items()
+              )
+              raise SystemExit(
+                  "Clerk-using jobs must share one concurrency group: " + details
+              )
+
+          cancellation_enabled = [
+              name
+              for name, settings in clerk_jobs.items()
+              if settings["cancel_in_progress"].lower() != "false"
+          ]
+          if cancellation_enabled:
+              raise SystemExit(
+                  "Clerk-using jobs must keep cancel-in-progress disabled: "
+                  + ", ".join(cancellation_enabled)
+              )
+
+          print(
+              "Validated Clerk concurrency for: "
+              + ", ".join(clerk_jobs)
+          )
+          PY
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
