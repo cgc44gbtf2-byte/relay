@@ -11,6 +11,7 @@
     "push": "drizzle-kit push --config ./drizzle.config.ts",
     "push:test": "NODE_ENV=test drizzle-kit push --config ./drizzle.config.ts",
     "push-force": "drizzle-kit push --force --config ./drizzle.config.ts",
+    "test": "node --test ./scripts/run-ci-tests.test.mjs",
     "test:ci": "node ./scripts/run-ci-tests.mjs"
   },
   "dependencies": {
