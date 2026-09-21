@@ -253,6 +253,40 @@ function expectNoWebSocketEvent(
   });
 }
 
+function collectWebSocketEvents(
+  socket: WebSocket,
+  predicate: (event: Record<string, unknown>) => boolean,
+  durationMs = 1_000,
+): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve) => {
+    const events: Record<string, unknown>[] = [];
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(events);
+    }, durationMs);
+    const onMessage = (raw: Buffer): void => {
+      try {
+        const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (predicate(event)) events.push(event);
+      } catch {
+        // Ignore malformed frames.
+      }
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve(events);
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.once("close", onClose);
+  });
+}
+
 function closeWebSocket(socket: WebSocket): void {
   if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
     socket.terminate();
@@ -1435,6 +1469,184 @@ describe("admin access controls", () => {
         ownerSession.userId,
         requesterSession.userId,
         reviewerSession.userId,
+      ]);
+    }
+  });
+
+  test("keeps private room typing, reactions, and deletion synchronized across members", async () => {
+    const ownerSession = await createTestSession("realtime_owner");
+    const memberSession = await createTestSession("realtime_member");
+    const outsiderSession = await createTestSession("realtime_outsider");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      for (const session of [ownerSession, memberSession, outsiderSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `realtime-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Realtime synchronization",
+          isPrivate: true,
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [channelId, memberSession.userId],
+      );
+
+      const ownerSocket = await openWebSocket(ownerSession);
+      const memberSocket = await openWebSocket(memberSession);
+      const outsiderSocket = await openWebSocket(outsiderSession);
+      sockets.push(ownerSocket, memberSocket, outsiderSocket);
+      for (const socket of sockets) {
+        socket.send(JSON.stringify({ type: "subscribe", channelId }));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const ownerTyping = collectWebSocketEvents(
+        ownerSocket,
+        (event) =>
+          event.type === "typing" &&
+          event.channelId === channelId &&
+          event.userId === memberSession.userId,
+      );
+      const memberTyping = collectWebSocketEvents(
+        memberSocket,
+        (event) =>
+          event.type === "typing" &&
+          event.channelId === channelId &&
+          event.userId === ownerSession.userId,
+      );
+      const outsiderTyping = collectWebSocketEvents(
+        outsiderSocket,
+        (event) => event.type === "typing" && event.channelId === channelId,
+      );
+      memberSocket.send(JSON.stringify({ type: "typing", channelId, active: true }));
+      ownerSocket.send(JSON.stringify({ type: "typing", channelId, active: true }));
+      assert.equal((await ownerTyping).length, 1);
+      assert.equal((await memberTyping).length, 1);
+      assert.equal((await outsiderTyping).length, 0);
+
+      const ownerMessageEvents = collectWebSocketEvents(
+        ownerSocket,
+        (event) =>
+          event.type === "message" &&
+          (event.message as { id?: unknown } | undefined)?.id !== undefined,
+      );
+      const memberMessageEvents = collectWebSocketEvents(
+        memberSocket,
+        (event) =>
+          event.type === "message" &&
+          (event.message as { id?: unknown } | undefined)?.id !== undefined,
+      );
+      const outsiderMessageEvents = collectWebSocketEvents(
+        outsiderSocket,
+        (event) => event.type === "message" && event.message !== undefined,
+      );
+      const createdMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "One live history entry" }),
+        },
+      );
+      assert.equal(createdMessage.status, 201, JSON.stringify(createdMessage));
+      assert.ok(createdMessage.body && typeof createdMessage.body === "object");
+      const messageId = (createdMessage.body as { id?: unknown }).id;
+      assert.equal(typeof messageId, "string");
+      const [ownerMessageEventList, memberMessageEventList, outsiderMessageEventList] =
+        await Promise.all([ownerMessageEvents, memberMessageEvents, outsiderMessageEvents]);
+      assert.equal(ownerMessageEventList.length, 1);
+      assert.equal(memberMessageEventList.length, 1);
+      assert.equal(outsiderMessageEventList.length, 0);
+
+      const history = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.ok(history.body && typeof history.body === "object");
+      const historyMessages = (history.body as { messages?: unknown }).messages;
+      assert.ok(Array.isArray(historyMessages));
+      assert.equal(
+        historyMessages.filter(
+          (message) => (message as { id?: unknown }).id === messageId,
+        ).length,
+        1,
+      );
+
+      const ownerReactionEvents = collectWebSocketEvents(
+        ownerSocket,
+        (event) => event.type === "reaction" && event.messageId === messageId,
+      );
+      const memberReactionEvents = collectWebSocketEvents(
+        memberSocket,
+        (event) => event.type === "reaction" && event.messageId === messageId,
+      );
+      const outsiderReactionEvents = collectWebSocketEvents(
+        outsiderSocket,
+        (event) => event.type === "reaction" && event.messageId === messageId,
+      );
+      const reaction = await apiRequest(
+        memberSession,
+        `/messages/${messageId}/reactions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ emoji: "👍" }),
+        },
+      );
+      assert.equal(reaction.status, 200, JSON.stringify(reaction));
+      const [ownerReactionEventList, memberReactionEventList, outsiderReactionEventList] =
+        await Promise.all([ownerReactionEvents, memberReactionEvents, outsiderReactionEvents]);
+      assert.equal(ownerReactionEventList.length, 1);
+      assert.equal(memberReactionEventList.length, 1);
+      assert.equal(outsiderReactionEventList.length, 0);
+
+      const ownerDeletionEvents = collectWebSocketEvents(
+        ownerSocket,
+        (event) => event.type === "message_deleted" && event.messageId === messageId,
+      );
+      const memberDeletionEvents = collectWebSocketEvents(
+        memberSocket,
+        (event) => event.type === "message_deleted" && event.messageId === messageId,
+      );
+      const outsiderDeletionEvents = collectWebSocketEvents(
+        outsiderSocket,
+        (event) => event.type === "message_deleted" && event.messageId === messageId,
+      );
+      const deletion = await apiRequest(
+        ownerSession,
+        `/messages/${messageId}`,
+        { method: "DELETE" },
+      );
+      assert.equal(deletion.status, 200, JSON.stringify(deletion));
+      const [ownerDeletionEventList, memberDeletionEventList, outsiderDeletionEventList] =
+        await Promise.all([ownerDeletionEvents, memberDeletionEvents, outsiderDeletionEvents]);
+      assert.equal(ownerDeletionEventList.length, 1);
+      assert.equal(memberDeletionEventList.length, 1);
+      assert.equal(outsiderDeletionEventList.length, 0);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        memberSession.userId,
+        outsiderSession.userId,
       ]);
     }
   });
