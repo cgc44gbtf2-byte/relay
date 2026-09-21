@@ -11,6 +11,8 @@ const DRY_RUN_FLAG = "--dry-run";
 const TEST_SECRET_KEY_PREFIX = "sk_test_";
 const TEST_PUBLISHABLE_KEY_PREFIX = "pk_test_";
 const CLEANUP_EVENT = "admin_test_user_cleanup";
+const CLEANUP_WEBHOOK_MAX_ATTEMPTS = 3;
+const CLEANUP_WEBHOOK_RETRY_DELAY_MS = 250;
 
 type CleanupUser = {
   id: string;
@@ -308,6 +310,16 @@ function escapeGitHubActionsCommandData(message: string): string {
     .replaceAll("\n", "%0A");
 }
 
+function isTransientWebhookStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function waitForWebhookRetry(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, CLEANUP_WEBHOOK_RETRY_DELAY_MS);
+  });
+}
+
 async function notifyCleanupFailure(
   notification: CleanupFailureNotification,
 ): Promise<void> {
@@ -327,19 +339,61 @@ async function notifyCleanupFailure(
     return;
   }
 
-  try {
-    const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: message }),
-    });
-    if (!response.ok) {
+  let lastFailure = "network error";
+  let attemptsMade = 0;
+  for (let attempt = 1; attempt <= CLEANUP_WEBHOOK_MAX_ATTEMPTS; attempt += 1) {
+    attemptsMade = attempt;
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: message }),
+      });
+      if (response.ok) {
+        return;
+      }
+
+      lastFailure = `HTTP ${response.status}`;
+      const shouldRetry =
+        isTransientWebhookStatus(response.status) &&
+        attempt < CLEANUP_WEBHOOK_MAX_ATTEMPTS;
+      if (!shouldRetry) {
+        break;
+      }
+
       console.error(
-        `Failed to deliver cleanup failure notification (HTTP ${response.status}).`,
+        `Cleanup failure notification delivery failed (${lastFailure}); retrying attempt ${
+          attempt + 1
+        }/${CLEANUP_WEBHOOK_MAX_ATTEMPTS} in ${
+          CLEANUP_WEBHOOK_RETRY_DELAY_MS
+        }ms.`,
+      );
+    } catch {
+      const shouldRetry = attempt < CLEANUP_WEBHOOK_MAX_ATTEMPTS;
+      if (!shouldRetry) {
+        break;
+      }
+
+      console.error(
+        `Cleanup failure notification delivery failed (network error); retrying attempt ${
+          attempt + 1
+        }/${CLEANUP_WEBHOOK_MAX_ATTEMPTS} in ${
+          CLEANUP_WEBHOOK_RETRY_DELAY_MS
+        }ms.`,
       );
     }
-  } catch {
-    console.error("Failed to deliver cleanup failure notification.");
+
+    await waitForWebhookRetry();
+  }
+
+  if (lastFailure === "network error") {
+    console.error(
+      `Failed to deliver cleanup failure notification after ${attemptsMade} attempts.`,
+    );
+  } else {
+    console.error(
+      `Failed to deliver cleanup failure notification after ${attemptsMade} attempts (${lastFailure}).`,
+    );
   }
 }
 

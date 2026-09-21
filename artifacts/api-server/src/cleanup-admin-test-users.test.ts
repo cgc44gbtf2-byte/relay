@@ -495,6 +495,176 @@ describe("admin test-user cleanup safeguards", () => {
     }
   });
 
+  test("retries transient webhook failures and stops after delivery succeeds", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-retry`;
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let attempt = 0;
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/retry";
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      attempt += 1;
+      if (attempt === 1) {
+        return new Response(null, { status: 503 });
+      }
+      if (attempt === 2) {
+        return new Response(null, { status: 429 });
+      }
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-retry-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 3);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("does not retry permanent webhook failures or expose webhook details", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-permanent`;
+    const clerkSecret = "sk_test_permanent_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const originalConsoleError = console.error;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const errors: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/permanent";
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      return new Response(null, { status: 400 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-permanent-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 1);
+      const output = errors.join("\n");
+      assert.match(output, /HTTP 400/);
+      assert.doesNotMatch(output, /notifications\.example\.invalid/);
+      assert.doesNotMatch(output, /sk_test_permanent_webhook_secret/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("stops retrying after the bounded transient attempt limit", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-exhausted`;
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/exhausted";
+    globalThis.fetch = async (url) => {
+      requests.push(String(url));
+      return new Response(null, { status: 503 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-exhausted-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.deepEqual(requests, [
+        "https://notifications.example.invalid/exhausted",
+        "https://notifications.example.invalid/exhausted",
+        "https://notifications.example.invalid/exhausted",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
   test("escapes affected identities in GitHub Actions annotations", async () => {
     const firstUsername = `${TEST_USERNAME_PREFIX}first`;
     const unsafeId = "second-user%\r\n::warning title=Injected::message";
