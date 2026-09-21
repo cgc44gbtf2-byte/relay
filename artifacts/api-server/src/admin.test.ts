@@ -366,6 +366,77 @@ describe("admin access controls", () => {
     });
   });
 
+  test("rolls back a role change when recording admin activity fails", async () => {
+    const triggerName = `fail_role_audit_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+    const beforeAudit = await pool.query(
+      "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+    );
+
+    try {
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [memberSession.userId],
+      );
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action IN ('demoted_user', 'promoted_user') THEN
+             RAISE EXCEPTION 'forced role audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+
+      const response = await apiRequest(
+        memberSession,
+        `/admin/users/${adminSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member" }),
+        },
+      );
+      assert.equal(response.status, 500);
+
+      const afterUsers = await pool.query(
+        "SELECT clerk_id, role FROM irc_users WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+      const afterAudit = await pool.query(
+        "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+      );
+      assert.deepEqual(afterUsers.rows, [
+        { clerk_id: adminSession.userId, role: "admin" },
+      ]);
+      assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+         DROP FUNCTION IF EXISTS "${functionName}"();`,
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
+        [memberSession.userId],
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+    }
+  });
+
   test("returns 404 without changing roles or audit activity for an unknown user", async () => {
     const unknownUserId = `unknown_${randomUUID()}`;
     const beforeUsers = await pool.query(

@@ -234,11 +234,27 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
   }
   let updated;
   try {
-    [updated] = await db
-      .update(usersTable)
-      .set({ role })
-      .where(eq(usersTable.clerkId, targetUserId))
-      .returning({ id: usersTable.clerkId, role: usersTable.role });
+    updated = await db.transaction(async (tx) => {
+      const [changedUser] = await tx
+        .update(usersTable)
+        .set({ role })
+        .where(eq(usersTable.clerkId, targetUserId))
+        .returning({ id: usersTable.clerkId, role: usersTable.role });
+
+      if (!changedUser) {
+        return undefined;
+      }
+
+      await tx.insert(adminAuditLogsTable).values({
+        actorId: actor.clerkId,
+        action: role === "admin" ? "promoted_user" : "demoted_user",
+        targetId: changedUser.id,
+        targetLabel: targetUserId,
+        details: `Role changed to ${role}`,
+      });
+
+      return changedUser;
+    });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     res.status(409).json({ error: "Only one admin account is allowed." });
@@ -248,13 +264,6 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
     res.status(404).json({ error: "User not found." });
     return;
   }
-  await writeAudit(
-    actor.clerkId,
-    role === "admin" ? "promoted_user" : "demoted_user",
-    updated.id,
-    targetUserId,
-    `Role changed to ${role}`,
-  );
   res.json(updated);
 });
 
