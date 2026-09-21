@@ -2381,6 +2381,16 @@ describe("admin access controls", () => {
       assert.equal(ownerReactionEventList.length, 1);
       assert.equal(memberReactionEventList.length, 1);
       assert.equal(outsiderReactionEventList.length, 0);
+      const reactedHistory = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(reactedHistory.status, 200, JSON.stringify(reactedHistory));
+      assert.ok(reactedHistory.body && typeof reactedHistory.body === "object");
+      const reactedMessage = ((reactedHistory.body as { messages?: unknown }).messages as Array<{ id?: unknown; reactions?: unknown }> | undefined)
+        ?.find((message) => message.id === messageId);
+      assert.ok(reactedMessage);
+      assert.deepEqual(reactedMessage.reactions, [{ emoji: "👍", count: 1, reacted: false }]);
 
       const ownerDeletionEvents = collectWebSocketEvents(
         ownerSocket,
@@ -2405,6 +2415,18 @@ describe("admin access controls", () => {
       assert.equal(ownerDeletionEventList.length, 1);
       assert.equal(memberDeletionEventList.length, 1);
       assert.equal(outsiderDeletionEventList.length, 0);
+      const deletedHistory = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(deletedHistory.status, 200, JSON.stringify(deletedHistory));
+      assert.ok(deletedHistory.body && typeof deletedHistory.body === "object");
+      const deletedMessage = ((deletedHistory.body as { messages?: unknown }).messages as Array<{ id?: unknown; body?: unknown; kind?: unknown; deletedAt?: unknown }> | undefined)
+        ?.find((message) => message.id === messageId);
+      assert.ok(deletedMessage);
+      assert.equal(deletedMessage.body, "[message deleted]");
+      assert.equal(deletedMessage.kind, "deleted");
+      assert.ok(deletedMessage.deletedAt);
     } finally {
       for (const socket of sockets) closeWebSocket(socket);
       await removeTestChannels(channelIds, [

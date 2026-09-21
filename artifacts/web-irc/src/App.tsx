@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Bell,
@@ -186,7 +186,31 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
   const onMissingChannelRef = useRef(onMissingChannel);
+  const messageRefreshRef = useRef(0);
   onMissingChannelRef.current = onMissingChannel;
+
+  const refreshMessages = useCallback(async (showLoading = false) => {
+    const refreshId = ++messageRefreshRef.current;
+    if (showLoading) setLoading(true);
+    if (!channelId && !activeDm) {
+      setMessages([]);
+      if (showLoading) setLoading(false);
+      return;
+    }
+    const promise = activeDm
+      ? api<{ messages: ChatMessage[] }>(`/dm/${activeDm.id}/messages`)
+      : api<{ messages: ChatMessage[] }>(`/channels/${channelId}/messages`);
+    try {
+      const data = await promise;
+      if (refreshId === messageRefreshRef.current) setMessages(data.messages);
+    } catch (error) {
+      if (refreshId !== messageRefreshRef.current) return;
+      setMessages([]);
+      if (channelId && !activeDm && isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
+    } finally {
+      if (showLoading && refreshId === messageRefreshRef.current) setLoading(false);
+    }
+  }, [activeDm, channelId]);
 
   useEffect(() => {
     setMessages([]);
@@ -195,20 +219,8 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       setLoading(false);
       return;
     }
+    void refreshMessages(true);
     let cancelled = false;
-    setLoading(true);
-    const promise = activeDm
-      ? api<{ messages: ChatMessage[] }>(`/dm/${activeDm.id}/messages`)
-      : api<{ messages: ChatMessage[] }>(`/channels/${channelId}/messages`);
-    promise.then((data) => {
-      if (!cancelled) setMessages(data.messages);
-    }).catch((error) => {
-      if (cancelled) return;
-      setMessages([]);
-      if (channelId && !activeDm && isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
     if (channelId && !activeDm) {
       api<Member[]>(`/channels/${channelId}/members`).then((data) => {
         if (!cancelled) setMembers(data);
@@ -219,8 +231,8 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       });
     }
     return () => { cancelled = true; };
-  }, [channelId, activeDm]);
-  return { messages, setMessages, members, setMembers, loading };
+  }, [channelId, activeDm, refreshMessages]);
+  return { messages, setMessages, members, setMembers, loading, refreshMessages };
 }
 
 function ChatApp() {
@@ -345,6 +357,7 @@ function ChatApp() {
         if (currentChannelId && !activeDm) {
           connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
         }
+        void room.refreshMessages();
       };
       connectedSocket.onclose = () => setConnection("offline");
       connectedSocket.onerror = () => setConnection("offline");
@@ -396,7 +409,7 @@ function ChatApp() {
         setWs((current) => current === socket ? null : current);
       }
     };
-  }, [currentChannelId, activeDm]);
+  }, [currentChannelId, activeDm, room.refreshMessages]);
 
   useEffect(() => {
     setTypingUsers({});

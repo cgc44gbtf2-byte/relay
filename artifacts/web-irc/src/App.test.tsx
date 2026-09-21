@@ -35,6 +35,7 @@ type Channel = {
 
 let latestWebSocket: {
   onopen: (() => void) | null;
+  onclose: (() => void) | null;
   onmessage: ((event: MessageEvent) => void) | null;
   send: ReturnType<typeof vi.fn>;
 } | null = null;
@@ -62,8 +63,8 @@ const room = (id: number, name: string, ownerId = "owner-1"): Channel => ({
   memberCount: 2,
 });
 
-const message = (channelId: number, body: string) => ({
-  id: `message-${channelId}`,
+const message = (channelId: number, body: string, id = `message-${channelId}`) => ({
+  id,
   channelId,
   body,
   kind: "message",
@@ -97,14 +98,17 @@ function installApi({
   missingRequest,
   fallbackChannels,
   owner = false,
+  reconnectedMessages,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
   owner?: boolean;
+  reconnectedMessages?: unknown[];
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = room(2, "#fallback-room");
   let channelListCalls = 0;
+  let historyCalls = 0;
 
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -119,7 +123,10 @@ function installApi({
       return jsonResponse(channelListCalls === 1 ? [deleted, fallback] : fallbackChannels);
     }
     if (url === "/api/channels/1/messages" && method === "GET") {
-      return missingRequest === "history" ? channelNotFound() : jsonResponse({ messages: [message(1, "stale history")] });
+      historyCalls += 1;
+      return missingRequest === "history"
+        ? channelNotFound()
+        : jsonResponse({ messages: historyCalls > 1 && reconnectedMessages ? reconnectedMessages : [message(1, "stale history")] });
     }
     if (url === "/api/channels/1/members" && method === "GET") {
       return missingRequest === "members" ? channelNotFound() : jsonResponse(members(owner ? "owner" : "member"));
@@ -268,5 +275,36 @@ describe("deleted room recovery", () => {
       data: JSON.stringify({ type: "typing", channelId: 1, userId: "user-2", active: true }),
     } as MessageEvent);
     expect(screen.queryByText(/Orion typing/)).toBeNull();
+  });
+
+  it("refreshes the active room after reconnecting and replaces stale messages", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      reconnectedMessages: [
+        {
+          ...message(1, "reaction survived", "reaction-message"),
+          reactions: [{ emoji: "👍", count: 2, reacted: true }],
+        },
+        {
+          ...message(1, "[message deleted]", "deleted-message"),
+          kind: "deleted",
+          deletedAt: "2026-09-21T12:01:00.000Z",
+        },
+      ],
+    });
+
+    await waitFor(() => expect(screen.getByText("stale history")).toBeTruthy());
+    latestWebSocket?.onclose?.();
+    latestWebSocket?.onopen?.();
+
+    await waitFor(() => {
+      expect(screen.getByText("reaction survived")).toBeTruthy();
+      expect(screen.getByText("[message deleted]")).toBeTruthy();
+    });
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.getAllByText("reaction survived")).toHaveLength(1);
+    expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
   });
 });
