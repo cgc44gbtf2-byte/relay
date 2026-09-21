@@ -5,10 +5,7 @@ import { after, before, describe, test } from "node:test";
 import { clerkClient } from "@clerk/express";
 import { pool } from "@workspace/db";
 import app from "./app";
-import {
-  TEST_EMAIL_DOMAIN,
-  TEST_USERNAME_PREFIX,
-} from "./admin-test-identity";
+import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 
 type TestSession = {
   userId: string;
@@ -106,10 +103,9 @@ async function unauthenticatedApiRequest(
 
 async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
-  await pool.query(
-    "DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])",
-    [userIds],
-  );
+  await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [
+    userIds,
+  ]);
 }
 
 before(async () => {
@@ -264,6 +260,49 @@ describe("admin access controls", () => {
     assert.notEqual(winnerIndex, -1);
     adminSession = winnerIndex === 0 ? firstSession : secondSession;
     memberSession = winnerIndex === 0 ? secondSession : firstSession;
+  });
+
+  test("records a successful role change in admin activity", async () => {
+    const roleUpdate = await apiRequest(
+      adminSession,
+      `/admin/users/${memberSession.userId}/role`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "member" }),
+      },
+    );
+    assert.equal(roleUpdate.status, 200);
+    assert.deepEqual(roleUpdate.body, {
+      id: memberSession.userId,
+      role: "member",
+    });
+
+    const overview = await apiRequest(adminSession, "/admin/overview");
+    assert.equal(overview.status, 200);
+    assert.ok(overview.body && typeof overview.body === "object");
+    const activity = (overview.body as { activity?: unknown }).activity;
+    assert.ok(Array.isArray(activity));
+    const matchingActivity = activity.find(
+      (
+        entry,
+      ): entry is {
+        action: string;
+        targetId: string | null;
+        details: string | null;
+      } =>
+        typeof entry === "object" &&
+        entry !== null &&
+        "action" in entry &&
+        "targetId" in entry &&
+        (entry as { action?: unknown }).action === "demoted_user" &&
+        (entry as { targetId?: unknown }).targetId === memberSession.userId,
+    );
+    assert.deepEqual(matchingActivity, {
+      action: "demoted_user",
+      targetId: memberSession.userId,
+      details: "Role changed to member",
+    });
   });
 
   test("a non-admin cannot read the overview or update roles", async () => {
