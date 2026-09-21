@@ -1231,6 +1231,88 @@ describe("admin access controls", () => {
     assert.equal(result.rows[0]?.role, "member");
   });
 
+  test("keeps simultaneous promotions to one administrator", async () => {
+    const [firstTarget, secondTarget] = await Promise.all([
+      createTestSession("concurrent_promotion_first"),
+      createTestSession("concurrent_promotion_second"),
+    ]);
+
+    try {
+      await Promise.all([
+        apiRequest(firstTarget, "/me"),
+        apiRequest(secondTarget, "/me"),
+      ]);
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = ANY($1::text[])",
+        [[firstTarget.userId, secondTarget.userId]],
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+
+      const responses = await Promise.all(
+        [firstTarget, secondTarget].map((target) =>
+          apiRequest(
+            adminSession,
+            `/admin/users/${target.userId}/role`,
+            {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ role: "admin" }),
+            },
+          ),
+        ),
+      );
+
+      assert.deepEqual(
+        responses.map(({ status }) => status).sort((a, b) => a - b),
+        [200, 409],
+        JSON.stringify(responses),
+      );
+      assert.deepEqual(
+        responses.filter(({ status }) => status === 409).map(({ body }) => body),
+        [{ error: "Only one admin account is allowed." }],
+      );
+
+      for (const [index, response] of responses.entries()) {
+        const targetRole = await pool.query(
+          "SELECT role FROM irc_users WHERE clerk_id = $1",
+          [[firstTarget, secondTarget][index].userId],
+        );
+        assert.equal(
+          targetRole.rows[0]?.role,
+          response.status === 200 ? "admin" : "member",
+        );
+      }
+
+      const roles = await pool.query(
+        "SELECT clerk_id, role FROM irc_users WHERE clerk_id = ANY($1::text[]) ORDER BY clerk_id",
+        [[firstTarget.userId, secondTarget.userId]],
+      );
+      assert.equal(
+        roles.rows.filter(({ role }) => role === "admin").length,
+        1,
+        JSON.stringify(roles.rows),
+      );
+      assert.equal(
+        roles.rows.filter(({ role }) => role === "member").length,
+        1,
+        JSON.stringify(roles.rows),
+      );
+
+      const adminCount = await pool.query(
+        "SELECT count(*)::int AS count FROM irc_users WHERE role = 'admin'",
+      );
+      assert.equal(adminCount.rows[0]?.count, 1);
+    } finally {
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = ANY($1::text[])",
+        [[firstTarget.userId, secondTarget.userId]],
+      );
+    }
+  });
+
   test("rejects unsupported role payloads without changing an account's role", async () => {
     for (const payload of [{ role: "owner" }, { role: "ADMIN" }, {}]) {
       const response = await apiRequest(
