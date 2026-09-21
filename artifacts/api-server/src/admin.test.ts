@@ -782,9 +782,11 @@ describe("admin access controls", () => {
     assert.deepEqual(afterRows, beforeRows);
   });
 
-  test("keeps another IRC session active when one session is revoked and refreshed", async () => {
+  test("keeps another IRC session active for profile updates when one session is revoked", async () => {
     const revokedSession = await createTestSession("revoked_scoped");
     const activeSession = await createSessionForUser(revokedSession.userId);
+    const initialProfile = await apiRequest(revokedSession, "/me");
+    assert.equal(initialProfile.status, 200, JSON.stringify(initialProfile));
     const [revokedToken, activeToken] = await Promise.all([
       clerkClient.sessions.getToken(revokedSession.sessionId),
       clerkClient.sessions.getToken(activeSession.sessionId),
@@ -792,21 +794,38 @@ describe("admin access controls", () => {
 
     await clerkClient.sessions.revokeSession(revokedSession.sessionId);
 
-    const revokedResponse = await apiRequestWithToken(revokedToken.jwt, "/me");
+    const revokedResponse = await apiRequestWithToken(revokedToken.jwt, "/me", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Revoked session update" }),
+    });
     assert.equal(revokedResponse.status, 401, JSON.stringify(revokedResponse));
     assert.deepEqual(revokedResponse.body, { error: "Sign in to continue" });
 
-    const activeResponse = await apiRequestWithToken(activeToken.jwt, "/channels");
+    const activeDisplayName = `Active sibling ${randomUUID().slice(0, 8)}`;
+    const activeResponse = await apiRequestWithToken(activeToken.jwt, "/me", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: activeDisplayName }),
+    });
     assert.equal(activeResponse.status, 200, JSON.stringify(activeResponse));
-    assert.ok(Array.isArray(activeResponse.body));
+    assert.ok(activeResponse.body && typeof activeResponse.body === "object");
+    assert.equal(
+      (activeResponse.body as { displayName?: unknown }).displayName,
+      activeDisplayName,
+    );
 
     const refreshedActiveToken = await clerkClient.sessions.getToken(activeSession.sessionId);
     const refreshedActiveResponse = await apiRequestWithToken(
       refreshedActiveToken.jwt,
-      "/channels",
+      "/me",
     );
     assert.equal(refreshedActiveResponse.status, 200, JSON.stringify(refreshedActiveResponse));
-    assert.ok(Array.isArray(refreshedActiveResponse.body));
+    assert.ok(refreshedActiveResponse.body && typeof refreshedActiveResponse.body === "object");
+    assert.equal(
+      (refreshedActiveResponse.body as { displayName?: unknown }).displayName,
+      activeDisplayName,
+    );
   });
 
   test("rejects malformed and expired Clerk credentials across IRC routes without changing user records", async () => {
