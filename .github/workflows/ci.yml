@@ -164,7 +164,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run API tests
+      - name: Run disposable database and authenticated API tests
         run: pnpm --filter @workspace/api-server run test:ci
 
   database-runner-compatibility:
