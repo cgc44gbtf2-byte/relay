@@ -10,6 +10,25 @@ permissions:
   contents: read
 
 jobs:
+  validate-scheduled-cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate scheduled cleanup environment
+        run: pnpm --filter @workspace/api-server run validate:cleanup-workflow
+
   api-tests:
     if: github.event_name != 'schedule'
     concurrency:
@@ -57,6 +76,7 @@ jobs:
 
   cleanup-abandoned-test-users:
     if: github.event_name == 'schedule'
+    needs: validate-scheduled-cleanup
     concurrency:
       group: ${{ github.repository }}-clerk-test-environment
       cancel-in-progress: false
