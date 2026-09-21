@@ -1,0 +1,870 @@
+UPGRADE MY EXISTING IRC INTO A BUSINESS AI AUTOMATION PLATFORM.
+
+IMPORTANT:
+
+The existing IRC is NOT being converted into a public social/community platform.
+
+The IRC is the CORE BUSINESS COMMUNICATION AND OPERATIONS SYSTEM for an AI automation company.
+
+Keep the existing IRC architecture and real-time messaging functionality, but repurpose and expand it so businesses can use private IRC-style workspaces to manage leads, customers, employees, contractors, AI agents, jobs, appointments, and business communications.
+
+DO NOT rebuild the application from scratch.
+
+FIRST inspect the existing codebase and understand:
+
+* Current frontend
+* Current backend
+* Database
+* Authentication
+* Users
+* Channels
+* Messaging
+* Real-time communication
+* Permissions
+* API routes
+* Existing settings
+
+Extend the current system wherever possible.
+
+==================================================
+CORE BUSINESS MODEL
+
+The platform should work like this:
+
+PLATFORM
+↓
+BUSINESS
+↓
+BUSINESS WORKSPACE
+↓
+IRC CHANNELS
+↓
+AI + EMPLOYEES + CONTRACTORS
+
+Each business receives its own private workspace.
+
+Example:
+
+ABC HVAC
+
+#general
+#leads
+#appointments
+#customers
+#jobs
+#technicians
+#management
+
+The business uses these channels to communicate and operate the company.
+
+==================================================
+BUSINESS TENANCY
+
+This must be a multi-business SaaS.
+
+Each business is completely isolated.
+
+Business A must NEVER be able to access:
+
+* Business B users
+* Business B channels
+* Business B messages
+* Business B customers
+* Business B leads
+* Business B jobs
+* Business B AI agents
+* Business B settings
+
+Enforce this on the backend.
+
+Never rely on frontend restrictions.
+
+==================================================
+PERMISSION LEVELS
+
+Use these permissions:
+
+PLATFORM ADMIN / DEVELOPER
+
+Highest level.
+
+Can:
+
+* Manage every business
+* Manage every user
+* Access every workspace
+* Create/delete businesses
+* Create/delete channels
+* Modify permissions
+* Manage platform settings
+* Manage subscriptions
+* Manage AI agents
+* View system logs
+* Suspend businesses
+* Suspend users
+* Push application updates
+
+BUSINESS OWNER
+
+Full control over their own business.
+
+Can:
+
+* Manage business settings
+* Manage users
+* Create channels
+* Delete channels
+* Manage employees
+* Manage contractors
+* Configure AI
+* Manage leads
+* Manage customers
+* Manage jobs
+* Manage appointments
+* View analytics
+* Manage integrations
+* Manage billing
+
+BUSINESS MANAGER
+
+Can:
+
+* Manage leads
+* Manage customers
+* Manage jobs
+* Manage appointments
+* Manage channels
+* Manage employees where permitted
+* Manage AI conversations
+* View reports
+
+EMPLOYEE
+
+Can:
+
+* Access assigned channels
+* Communicate
+* View assigned leads
+* View assigned customers
+* View assigned jobs
+* Update assigned jobs
+* Manage assigned appointments
+
+CONTRACTOR
+
+Can:
+
+* Access contractor channels
+* View assigned jobs
+* Update job status
+* Communicate with business staff
+* Upload job updates/photos where supported
+
+==================================================
+IRC CHANNEL SYSTEM
+
+Keep the IRC channel architecture.
+
+Extend channels with business functionality.
+
+Channel types:
+
+GENERAL
+LEADS
+CUSTOMERS
+APPOINTMENTS
+JOBS
+STAFF
+CONTRACTORS
+MANAGEMENT
+AI
+ANNOUNCEMENTS
+
+A channel can optionally be connected to a business object.
+
+For example:
+
+#lead-1024
+
+can represent a specific lead.
+
+#job-2048
+
+can represent a specific job.
+
+#customer-john-smith
+
+can represent a customer.
+
+==================================================
+AI AGENTS
+
+Add AI agents directly into the IRC.
+
+AI agents should appear as users/bots inside the business workspace.
+
+Example:
+
+AI Receptionist
+AI Sales Agent
+AI Scheduler
+AI Support Agent
+AI Manager
+
+AI agents can participate in authorized channels.
+
+Example:
+
+#leads
+
+AI Receptionist:
+New lead received.
+
+Customer:
+I need my AC repaired.
+
+AI Receptionist:
+What is the service address?
+
+Customer:
+123 Main Street.
+
+AI Receptionist:
+Thank you. I have the information needed to create your service request.
+
+The AI should then create/update the lead in the business system.
+
+==================================================
+AI CHANNEL PERMISSIONS
+
+Businesses must be able to control which channels each AI agent can access.
+
+Example:
+
+AI Receptionist:
+
+Allowed:
+#leads
+#customers
+#appointments
+
+Denied:
+#payroll
+#management
+#internal
+
+AI agents must obey channel permissions.
+
+==================================================
+AI KNOWLEDGE
+
+Each business can configure its AI.
+
+Allow business owners to enter:
+
+* Business name
+* Services
+* Service areas
+* Business hours
+* FAQs
+* Policies
+* Pricing information
+* Appointment rules
+* Emergency procedures
+* Contact information
+* Custom instructions
+
+AI must only use approved business information.
+
+AI must not invent:
+
+* Prices
+* Availability
+* Policies
+* Credentials
+* Warranties
+* Services
+* Appointments
+
+If information is unknown:
+
+Ask for clarification or escalate to a human.
+
+==================================================
+LEADS
+
+Create a lead-management system connected to IRC.
+
+Lead fields:
+
+* Name
+* Phone
+* Email
+* Address
+* Service
+* Source
+* Status
+* Priority
+* Assigned employee
+* AI summary
+* Notes
+* Created date
+* Last contact
+* Next follow-up
+
+Statuses:
+
+NEW
+CONTACTED
+QUALIFIED
+APPOINTMENT_BOOKED
+FOLLOW_UP
+WON
+LOST
+
+Every lead should be accessible from the IRC.
+
+==================================================
+CUSTOMERS
+
+Create customer records.
+
+Fields:
+
+* Name
+* Phone
+* Email
+* Address
+* Service history
+* Leads
+* Jobs
+* Appointments
+* Conversations
+* Notes
+
+Allow a customer record to link directly to an IRC conversation/channel.
+
+==================================================
+JOBS
+
+Create a job-management system.
+
+Job fields:
+
+* Job number
+* Customer
+* Service
+* Location
+* Assigned employee
+* Assigned contractor
+* Status
+* Scheduled date
+* Notes
+* Attachments
+* Created date
+* Completed date
+
+Statuses:
+
+NEW
+SCHEDULED
+ASSIGNED
+IN_PROGRESS
+COMPLETED
+CANCELLED
+
+Create an optional IRC channel for important jobs.
+
+Example:
+
+#job-2048
+
+The customer, employee, contractor, and AI can communicate according to permissions.
+
+==================================================
+APPOINTMENTS
+
+Create appointment management.
+
+Fields:
+
+* Customer
+* Service
+* Employee
+* Contractor
+* Date
+* Time
+* Status
+* Notes
+
+Statuses:
+
+REQUESTED
+CONFIRMED
+COMPLETED
+CANCELLED
+NO_SHOW
+
+Prepare integration support for Google Calendar.
+
+==================================================
+AUTOMATION
+
+Create predefined business automations.
+
+NEW LEAD:
+
+Lead arrives
+↓
+AI creates lead
+↓
+AI contacts customer
+↓
+AI qualifies customer
+↓
+Lead appears in #leads
+↓
+Employee notified
+↓
+Appointment offered
+
+APPOINTMENT:
+
+Appointment booked
+↓
+IRC notification
+↓
+Calendar entry
+↓
+Customer reminder
+↓
+Employee reminder
+
+JOB:
+
+Job created
+↓
+Contractor assigned
+↓
+Contractor notified
+↓
+Job channel created
+↓
+Job status updated
+↓
+Customer notified
+↓
+Job completed
+
+FOLLOW-UP:
+
+Lead does not respond
+↓
+AI follow-up
+↓
+Second follow-up
+↓
+Employee notification
+
+==================================================
+EXTERNAL CUSTOMER COMMUNICATION
+
+The IRC should be the internal command center.
+
+Customers do NOT need to become full IRC users unless the business chooses to allow it.
+
+Prepare integrations for:
+
+* SMS
+* Email
+* Website chat
+* Voice/AI phone
+* Contact forms
+
+Messages from external channels should appear inside the appropriate IRC channel.
+
+Example:
+
+Customer sends SMS.
+
+The system creates:
+
+#lead-1042
+
+AI:
+Incoming SMS from John Smith.
+
+Customer:
+Can someone come tomorrow?
+
+AI:
+I can check availability for you.
+
+This lets employees monitor external communications from the IRC.
+
+==================================================
+WEBSITE CHAT
+
+Create an embeddable customer chat widget.
+
+Each business receives its own widget.
+
+Customer opens business website.
+
+Customer starts chat.
+
+The conversation appears in the business IRC.
+
+Example:
+
+#lead-1042
+
+AI:
+Hello. How can we help?
+
+Customer:
+I need an AC repair.
+
+AI:
+I can help with that.
+
+The AI qualifies the lead and creates the appropriate records.
+
+==================================================
+DASHBOARD
+
+Create a business dashboard in addition to the IRC.
+
+Show:
+
+* New leads
+* Open leads
+* Appointments today
+* Active jobs
+* Jobs awaiting assignment
+* Jobs in progress
+* Follow-ups
+* AI conversations
+* Unread business notifications
+
+The IRC remains the primary communication interface.
+
+==================================================
+IRC + BUSINESS OBJECTS
+
+Add contextual side panels to channels.
+
+When viewing:
+
+#lead-1042
+
+Show:
+
+Lead information
+Customer information
+AI summary
+Appointment
+Assigned employee
+Status
+Actions
+
+When viewing:
+
+#job-2048
+
+Show:
+
+Customer
+Service
+Location
+Assigned contractor
+Schedule
+Job status
+Notes
+Attachments
+
+Messages remain in the IRC.
+
+Business data appears alongside them.
+
+==================================================
+SEARCH
+
+Create global business search.
+
+Search:
+
+* Customers
+* Leads
+* Jobs
+* Appointments
+* Messages
+* Employees
+* Contractors
+
+Search must respect business permissions.
+
+==================================================
+NOTIFICATIONS
+
+Support:
+
+* New lead
+* New customer
+* Appointment booked
+* Appointment changed
+* Job assigned
+* Job status changed
+* Customer response
+* AI escalation
+* Contractor response
+* Mention
+* Direct message
+
+==================================================
+AUDIT LOG
+
+Track:
+
+* Login
+* Logout
+* User creation
+* User deletion
+* Permission changes
+* Channel creation
+* Channel deletion
+* AI configuration
+* AI actions
+* Lead changes
+* Customer changes
+* Job changes
+* Appointment changes
+* Business settings
+* Platform Admin actions
+
+==================================================
+PLATFORM ADMIN
+
+Create a platform administration interface.
+
+Show:
+
+* Businesses
+* Users
+* Active users
+* AI usage
+* Messages
+* Leads
+* Jobs
+* Appointments
+* Subscriptions
+* System health
+* Audit logs
+
+Platform Admin can manage the entire platform.
+
+==================================================
+BUSINESS ONBOARDING
+
+Create a business onboarding process.
+
+Step 1:
+Business information
+
+Step 2:
+Services
+
+Step 3:
+Service area
+
+Step 4:
+Business hours
+
+Step 5:
+AI configuration
+
+Step 6:
+Users
+
+Step 7:
+Channels
+
+Step 8:
+Integrations
+
+Step 9:
+Finish setup
+
+Automatically create default channels:
+
+#general
+#leads
+#appointments
+#jobs
+#customers
+#management
+
+==================================================
+SAAS ARCHITECTURE
+
+The application should be capable of eventually supporting subscription plans.
+
+Example:
+
+STARTER
+
+* 1 business
+* Limited users
+* Limited AI usage
+* Basic channels
+
+PROFESSIONAL
+
+* More users
+* More AI usage
+* Advanced automation
+* Integrations
+
+BUSINESS
+
+* Multiple locations
+* Advanced AI
+* Advanced automation
+* Analytics
+
+Do not implement billing unless requested.
+
+Prepare the architecture for future Stripe integration.
+
+==================================================
+SECURITY
+
+Implement:
+
+* Secure authentication
+* Server-side authorization
+* Business isolation
+* Channel permissions
+* AI permissions
+* Input validation
+* Rate limiting
+* Secure sessions
+* SQL injection protection
+* XSS protection
+* CSRF protection where appropriate
+
+Never trust permissions sent from the frontend.
+
+==================================================
+UI
+
+The main application should retain the IRC feel.
+
+Desktop:
+
+LEFT:
+Business/channel navigation
+
+CENTER:
+IRC conversation
+
+RIGHT:
+Business object/context panel
+
+Example:
+
+LEFT
+#general
+#leads
+#appointments
+#jobs
+#customers
+
+CENTER
+
+#leads
+
+AI Receptionist:
+New lead received.
+
+John Smith:
+I need an AC repair.
+
+AI:
+What is the service address?
+
+RIGHT
+
+LEAD #1042
+
+John Smith
+AC Repair
+NEW
+
+Phone
+Address
+AI Summary
+Assign
+Schedule
+
+The interface should feel like an IRC but function like a modern business operating system.
+
+==================================================
+IMPORTANT DEVELOPMENT RULE
+
+Do NOT turn this into a generic Discord clone.
+
+Do NOT remove the IRC identity.
+
+Do NOT rebuild the existing application from scratch.
+
+The IRC is the FOUNDATION of the business platform.
+
+The goal is:
+
+IRC + CRM + AI + Jobs + Appointments + Automation
+
+The IRC is where employees, contractors, and AI agents communicate and where business events are surfaced.
+
+Build the system incrementally.
+
+First inspect the existing code.
+
+Then implement:
+
+PHASE 1
+Business/workspace architecture
+
+PHASE 2
+Business permissions
+
+PHASE 3
+Business channels
+
+PHASE 4
+Leads and customers
+
+PHASE 5
+AI agents
+
+PHASE 6
+Appointments
+
+PHASE 7
+Jobs
+
+PHASE 8
+Automations
+
+PHASE 9
+External communication
+
+PHASE 10
+Business dashboard
+
+PHASE 11
+SaaS infrastructure
+
+After every phase, test existing IRC functionality and make sure no existing functionality is broken.
+
+The finished product should be a business communication and automation platform built on top of the existing IRC.
