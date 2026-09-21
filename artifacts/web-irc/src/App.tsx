@@ -250,6 +250,7 @@ function ChatApp() {
   const [newCategoryOpen, setNewCategoryOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [newCategoryDescription, setNewCategoryDescription] = useState("");
+  const [groupedChannels, setGroupedChannels] = useState(false);
   const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
   const [showRequests, setShowRequests] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
@@ -381,6 +382,13 @@ function ChatApp() {
   }, [userSearch]);
 
   const visibleChannels = useMemo(() => channels.filter((channel) => channel.name.includes(filter.toLowerCase())), [channels, filter]);
+  const channelGroups = useMemo(() => categories
+    .map((category) => ({
+      category,
+      channels: visibleChannels.filter((channel) => channel.categoryId === category.id),
+    }))
+    .filter((group) => group.channels.length > 0), [categories, visibleChannels]);
+  const uncategorizedChannels = useMemo(() => visibleChannels.filter((channel) => channel.categoryId === null), [visibleChannels]);
   const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
     const body = draft.trim();
@@ -810,6 +818,10 @@ function CommunityConsole() {
   const [announcement, setAnnouncement] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
   const [newCategoryDescription, setNewCategoryDescription] = useState("");
+  const [newWorkspaceChannelName, setNewWorkspaceChannelName] = useState("");
+  const [newWorkspaceChannelTopic, setNewWorkspaceChannelTopic] = useState("");
+  const [newWorkspaceChannelDescription, setNewWorkspaceChannelDescription] = useState("");
+  const [newWorkspaceChannelCategoryId, setNewWorkspaceChannelCategoryId] = useState("");
 
   const loadCommunities = async () => {
     const [nextPermissions, nextCommunities] = await Promise.all([
@@ -916,6 +928,32 @@ function CommunityConsole() {
       await loadDetail(detail.community.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create category");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const createWorkspaceChannel = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!detail) return;
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/channels`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: newWorkspaceChannelName,
+          topic: newWorkspaceChannelTopic,
+          description: newWorkspaceChannelDescription,
+          categoryId: newWorkspaceChannelCategoryId || null,
+        }),
+      });
+      setNewWorkspaceChannelName("");
+      setNewWorkspaceChannelTopic("");
+      setNewWorkspaceChannelDescription("");
+      setNewWorkspaceChannelCategoryId("");
+      setNotice("Channel created in the selected category.");
+      await loadDetail(detail.community.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create channel");
     } finally {
       setWorking(false);
     }
