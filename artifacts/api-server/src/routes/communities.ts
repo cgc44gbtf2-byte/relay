@@ -53,6 +53,21 @@ async function communityPermission(
   return hasPermission(userId, permission, { communityId });
 }
 
+async function canAccessBusiness(userId: string, communityId: number): Promise<boolean> {
+  const [membership] = await db.select({ userId: communityMembersTable.userId })
+    .from(communityMembersTable)
+    .where(and(
+      eq(communityMembersTable.communityId, communityId),
+      eq(communityMembersTable.userId, userId),
+    ))
+    .limit(1);
+  return Boolean(
+    membership
+      || await hasPermission(userId, "view_business", { communityId })
+      || await hasPermission(userId, "manage_community", { communityId }),
+  );
+}
+
 router.get("/permissions/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   await ensurePermissionCatalog();
   res.json(await permissionsForUser(getUserId(req)));
@@ -69,6 +84,10 @@ router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest
       { key: "moderator", label: "Moderator", scope: "platform or assigned community" },
       { key: "community_admin", label: "Community Admin", scope: "assigned community/category/channel" },
       { key: "member", label: "Member", scope: "own account and participation" },
+      { key: "business_owner", label: "Business Owner", scope: "assigned business" },
+      { key: "business_manager", label: "Business Manager", scope: "assigned business" },
+      { key: "employee", label: "Employee", scope: "assigned channels and work" },
+      { key: "contractor", label: "Contractor", scope: "assigned jobs and channels" },
     ],
     communityPermissions: scopedCommunityPermissions,
   });
@@ -82,11 +101,12 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
   const memberIds = new Set(memberships.map((membership) => membership.communityId));
-  const result = await Promise.all(communities.map(async (community) => ({
-    ...community,
-    joined: memberIds.has(community.id),
-    canManage: await communityPermission(userId, community.id, "manage_community"),
-  })));
+  const result = (await Promise.all(communities.map(async (community) => {
+    const joined = memberIds.has(community.id);
+    const canManage = await communityPermission(userId, community.id, "manage_community");
+    if (!joined && !canManage && !(await hasPermission(userId, "view_business", { communityId: community.id }))) return null;
+    return { ...community, joined, canManage };
+  }))).filter((community): community is NonNullable<typeof community> => community !== null);
   res.json(result);
 });
 
@@ -96,6 +116,12 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
   const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
   const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 500) : "";
   const rules = typeof req.body?.rules === "string" ? req.body.rules.trim().slice(0, 5000) : "";
+  const businessType = typeof req.body?.businessType === "string" ? req.body.businessType.trim().slice(0, 60) : "service_business";
+  const services = typeof req.body?.services === "string" ? req.body.services.trim().slice(0, 2000) : "";
+  const serviceArea = typeof req.body?.serviceArea === "string" ? req.body.serviceArea.trim().slice(0, 500) : "";
+  const businessHours = typeof req.body?.businessHours === "string" ? req.body.businessHours.trim().slice(0, 1000) : "";
+  const contactEmail = typeof req.body?.contactEmail === "string" ? req.body.contactEmail.trim().slice(0, 320) : "";
+  const contactPhone = typeof req.body?.contactPhone === "string" ? req.body.contactPhone.trim().slice(0, 40) : "";
   const slug = slugify(typeof req.body?.slug === "string" ? req.body.slug : name);
   if (!name || !slug) {
     res.status(400).json({ error: "A community name is required." });
@@ -103,7 +129,19 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
   }
   try {
     const community = await db.transaction(async (tx) => {
-      const [created] = await tx.insert(communitiesTable).values({ name, slug, description, rules, ownerId: userId }).returning();
+      const [created] = await tx.insert(communitiesTable).values({
+        name,
+        slug,
+        description,
+        rules,
+        businessType,
+        services,
+        serviceArea,
+        businessHours,
+        contactEmail,
+        contactPhone,
+        ownerId: userId,
+      }).returning();
       await tx.insert(communityMembersTable).values({ communityId: created.id, userId, status: "owner" });
       await tx.insert(userRolesTable).values({
         userId,
@@ -112,10 +150,39 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         communityId: created.id,
         grantedBy: userId,
       });
+      await tx.insert(userRolesTable).values({
+        userId,
+        role: "business_owner",
+        scopeType: "community",
+        communityId: created.id,
+        grantedBy: userId,
+      });
+      const defaultChannels = [
+        ["#general", "The main business conversation."],
+        ["#leads", "New and active lead conversations."],
+        ["#appointments", "Scheduling and appointment coordination."],
+        ["#jobs", "Active work and job updates."],
+        ["#customers", "Customer conversations and service history."],
+        ["#management", "Private business operations and decisions."],
+      ];
+      const createdChannels = await tx.insert(channelsTable).values(defaultChannels.map(([channelName, topic]) => ({
+        name: channelName,
+        topic,
+        ownerId: userId,
+        communityId: created.id,
+        isPrivate: channelName === "#management",
+      }))).returning({ id: channelsTable.id });
+      if (createdChannels.length) {
+        await tx.insert(channelMembersTable).values(createdChannels.map((channel) => ({
+          channelId: channel.id,
+          userId,
+          role: "owner",
+        })));
+      }
       return created;
     });
     await writeCommunityAudit(userId, "created_community", community.id, `Created ${community.name}`);
-    res.status(201).json({ ...community, joined: true, canManage: true });
+    res.status(201).json({ ...community, joined: true, canManage: true, defaultChannelsCreated: 6 });
   } catch {
     res.status(409).json({ error: "That community slug is already in use." });
   }
@@ -127,6 +194,10 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const community = Number.isInteger(communityId) ? await communityForId(communityId) : null;
   if (!community) {
     res.status(404).json({ error: "Community not found." });
+    return;
+  }
+  if (!(await canAccessBusiness(userId, community.id))) {
+    res.status(404).json({ error: "Business workspace not found." });
     return;
   }
   const [members, channels, categories, assignments, announcements] = await Promise.all([
@@ -215,10 +286,23 @@ router.patch("/communities/:communityId", requireAuth, async (req: Authenticated
   const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : undefined;
   const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 500) : undefined;
   const rules = typeof req.body?.rules === "string" ? req.body.rules.trim().slice(0, 5000) : undefined;
+  const businessType = typeof req.body?.businessType === "string" ? req.body.businessType.trim().slice(0, 60) : undefined;
+  const services = typeof req.body?.services === "string" ? req.body.services.trim().slice(0, 2000) : undefined;
+  const serviceArea = typeof req.body?.serviceArea === "string" ? req.body.serviceArea.trim().slice(0, 500) : undefined;
+  const businessHours = typeof req.body?.businessHours === "string" ? req.body.businessHours.trim().slice(0, 1000) : undefined;
+  const contactEmail = typeof req.body?.contactEmail === "string" ? req.body.contactEmail.trim().slice(0, 320) : undefined;
+  const contactPhone = typeof req.body?.contactPhone === "string" ? req.body.contactPhone.trim().slice(0, 40) : undefined;
   const [updated] = await db.update(communitiesTable).set({
     ...(name === undefined ? {} : { name }),
     ...(description === undefined ? {} : { description }),
     ...(rules === undefined ? {} : { rules }),
+    ...(businessType === undefined ? {} : { businessType }),
+    ...(services === undefined ? {} : { services }),
+    ...(serviceArea === undefined ? {} : { serviceArea }),
+    ...(businessHours === undefined ? {} : { businessHours }),
+    ...(contactEmail === undefined ? {} : { contactEmail }),
+    ...(contactPhone === undefined ? {} : { contactPhone }),
+    onboardingStep: 9,
   }).where(eq(communitiesTable.id, communityId)).returning();
   if (!updated) {
     res.status(404).json({ error: "Community not found." });
@@ -270,7 +354,7 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
   const communityId = Number(param(req, "communityId"));
   const memberId = param(req, "memberId");
   const role = req.body?.role;
-  if (!Number.isInteger(communityId) || !["member", "community_admin", "moderator"].includes(role)) {
+  if (!Number.isInteger(communityId) || !["member", "community_admin", "moderator", "business_owner", "business_manager", "employee", "contractor"].includes(role)) {
     res.status(400).json({ error: "Invalid community role assignment." });
     return;
   }

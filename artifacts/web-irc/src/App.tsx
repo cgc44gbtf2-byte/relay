@@ -752,7 +752,23 @@ type PermissionSnapshot = {
   permissions: string[];
   assignments: Array<{ id: number; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }>;
 };
-type CommunitySummary = { id: number; name: string; slug: string; description: string; rules: string; joined: boolean; canManage: boolean };
+type CommunitySummary = {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  rules: string;
+  businessType: string;
+  services: string;
+  serviceArea: string;
+  businessHours: string;
+  contactEmail: string;
+  contactPhone: string;
+  onboardingStep: number;
+  status: string;
+  joined: boolean;
+  canManage: boolean;
+};
 type CommunityDetail = {
   community: CommunitySummary;
   members: Array<{ id: string; username: string; displayName: string; status: string; joinedAt: string }>;
@@ -776,7 +792,21 @@ function CommunityConsole() {
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [newRules, setNewRules] = useState("");
-  const [settings, setSettings] = useState({ name: "", description: "", rules: "" });
+  const [newServices, setNewServices] = useState("");
+  const [newServiceArea, setNewServiceArea] = useState("");
+  const [newBusinessHours, setNewBusinessHours] = useState("");
+  const [newContactEmail, setNewContactEmail] = useState("");
+  const [newContactPhone, setNewContactPhone] = useState("");
+  const [settings, setSettings] = useState({
+    name: "",
+    description: "",
+    rules: "",
+    services: "",
+    serviceArea: "",
+    businessHours: "",
+    contactEmail: "",
+    contactPhone: "",
+  });
   const [announcement, setAnnouncement] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
   const [newCategoryDescription, setNewCategoryDescription] = useState("");
@@ -793,7 +823,16 @@ function CommunityConsole() {
   const loadDetail = async (id: number) => {
     const next = await api<CommunityDetail>(`/communities/${id}`);
     setDetail(next);
-    setSettings({ name: next.community.name, description: next.community.description, rules: next.community.rules });
+    setSettings({
+      name: next.community.name,
+      description: next.community.description,
+      rules: next.community.rules,
+      services: next.community.services,
+      serviceArea: next.community.serviceArea,
+      businessHours: next.community.businessHours,
+      contactEmail: next.community.contactEmail,
+      contactPhone: next.community.contactPhone,
+    });
   };
   useEffect(() => {
     loadCommunities().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load communities")).finally(() => setLoading(false));
@@ -809,12 +848,26 @@ function CommunityConsole() {
     event.preventDefault();
     setWorking(true);
     try {
-      const created = await api<CommunitySummary>("/communities", { method: "POST", body: JSON.stringify({ name: newName, description: newDescription, rules: newRules }) });
+      const created = await api<CommunitySummary>("/communities", { method: "POST", body: JSON.stringify({
+        name: newName,
+        description: newDescription,
+        rules: newRules,
+        services: newServices,
+        serviceArea: newServiceArea,
+        businessHours: newBusinessHours,
+        contactEmail: newContactEmail,
+        contactPhone: newContactPhone,
+      }) });
       setNewCommunityOpen(false);
       setNewName("");
       setNewDescription("");
       setNewRules("");
-      setNotice("Community created. You are its community admin.");
+      setNewServices("");
+      setNewServiceArea("");
+      setNewBusinessHours("");
+      setNewContactEmail("");
+      setNewContactPhone("");
+      setNotice("Business workspace created with default operating channels.");
       await loadCommunities();
       setSelectedId(created.id);
     } catch (reason) {
@@ -829,7 +882,7 @@ function CommunityConsole() {
     setWorking(true);
     try {
       await api(`/communities/${detail.community.id}`, { method: "PATCH", body: JSON.stringify(settings) });
-      setNotice("Community settings saved.");
+       setNotice("Business workspace settings saved.");
       await loadDetail(detail.community.id);
       await loadCommunities();
     } catch (reason) {
@@ -887,32 +940,32 @@ function CommunityConsole() {
     <div className="min-h-[100dvh] bg-background text-foreground">
       <header className="border-b border-border bg-card/90">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-10">
-          <div><p className="font-mono text-sm font-bold">relay / communities</p><p className="font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">scoped community administration</p></div>
+          <div><p className="font-mono text-sm font-bold">relay / business workspaces</p><p className="font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">private business operations</p></div>
           <div className="flex items-center gap-2"><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{permissions?.role === "admin" ? "admin / developer" : permissions?.role?.replace("_", " ")}</span><a href={`${basePath}/chat`} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted">back to chat</a></div>
         </div>
       </header>
       <main className="mx-auto grid max-w-7xl gap-5 px-5 py-8 lg:grid-cols-[250px_1fr] sm:px-10">
         <aside className="rounded-xl border border-border bg-card p-3">
-          <div className="flex items-center justify-between px-2 py-2"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">your communities</p><button onClick={() => setNewCommunityOpen(true)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground">new</button></div>
-          <div className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => setSelectedId(community.id)} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "admin access" : community.joined ? "member" : "public"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No communities yet.</p>}</div>
+          <div className="flex items-center justify-between px-2 py-2"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">your businesses</p><button onClick={() => setNewCommunityOpen(true)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground">new</button></div>
+          <div className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => setSelectedId(community.id)} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "business access" : community.joined ? "team member" : "available"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No business workspaces yet.</p>}</div>
         </aside>
         <section className="min-w-0">
           {error && <div className="mb-4 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}<button onClick={() => setError("")} className="ml-auto"><X className="h-3.5 w-3.5" /></button></div>}
           {notice && <div className="mb-4 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto"><X className="h-3.5 w-3.5" /></button></div>}
-          {!detail ? <div className="rounded-xl border border-border bg-card p-8"><Users className="h-6 w-6 text-primary" /><h1 className="mt-5 font-mono text-2xl font-bold">Choose a community.</h1><p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">Community admins can manage only the communities, categories, and channels assigned to them. Platform settings stay with Admin / Developer accounts.</p></div> : <div className="space-y-5">
-            <div className="rounded-xl border border-border bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">community</p><h1 className="mt-2 font-mono text-2xl font-bold">{detail.community.name}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{detail.community.description || "No community description yet."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{detail.canManage ? "manage access" : "read access"}</span></div></div>
+          {!detail ? <div className="rounded-xl border border-border bg-card p-8"><Users className="h-6 w-6 text-primary" /><h1 className="mt-5 font-mono text-2xl font-bold">Choose a business.</h1><p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">Business owners and managers operate only inside assigned private workspaces. Platform settings stay with Admin / Developer accounts.</p></div> : <div className="space-y-5">
+            <div className="rounded-xl border border-border bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">business workspace</p><h1 className="mt-2 font-mono text-2xl font-bold">{detail.community.name}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{detail.community.description || "No business description yet."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{detail.canManage ? "manage access" : "read access"}</span></div></div>
             {detail.canManage && <div className="grid gap-5 xl:grid-cols-2">
-              <form onSubmit={saveSettings} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">community settings</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Only assignments matching this community can change these values.</p><div className="mt-4 space-y-3"><input value={settings.name} onChange={(event) => setSettings({ ...settings, name: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="name" /><input value={settings.description} onChange={(event) => setSettings({ ...settings, description: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="description" /><textarea value={settings.rules} onChange={(event) => setSettings({ ...settings, rules: event.target.value })} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="community rules" /></div><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save settings</button></form>
-              <form onSubmit={sendAnnouncement} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">announcement</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Send a visible notification to current community members.</p><textarea required value={announcement} onChange={(event) => setAnnouncement(event.target.value)} className="mt-4 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="Write a short announcement" /><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">send announcement</button></form>
+              <form onSubmit={saveSettings} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">business settings</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Only assignments matching this workspace can change these values.</p><div className="mt-4 grid gap-3 sm:grid-cols-2"><input value={settings.name} onChange={(event) => setSettings({ ...settings, name: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="business name" /><input value={settings.contactEmail} onChange={(event) => setSettings({ ...settings, contactEmail: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="contact email" /><input value={settings.contactPhone} onChange={(event) => setSettings({ ...settings, contactPhone: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="contact phone" /><input value={settings.serviceArea} onChange={(event) => setSettings({ ...settings, serviceArea: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="service area" /><input value={settings.services} onChange={(event) => setSettings({ ...settings, services: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="services offered" /><input value={settings.businessHours} onChange={(event) => setSettings({ ...settings, businessHours: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="business hours" /><input value={settings.description} onChange={(event) => setSettings({ ...settings, description: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="description" /><textarea value={settings.rules} onChange={(event) => setSettings({ ...settings, rules: event.target.value })} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs sm:col-span-2" placeholder="policies and operating rules" /></div><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save business settings</button></form>
+              <form onSubmit={sendAnnouncement} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">team announcement</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Send a visible notification to current business members.</p><textarea required value={announcement} onChange={(event) => setAnnouncement(event.target.value)} className="mt-4 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="Write a short announcement" /><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">send announcement</button></form>
             </div>}
             <div className="grid gap-5 xl:grid-cols-2">
-              <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} community members</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replace("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="community_admin">community admin</option><option value="moderator">moderator</option></select>}</div>; })}</div></section>
+              <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="business_manager">business manager</option><option value="employee">employee</option><option value="contractor">contractor</option><option value="business_owner">business owner</option><option value="community_admin">legacy community admin</option><option value="moderator">moderator</option></select>}</div>; })}</div></section>
                <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Scoped rooms in this community</p></div><div className="border-b border-border p-5"><div className="space-y-2">{detail.categories.map((category) => <div key={category.id} className="flex items-center justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{detail.channels.filter((channel) => channel.categoryId === category.id).length} rooms</span></div>)}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet.</p>}</div>{detail.canManage && <form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form>}</div><div className="divide-y divide-border">{detail.channels.map((channel) => <div key={channel.id} className="px-5 py-3"><p className="font-mono text-xs text-secondary-foreground">{channel.name}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{channel.topic || "No topic set"}</p></div>)}{detail.channels.length === 0 && <EmptyAdminState label="No channels in this community yet." />}</div></section>
             </div>
           </div>}
         </section>
       </main>
-      {newCommunityOpen && <Overlay title="Create a community" onClose={() => setNewCommunityOpen(false)}><form onSubmit={createCommunity} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">name</span><input autoFocus required value={newName} onChange={(event) => setNewName(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><input value={newDescription} onChange={(event) => setNewDescription(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">rules</span><textarea value={newRules} onChange={(event) => setNewRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">create community</button></form></Overlay>}
+      {newCommunityOpen && <Overlay title="Set up a business workspace" onClose={() => setNewCommunityOpen(false)}><form onSubmit={createCommunity} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business name</span><input autoFocus required value={newName} onChange={(event) => setNewName(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><input value={newDescription} onChange={(event) => setNewDescription(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services</span><input value={newServices} onChange={(event) => setNewServices(event.target.value)} placeholder="HVAC, plumbing, electrical" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={newServiceArea} onChange={(event) => setNewServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={newContactEmail} onChange={(event) => setNewContactEmail(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact phone</span><input value={newContactPhone} onChange={(event) => setNewContactPhone(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={newBusinessHours} onChange={(event) => setNewBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">policies and rules</span><textarea value={newRules} onChange={(event) => setNewRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">create business workspace</button></form></Overlay>}
     </div>
   );
 }

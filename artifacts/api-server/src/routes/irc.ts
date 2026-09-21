@@ -7,6 +7,7 @@ import {
   eq,
   ilike,
   inArray,
+  isNull,
   or,
   sql,
 } from "drizzle-orm";
@@ -18,6 +19,7 @@ import {
   channelMembersTable,
   categoriesTable,
   channelsTable,
+  communityMembersTable,
   db,
   messageAttachmentsTable,
   messageReactionsTable,
@@ -82,8 +84,52 @@ async function membership(channelId: number, userId: string) {
   });
 }
 
-async function canReadChannel(channel: { id: number; isPrivate: boolean }, userId: string): Promise<boolean> {
+async function sharesBusiness(firstUserId: string, secondUserId: string): Promise<boolean> {
+  if (firstUserId === secondUserId) return true;
+  if (await hasPermission(firstUserId, "manage_any_community")) return true;
+  const memberships = await db
+    .select({ communityId: communityMembersTable.communityId })
+    .from(communityMembersTable)
+    .where(eq(communityMembersTable.userId, firstUserId));
+  if (memberships.length === 0) return false;
+  const [shared] = await db
+    .select({ communityId: communityMembersTable.communityId })
+    .from(communityMembersTable)
+    .where(and(
+      eq(communityMembersTable.userId, secondUserId),
+      inArray(communityMembersTable.communityId, memberships.map((item) => item.communityId)),
+    ))
+    .limit(1);
+  return Boolean(shared);
+}
+
+async function canReadChannel(channel: { id: number; isPrivate: boolean; communityId?: number | null }, userId: string): Promise<boolean> {
+  const communityId = channel.communityId ?? null;
+  if (communityId !== null && communityId !== undefined) {
+    const [member] = await db.select({ userId: communityMembersTable.userId })
+      .from(communityMembersTable)
+      .where(and(
+        eq(communityMembersTable.communityId, communityId),
+        eq(communityMembersTable.userId, userId),
+      ))
+      .limit(1);
+    if (!member && !(await hasPermission(userId, "view_business", { communityId })) && !(await hasPermission(userId, "manage_community", { communityId }))) {
+      return false;
+    }
+  }
   return !channel.isPrivate || Boolean(await membership(channel.id, userId));
+}
+
+async function visibleChannelIds(userId: string): Promise<number[]> {
+  const channels = await db.select({
+    id: channelsTable.id,
+    isPrivate: channelsTable.isPrivate,
+    communityId: channelsTable.communityId,
+  }).from(channelsTable);
+  const visible = await Promise.all(channels.map(async (channel) => (
+    await canReadChannel(channel, userId) ? channel.id : null
+  )));
+  return visible.filter((id): id is number => id !== null);
 }
 
 async function canReadMessage(message: typeof messagesTable.$inferSelect, userId: string): Promise<boolean> {
@@ -215,15 +261,32 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   const userId = getUserId(req);
   await ensureProfile(userId);
   await ensureDefaults(userId);
-  const channels = await db.select().from(channelsTable).orderBy(asc(channelsTable.name));
+  const allChannels = await db.select().from(channelsTable).orderBy(asc(channelsTable.name));
   const joined = await db.select({ channelId: channelMembersTable.channelId })
     .from(channelMembersTable).where(eq(channelMembersTable.userId, userId));
   const joinedIds = new Set(joined.map((item) => item.channelId));
+  const visibleChannels = await Promise.all(allChannels.map(async (channel) => (
+    channel.communityId === null
+      || joinedIds.has(channel.id)
+      || await hasPermission(userId, "view_business", { communityId: channel.communityId })
+      || await hasPermission(userId, "manage_community", { communityId: channel.communityId })
+      ? channel
+      : null
+  )));
+  const channels = visibleChannels.filter((channel): channel is typeof allChannels[number] => channel !== null);
   const counts = await db.select({ channelId: channelMembersTable.channelId })
     .from(channelMembersTable);
   const countMap = new Map<number, number>();
   for (const row of counts) countMap.set(row.channelId, (countMap.get(row.channelId) ?? 0) + 1);
-  const categories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  const visibleCategories = await Promise.all(allCategories.map(async (category) => (
+    category.communityId === null
+      || await hasPermission(userId, "view_business", { communityId: category.communityId })
+      || await hasPermission(userId, "manage_community", { communityId: category.communityId })
+      ? category
+      : null
+  )));
+  const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
   const pending = await db
     .select({ channelId: channelJoinRequestsTable.channelId })
@@ -249,8 +312,17 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   })));
 });
 
-router.get("/categories", requireAuth, async (_req: AuthenticatedRequest, res): Promise<void> => {
-  const categories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  const visibleCategories = await Promise.all(allCategories.map(async (category) => (
+    category.communityId === null
+      || await hasPermission(userId, "view_business", { communityId: category.communityId })
+      || await hasPermission(userId, "manage_community", { communityId: category.communityId })
+      ? category
+      : null
+  )));
+  const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   res.json(categories);
 });
 
@@ -781,13 +853,35 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
 });
 
 router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
   const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
   if (q.length < 2) {
     res.json([]);
     return;
   }
-  const users = await db.select().from(usersTable).where(or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`))).limit(20);
-  res.json(users.map((user) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
+  if (await hasPermission(userId, "manage_any_community")) {
+    const users = await db.select().from(usersTable)
+      .where(or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`)))
+      .limit(20);
+    res.json(users.map((user) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
+    return;
+  }
+  const memberships = await db.select({ communityId: communityMembersTable.communityId })
+    .from(communityMembersTable)
+    .where(eq(communityMembersTable.userId, userId));
+  if (memberships.length === 0) {
+    res.json([]);
+    return;
+  }
+  const users = await db.selectDistinct({ user: usersTable })
+    .from(communityMembersTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+    .where(and(
+      inArray(communityMembersTable.communityId, memberships.map((item) => item.communityId)),
+      or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`)),
+    ))
+    .limit(20);
+  res.json(users.map(({ user }) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
 });
 
 router.post("/users/:userId/block", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -812,6 +906,7 @@ router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): P
   const threads = [];
   for (const key of keys) {
     const peerId = key.split(":").find((id) => id !== userId) ?? userId;
+    if (!(await sharesBusiness(userId, peerId))) continue;
     const peer = await publicUser(peerId);
     const last = rows.find((row) => row.threadKey === key);
     if (peer && last) threads.push({ key, peer, lastMessage: await messageView(last) });
@@ -822,6 +917,10 @@ router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): P
 router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const peerId = param(req, "userId");
+  if (!(await sharesBusiness(userId, peerId))) {
+    res.status(403).json({ error: "Direct messages are limited to people in a shared business workspace." });
+    return;
+  }
   const key = threadKey(userId, peerId);
   const rows = await db.select().from(messagesTable).where(eq(messagesTable.threadKey, key)).orderBy(asc(messagesTable.createdAt)).limit(100);
   res.json({ threadKey: key, peer: await publicUser(peerId), messages: await Promise.all(rows.map((row) => messageView(row, userId))) });
@@ -830,6 +929,10 @@ router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest
 router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const senderId = getUserId(req);
   const recipientId = param(req, "userId");
+  if (!(await sharesBusiness(senderId, recipientId))) {
+    res.status(403).json({ error: "Direct messages are limited to people in a shared business workspace." });
+    return;
+  }
   const body = typeof req.body.body === "string" ? req.body.body.trim() : "";
   if (!body || body.length > 500) {
     res.status(400).json({ error: "Messages must be 1–500 characters." });
@@ -855,7 +958,20 @@ router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, re
     res.json([]);
     return;
   }
-  const rows = await db.select().from(messagesTable).where(ilike(messagesTable.body, `%${q}%`)).orderBy(desc(messagesTable.createdAt)).limit(100);
+  const channelIds = await visibleChannelIds(userId);
+  const messageScope = channelIds.length > 0
+    ? or(inArray(messagesTable.channelId, channelIds), and(
+      isNull(messagesTable.channelId),
+      or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId)),
+    ))
+    : and(
+      isNull(messagesTable.channelId),
+      or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId)),
+    );
+  const rows = await db.select().from(messagesTable).where(and(
+    ilike(messagesTable.body, `%${q}%`),
+    messageScope,
+  )).orderBy(desc(messagesTable.createdAt)).limit(100);
   res.json(await Promise.all(rows.map((row) => messageView(row, userId))));
 });
 
@@ -864,7 +980,17 @@ router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res)
   res.json(rows);
 });
 
-router.get("/announcements", requireAuth, async (_req: AuthenticatedRequest, res): Promise<void> => {
+router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const memberships = await db.select({ communityId: communityMembersTable.communityId })
+    .from(communityMembersTable)
+    .where(eq(communityMembersTable.userId, userId));
+  const isPlatformAdmin = await hasPermission(userId, "manage_any_community");
+  const visibility = isPlatformAdmin
+    ? undefined
+    : memberships.length > 0
+      ? inArray(serverAnnouncementsTable.communityId, memberships.map((item) => item.communityId))
+      : isNull(serverAnnouncementsTable.communityId);
   const announcements = await db
     .select({
       id: serverAnnouncementsTable.id,
@@ -874,6 +1000,7 @@ router.get("/announcements", requireAuth, async (_req: AuthenticatedRequest, res
     })
     .from(serverAnnouncementsTable)
     .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
+    .where(visibility)
     .orderBy(desc(serverAnnouncementsTable.createdAt))
     .limit(20);
   res.json(announcements);

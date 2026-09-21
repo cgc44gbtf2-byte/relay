@@ -345,12 +345,16 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
   const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
   const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null ? null : Number(req.body.categoryId);
   const channelId = req.body?.channelId === undefined || req.body.channelId === null ? null : Number(req.body.channelId);
-  if (!userId || !["moderator", "community_admin"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
-    res.status(400).json({ error: "A valid scoped moderator or community-admin assignment is required." });
+  if (!userId || !["moderator", "community_admin", "business_owner", "business_manager", "employee", "contractor"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
+    res.status(400).json({ error: "A valid scoped role assignment is required." });
     return;
   }
   if (scopeType === "platform" && role !== "moderator") {
-    res.status(400).json({ error: "Community admins must have a community, category, or channel scope." });
+    res.status(400).json({ error: "Only moderators may have a platform scope." });
+    return;
+  }
+  if (role === "business_owner" && scopeType !== "community") {
+    res.status(400).json({ error: "Business owners must have a business workspace scope." });
     return;
   }
   const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "channel" ? channelId : null;

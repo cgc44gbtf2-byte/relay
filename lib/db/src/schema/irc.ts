@@ -41,6 +41,14 @@ export const communitiesTable = pgTable(
     slug: text("slug").notNull(),
     description: text("description").notNull().default(""),
     rules: text("rules").notNull().default(""),
+    businessType: text("business_type").notNull().default("service_business"),
+    services: text("services").notNull().default(""),
+    serviceArea: text("service_area").notNull().default(""),
+    businessHours: text("business_hours").notNull().default(""),
+    contactEmail: text("contact_email").notNull().default(""),
+    contactPhone: text("contact_phone").notNull().default(""),
+    onboardingStep: integer("onboarding_step").notNull().default(1),
+    status: text("status").notNull().default("active"),
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -110,7 +118,7 @@ export const channelsTable = pgTable(
     passwordHash: text("password_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_channels_name_idx").on(table.name)],
+  (table) => [uniqueIndex("irc_channels_community_name_idx").on(table.communityId, table.name)],
 );
 
 export const categoriesTable = pgTable(

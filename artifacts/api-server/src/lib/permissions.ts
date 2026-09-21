@@ -12,6 +12,9 @@ import {
 
 export const PRIMARY_ROLES = ["admin", "moderator", "community_admin", "member"] as const;
 export type PrimaryRole = typeof PRIMARY_ROLES[number];
+export const BUSINESS_ROLES = ["business_owner", "business_manager", "employee", "contractor"] as const;
+export type BusinessRole = typeof BUSINESS_ROLES[number];
+export type AuthorizationRole = PrimaryRole | BusinessRole;
 
 export const PERMISSIONS = [
   "manage_users",
@@ -35,10 +38,25 @@ export const PERMISSIONS = [
   "manage_channel",
   "manage_community_members",
   "create_announcement",
+  "view_business",
+  "manage_business",
+  "manage_business_members",
+  "manage_leads",
+  "manage_customers",
+  "manage_jobs",
+  "manage_appointments",
+  "manage_ai",
+  "view_analytics",
+  "manage_integrations",
+  "manage_billing",
+  "view_business_reports",
+  "update_assigned_job",
+  "manage_assigned_appointments",
+  "communicate",
 ] as const;
 export type PermissionKey = typeof PERMISSIONS[number];
 
-const ROLE_PERMISSIONS: Record<PrimaryRole, readonly PermissionKey[]> = {
+const ROLE_PERMISSIONS: Record<AuthorizationRole, readonly PermissionKey[]> = {
   admin: PERMISSIONS,
   moderator: [
     "view_users",
@@ -64,6 +82,51 @@ const ROLE_PERMISSIONS: Record<PrimaryRole, readonly PermissionKey[]> = {
     "view_moderation_logs",
   ],
   member: [],
+  business_owner: [
+    "view_business",
+    "manage_business",
+    "manage_business_members",
+    "manage_community",
+    "create_channel",
+    "manage_channel",
+    "create_announcement",
+    "manage_leads",
+    "manage_customers",
+    "manage_jobs",
+    "manage_appointments",
+    "manage_ai",
+    "view_analytics",
+    "manage_integrations",
+    "manage_billing",
+    "view_business_reports",
+    "communicate",
+  ],
+  business_manager: [
+    "view_business",
+    "view_users",
+    "create_channel",
+    "manage_channel",
+    "manage_leads",
+    "manage_customers",
+    "manage_jobs",
+    "manage_appointments",
+    "manage_ai",
+    "view_analytics",
+    "view_business_reports",
+    "communicate",
+  ],
+  employee: [
+    "view_business",
+    "view_users",
+    "update_assigned_job",
+    "manage_assigned_appointments",
+    "communicate",
+  ],
+  contractor: [
+    "view_business",
+    "update_assigned_job",
+    "communicate",
+  ],
 };
 
 const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
@@ -88,6 +151,21 @@ const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
   manage_channel: "Manage channel settings in the permitted scope.",
   manage_community_members: "Manage members in the permitted scope.",
   create_announcement: "Publish announcements in the permitted scope.",
+  view_business: "View the permitted private business workspace.",
+  manage_business: "Manage the permitted business workspace.",
+  manage_business_members: "Manage users in the permitted business workspace.",
+  manage_leads: "Manage leads in the permitted business workspace.",
+  manage_customers: "Manage customers in the permitted business workspace.",
+  manage_jobs: "Manage jobs in the permitted business workspace.",
+  manage_appointments: "Manage appointments in the permitted business workspace.",
+  manage_ai: "Configure AI agents and conversations in the permitted business workspace.",
+  view_analytics: "View analytics for the permitted business workspace.",
+  manage_integrations: "Manage integrations for the permitted business workspace.",
+  manage_billing: "Manage billing for the permitted business workspace.",
+  view_business_reports: "View reports for the permitted business workspace.",
+  update_assigned_job: "Update assigned jobs.",
+  manage_assigned_appointments: "Manage assigned appointments.",
+  communicate: "Communicate in authorized business channels.",
 };
 
 export async function ensurePermissionCatalog(): Promise<void> {
@@ -97,7 +175,7 @@ export async function ensurePermissionCatalog(): Promise<void> {
   const definitions = await db.select({ id: permissionDefinitionsTable.id, key: permissionDefinitionsTable.key })
     .from(permissionDefinitionsTable);
   const ids = new Map(definitions.map((definition) => [definition.key, definition.id]));
-  const links = PRIMARY_ROLES.flatMap((role) => ROLE_PERMISSIONS[role]
+  const links = [...PRIMARY_ROLES, ...BUSINESS_ROLES].flatMap((role) => ROLE_PERMISSIONS[role]
     .map((permission) => ids.get(permission))
     .filter((permissionId): permissionId is number => permissionId !== undefined)
     .map((permissionId) => ({ role, permissionId })));
@@ -139,11 +217,16 @@ function assignmentMatches(assignment: Assignment, scope: PermissionScope): bool
 }
 
 function roleAllows(role: string, permission: PermissionKey): boolean {
-  return PRIMARY_ROLES.includes(role as PrimaryRole) && ROLE_PERMISSIONS[role as PrimaryRole].includes(permission);
+  return role in ROLE_PERMISSIONS && ROLE_PERMISSIONS[role as AuthorizationRole].includes(permission);
 }
 
 function roleRank(role: string): number {
-  return role === "admin" ? 4 : role === "moderator" ? 3 : role === "community_admin" ? 2 : 1;
+  return role === "admin" ? 6
+    : role === "moderator" ? 5
+      : role === "business_owner" ? 4
+        : role === "community_admin" ? 3
+          : role === "business_manager" ? 2
+            : 1;
 }
 
 export async function hasPermission(
@@ -163,7 +246,7 @@ export async function hasPermission(
     .from(userRolesTable)
     .where(eq(userRolesTable.userId, userId));
 
-  if (roleAllows(user.role, permission)) {
+  if (PRIMARY_ROLES.includes(user.role as PrimaryRole) && roleAllows(user.role, permission)) {
     const primaryAssignment = assignments.find((assignment) => assignment.role === user.role);
     if (user.role !== "community_admin" || (primaryAssignment && assignmentMatches(primaryAssignment, scope))) return true;
   }
@@ -178,16 +261,16 @@ export async function permissionsForUser(userId: string): Promise<{
   const [user] = await db.select({ role: usersTable.role }).from(usersTable).where(eq(usersTable.clerkId, userId));
   const assignments = await db.select().from(userRolesTable).where(eq(userRolesTable.userId, userId));
   const permissionSet = new Set<PermissionKey>();
-  if (user && PRIMARY_ROLES.includes(user.role as PrimaryRole)) {
-    for (const permission of ROLE_PERMISSIONS[user.role as PrimaryRole]) permissionSet.add(permission);
+  if (user && user.role in ROLE_PERMISSIONS) {
+    for (const permission of ROLE_PERMISSIONS[user.role as AuthorizationRole]) permissionSet.add(permission);
   }
   for (const assignment of assignments) {
-    if (PRIMARY_ROLES.includes(assignment.role as PrimaryRole)) {
-      for (const permission of ROLE_PERMISSIONS[assignment.role as PrimaryRole]) permissionSet.add(permission);
+    if (assignment.role in ROLE_PERMISSIONS) {
+      for (const permission of ROLE_PERMISSIONS[assignment.role as AuthorizationRole]) permissionSet.add(permission);
     }
   }
   const effectiveRole = [user?.role ?? "member", ...assignments.map((assignment) => assignment.role)]
-    .filter((role) => PRIMARY_ROLES.includes(role as PrimaryRole))
+    .filter((role) => role in ROLE_PERMISSIONS)
     .sort((left, right) => roleRank(right) - roleRank(left))[0] ?? "member";
   return { role: effectiveRole, permissions: [...permissionSet], assignments };
 }
