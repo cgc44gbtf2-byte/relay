@@ -1,6 +1,6 @@
-# [Project name]
+# Web IRC
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing who is online, and chatting through a live relay.
 
 ## Run & Operate
 
@@ -22,15 +22,25 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/web-irc/src/App.tsx` — responsive IRC workspace and SSE client
+- `artifacts/web-irc/src/index.css` — terminal-inspired theme and motion
+- `artifacts/api-server/src/routes/irc.ts` — in-memory room state, IRC REST endpoints, and SSE broadcast
+- `lib/api-spec/openapi.yaml` — source of truth for the IRC API contract
+- `lib/api-client-react/src/generated/` and `lib/api-zod/src/generated/` — generated client and validation helpers
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The first version uses server-sent events for room updates so browsers can reconnect without a custom WebSocket client.
+- Room state is intentionally in memory for the first build; persistence is proposed as a follow-up.
+- The frontend uses the generated React Query client for REST state and mutations, with EventSource for the streaming endpoint.
+- The UI uses a terminal-inspired dark theme with amber, teal, and coral accents to make active conversation easy to scan.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Browse the default IRC rooms and filter the room list.
+- Join a new room with a chosen nickname.
+- Read seeded room history, see online/away users, and send messages with Enter.
+- Receive messages and presence-related system events through a reconnecting live stream.
 
 ## User preferences
 
