@@ -305,6 +305,38 @@ describe("admin access controls", () => {
     });
   });
 
+  test("returns 404 without changing roles or audit activity for an unknown user", async () => {
+    const unknownUserId = `unknown_${randomUUID()}`;
+    const beforeUsers = await pool.query(
+      "SELECT clerk_id, role FROM irc_users ORDER BY clerk_id",
+    );
+    const beforeAudit = await pool.query(
+      "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+    );
+
+    const response = await apiRequest(
+      adminSession,
+      `/admin/users/${unknownUserId}/role`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "member" }),
+      },
+    );
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(response.body, { error: "User not found." });
+
+    const afterUsers = await pool.query(
+      "SELECT clerk_id, role FROM irc_users ORDER BY clerk_id",
+    );
+    const afterAudit = await pool.query(
+      "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
+    );
+    assert.deepEqual(afterUsers.rows, beforeUsers.rows);
+    assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+  });
+
   test("a non-admin cannot read the overview or update roles", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);
