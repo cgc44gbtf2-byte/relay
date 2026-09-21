@@ -25,6 +25,17 @@ import {
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
+const workspaceRoleRank: Record<string, number> = {
+  member: 0,
+  moderator: 1,
+  manager: 2,
+  department_admin: 3,
+  workspace_admin: 4,
+  workspace_owner: 5,
+  community_admin: 3,
+  business_manager: 2,
+  business_owner: 5,
+};
 
 async function writeCommunityAudit(actorId: string, action: string, communityId: number, details?: string): Promise<void> {
   await db.insert(adminAuditLogsTable).values({
@@ -85,14 +96,14 @@ router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest
   }
   res.json({
     roles: [
-      { key: "admin", label: "Admin / Developer", scope: "platform" },
-      { key: "moderator", label: "Moderator", scope: "platform or assigned community" },
-      { key: "community_admin", label: "Community Admin", scope: "assigned community/category/channel" },
+      { key: "admin", label: "Platform Admin", scope: "platform" },
+      { key: "platform_moderator", label: "Platform Moderator", scope: "platform" },
+      { key: "workspace_owner", label: "Workspace Owner", scope: "assigned workspace" },
+      { key: "workspace_admin", label: "Workspace Admin", scope: "assigned workspace" },
+      { key: "department_admin", label: "Community / Department Admin", scope: "assigned workspace or department" },
+      { key: "manager", label: "Manager", scope: "assigned workspace, department, or channel" },
+      { key: "moderator", label: "Moderator", scope: "assigned workspace, department, or channel" },
       { key: "member", label: "Member", scope: "own account and participation" },
-      { key: "business_owner", label: "Business Owner", scope: "assigned business" },
-      { key: "business_manager", label: "Business Manager", scope: "assigned business" },
-      { key: "employee", label: "Employee", scope: "assigned channels and work" },
-      { key: "contractor", label: "Contractor", scope: "assigned jobs and channels" },
     ],
     communityPermissions: scopedCommunityPermissions,
   });
@@ -164,7 +175,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
       });
       await tx.insert(userRolesTable).values({
         userId,
-        role: "business_owner",
+        role: "workspace_owner",
         scopeType: "community",
         communityId: created.id,
         grantedBy: userId,
@@ -381,7 +392,7 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
   const communityId = Number(param(req, "communityId"));
   const memberId = param(req, "memberId");
   const role = req.body?.role;
-  if (!Number.isInteger(communityId) || !["member", "community_admin", "moderator", "business_owner", "business_manager", "employee", "contractor"].includes(role)) {
+  if (!Number.isInteger(communityId) || !["member", "workspace_owner", "workspace_admin", "department_admin", "manager", "moderator"].includes(role)) {
     res.status(400).json({ error: "Invalid community role assignment." });
     return;
   }
@@ -389,9 +400,19 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
     res.status(403).json({ error: "You cannot manage members in this community." });
     return;
   }
-  if (role === "moderator" && !(await hasPermission(userId, "manage_roles"))) {
-    res.status(403).json({ error: "Only platform administrators can assign moderators." });
-    return;
+  const actor = await ensureProfile(userId);
+  if (actor.role !== "admin") {
+    const actorAssignments = await db.select({ role: userRolesTable.role })
+      .from(userRolesTable)
+      .where(and(
+        eq(userRolesTable.userId, userId),
+        eq(userRolesTable.communityId, communityId),
+      ));
+    const actorRank = Math.max(0, ...actorAssignments.map((assignment) => workspaceRoleRank[assignment.role] ?? 0));
+    if (actorRank <= (workspaceRoleRank[role] ?? 0)) {
+      res.status(403).json({ error: "You can only assign roles below your own workspace role." });
+      return;
+    }
   }
   const member = await db.query.communityMembersTable.findFirst({
     where: and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, memberId)),

@@ -17,6 +17,18 @@ const DEFAULT_SETTINGS = {
   landingDescription: "Relay brings the immediacy of IRC to the browser, with public channels, direct messages, profiles, and the tools communities need to stay kind.",
   networkStatusLabel: "live and open",
 } as const;
+type AppSettings = { -readonly [Key in keyof typeof DEFAULT_SETTINGS]: string };
+
+function settingsFromRows(rows: Array<{ key: string; value: string }>): AppSettings {
+  const settings: AppSettings = { ...DEFAULT_SETTINGS };
+  for (const row of rows) {
+    if (row.key in settings) {
+      const key = row.key as keyof AppSettings;
+      settings[key] = row.value;
+    }
+  }
+  return settings;
+}
 
 const SETTING_LIMITS: Record<keyof typeof DEFAULT_SETTINGS, number> = {
   siteName: 40,
@@ -53,11 +65,7 @@ async function writeDeveloperAudit(
 
 router.get("/app-config", async (_req, res): Promise<void> => {
   const rows = await db.select().from(developerSettingsTable);
-  const settings = { ...DEFAULT_SETTINGS };
-  for (const row of rows) {
-    if (row.key in settings) settings[row.key as keyof typeof settings] = row.value;
-  }
-  res.json(settings);
+  res.json(settingsFromRows(rows));
 });
 
 router.get("/developer/settings", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -67,11 +75,7 @@ router.get("/developer/settings", requireAuth, async (req: AuthenticatedRequest,
     return;
   }
   const rows = await db.select().from(developerSettingsTable);
-  const settings = { ...DEFAULT_SETTINGS };
-  for (const row of rows) {
-    if (row.key in settings) settings[row.key as keyof typeof settings] = row.value;
-  }
-  res.json(settings);
+  res.json(settingsFromRows(rows));
 });
 
 router.patch("/developer/settings", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -100,11 +104,7 @@ router.patch("/developer/settings", requireAuth, async (req: AuthenticatedReques
   }
   await writeDeveloperAudit(actor.clerkId, actor.displayName, "updated_application_settings", undefined, "developer settings", updates.map(([key]) => key).join(", "));
   const rows = await db.select().from(developerSettingsTable);
-  const settings = { ...DEFAULT_SETTINGS };
-  for (const row of rows) {
-    if (row.key in settings) settings[row.key as keyof typeof settings] = row.value;
-  }
-  res.json(settings);
+  res.json(settingsFromRows(rows));
 });
 
 router.get("/developer/releases", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

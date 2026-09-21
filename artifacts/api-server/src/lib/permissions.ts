@@ -10,9 +10,9 @@ import {
   usersTable,
 } from "@workspace/db";
 
-export const PRIMARY_ROLES = ["admin", "moderator", "community_admin", "member"] as const;
+export const PRIMARY_ROLES = ["admin", "platform_moderator", "moderator", "community_admin", "member"] as const;
 export type PrimaryRole = typeof PRIMARY_ROLES[number];
-export const BUSINESS_ROLES = ["business_owner", "business_manager", "employee", "contractor"] as const;
+export const BUSINESS_ROLES = ["workspace_owner", "workspace_admin", "department_admin", "manager", "business_owner", "business_manager", "employee", "contractor"] as const;
 export type BusinessRole = typeof BUSINESS_ROLES[number];
 export type AuthorizationRole = PrimaryRole | BusinessRole;
 
@@ -58,6 +58,18 @@ export type PermissionKey = typeof PERMISSIONS[number];
 
 const ROLE_PERMISSIONS: Record<AuthorizationRole, readonly PermissionKey[]> = {
   admin: PERMISSIONS,
+  platform_moderator: [
+    "view_users",
+    "moderate_channel",
+    "delete_message",
+    "mute_user",
+    "kick_user",
+    "ban_user",
+    "unban_user",
+    "view_moderation_logs",
+    "restrict_channel",
+    "manage_any_community",
+  ],
   moderator: [
     "view_users",
     "moderate_channel",
@@ -82,6 +94,68 @@ const ROLE_PERMISSIONS: Record<AuthorizationRole, readonly PermissionKey[]> = {
     "view_moderation_logs",
   ],
   member: [],
+  workspace_owner: [
+    "view_business",
+    "manage_business",
+    "manage_business_members",
+    "manage_community",
+    "manage_community_members",
+    "create_channel",
+    "manage_channel",
+    "create_announcement",
+    "view_users",
+    "moderate_channel",
+    "view_moderation_logs",
+    "manage_leads",
+    "manage_customers",
+    "manage_jobs",
+    "manage_appointments",
+    "manage_ai",
+    "view_analytics",
+    "manage_integrations",
+    "manage_billing",
+    "view_business_reports",
+    "communicate",
+  ],
+  workspace_admin: [
+    "view_business",
+    "manage_business",
+    "manage_business_members",
+    "manage_community",
+    "manage_community_members",
+    "create_channel",
+    "manage_channel",
+    "create_announcement",
+    "view_users",
+    "moderate_channel",
+    "view_moderation_logs",
+    "view_analytics",
+    "view_business_reports",
+    "communicate",
+  ],
+  department_admin: [
+    "view_business",
+    "manage_community_members",
+    "create_channel",
+    "manage_channel",
+    "create_announcement",
+    "view_users",
+    "moderate_channel",
+    "view_moderation_logs",
+    "communicate",
+  ],
+  manager: [
+    "view_business",
+    "view_users",
+    "manage_community_members",
+    "manage_channel",
+    "create_announcement",
+    "moderate_channel",
+    "manage_jobs",
+    "manage_appointments",
+    "view_business_reports",
+    "communicate",
+  ],
   business_owner: [
     "view_business",
     "manage_business",
@@ -221,11 +295,13 @@ function roleAllows(role: string, permission: PermissionKey): boolean {
 }
 
 function roleRank(role: string): number {
-  return role === "admin" ? 6
-    : role === "moderator" ? 5
-      : role === "business_owner" ? 4
-        : role === "community_admin" ? 3
-          : role === "business_manager" ? 2
+  return role === "admin" ? 8
+    : role === "platform_moderator" ? 7
+      : ["workspace_owner", "business_owner"].includes(role) ? 6
+        : role === "workspace_admin" ? 5
+          : ["department_admin", "community_admin"].includes(role) ? 4
+            : ["manager", "business_manager"].includes(role) ? 3
+              : role === "moderator" ? 2
             : 1;
 }
 
@@ -239,7 +315,7 @@ export async function hasPermission(
   if (user.role === "admin") return true;
 
   const scope = await scopeFor(rawScope);
-  if (user.role === "moderator" && roleAllows("moderator", permission)) return true;
+  if (["platform_moderator", "moderator"].includes(user.role) && roleAllows(user.role, permission)) return true;
 
   const assignments = await db
     .select()

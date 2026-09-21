@@ -458,16 +458,20 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
   const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
   const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null ? null : Number(req.body.categoryId);
   const channelId = req.body?.channelId === undefined || req.body.channelId === null ? null : Number(req.body.channelId);
-  if (!userId || !["moderator", "community_admin", "business_owner", "business_manager", "employee", "contractor"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
+  if (!userId || !["platform_moderator", "workspace_owner", "workspace_admin", "department_admin", "manager", "moderator"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
     res.status(400).json({ error: "A valid scoped role assignment is required." });
     return;
   }
-  if (scopeType === "platform" && role !== "moderator") {
-    res.status(400).json({ error: "Only moderators may have a platform scope." });
+  if (scopeType === "platform" && role !== "platform_moderator") {
+    res.status(400).json({ error: "Only platform moderators may have a platform scope." });
     return;
   }
-  if (role === "business_owner" && scopeType !== "community") {
-    res.status(400).json({ error: "Business owners must have a business workspace scope." });
+  if (["workspace_owner", "workspace_admin"].includes(role) && scopeType !== "community") {
+    res.status(400).json({ error: "Workspace owners and admins must have a workspace scope." });
+    return;
+  }
+  if (role === "department_admin" && !["community", "category"].includes(scopeType)) {
+    res.status(400).json({ error: "Department admins must have a workspace or department scope." });
     return;
   }
   const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "channel" ? channelId : null;
