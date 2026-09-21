@@ -843,7 +843,10 @@ describe("admin access controls", () => {
 
     for (const response of [topicUpdate, clearMessages]) {
       assert.equal(response.status, 404, JSON.stringify(response));
-      assert.deepEqual(response.body, { error: "Channel not found." });
+      assert.deepEqual(response.body, {
+        error: "Channel not found.",
+        code: "CHANNEL_NOT_FOUND",
+      });
     }
 
     const afterAudit = await pool.query(
@@ -859,6 +862,7 @@ describe("admin access controls", () => {
       apiRequest(memberSession, `/channels/${unknownChannelId}/leave`, { method: "POST" }),
       apiRequest(memberSession, `/channels/${unknownChannelId}/members`),
       apiRequest(memberSession, `/channels/${unknownChannelId}/messages`),
+      apiRequest(memberSession, `/channels/${unknownChannelId}/join-requests`),
       apiRequest(memberSession, `/channels/${unknownChannelId}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -889,7 +893,10 @@ describe("admin access controls", () => {
     const responses = await Promise.all(requests);
     for (const response of responses) {
       assert.equal(response.status, 404, JSON.stringify(response));
-      assert.deepEqual(response.body, { error: "Channel not found." });
+      assert.deepEqual(response.body, {
+        error: "Channel not found.",
+        code: "CHANNEL_NOT_FOUND",
+      });
     }
   });
 

@@ -393,7 +393,7 @@ router.get("/channels/:channelId/join-requests", requireAuth, async (req: Authen
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
-    res.status(404).json({ error: "Channel not found" });
+    res.status(404).json(channelNotFoundError);
     return;
   }
   if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
