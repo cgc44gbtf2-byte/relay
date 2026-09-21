@@ -65,11 +65,15 @@ async function withSafeCleanupEnvironment<T>(
     nodeEnv: process.env.NODE_ENV,
     secretKey: process.env.CLERK_SECRET_KEY,
     publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL,
+    databaseUrl: process.env.DATABASE_URL,
   };
 
   process.env.NODE_ENV = "test";
   process.env.CLERK_SECRET_KEY = "sk_test_cleanup";
   process.env.CLERK_PUBLISHABLE_KEY = "pk_test_cleanup";
+  process.env.TEST_DATABASE_URL = "postgres://test-only.invalid/web_irc_test";
+  delete process.env.DATABASE_URL;
 
   try {
     return await callback();
@@ -82,6 +86,16 @@ async function withSafeCleanupEnvironment<T>(
       delete process.env.CLERK_PUBLISHABLE_KEY;
     } else {
       process.env.CLERK_PUBLISHABLE_KEY = previous.publishableKey;
+    }
+    if (previous.testDatabaseUrl === undefined) {
+      delete process.env.TEST_DATABASE_URL;
+    } else {
+      process.env.TEST_DATABASE_URL = previous.testDatabaseUrl;
+    }
+    if (previous.databaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = previous.databaseUrl;
     }
   }
 }
@@ -107,6 +121,28 @@ describe("admin test-user cleanup safeguards", () => {
       assert.throws(
         () => assertSafeCleanupEnvironment(),
         /without sk_test_ and pk_test_ keys/,
+      );
+    });
+  });
+
+  test("requires a disposable test database", async () => {
+    await withSafeCleanupEnvironment(() => {
+      delete process.env.TEST_DATABASE_URL;
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /TEST_DATABASE_URL is required/,
+      );
+    });
+  });
+
+  test("rejects a shared database configuration", async () => {
+    await withSafeCleanupEnvironment(() => {
+      process.env.DATABASE_URL = "";
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /while DATABASE_URL is set/,
       );
     });
   });

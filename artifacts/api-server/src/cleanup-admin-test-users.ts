@@ -10,6 +10,7 @@ const APPLY_FLAG = "--apply";
 const DRY_RUN_FLAG = "--dry-run";
 const TEST_SECRET_KEY_PREFIX = "sk_test_";
 const TEST_PUBLISHABLE_KEY_PREFIX = "pk_test_";
+const CLEANUP_EVENT = "admin_test_user_cleanup";
 
 type CleanupUser = {
   id: string;
@@ -81,6 +82,18 @@ export function assertSafeCleanupEnvironment(): void {
   ) {
     throw new Error(
       "Refusing to clean up Clerk users without sk_test_ and pk_test_ keys.",
+    );
+  }
+
+  if (!process.env.TEST_DATABASE_URL) {
+    throw new Error(
+      "TEST_DATABASE_URL is required for test-user cleanup.",
+    );
+  }
+
+  if (Object.hasOwn(process.env, "DATABASE_URL")) {
+    throw new Error(
+      "Refusing to clean up test users while DATABASE_URL is set. Use only TEST_DATABASE_URL.",
     );
   }
 }
@@ -227,6 +240,28 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function summarizeUsers(users: CleanupUser[]): Array<{
+  id: string;
+  username: string | null;
+}> {
+  return users.map(({ id, username }) => ({ id, username }));
+}
+
+function logCleanupEvent(
+  status: "dry_run" | "started" | "succeeded" | "failed",
+  users: CleanupUser[],
+  error?: unknown,
+): void {
+  console.log(
+    JSON.stringify({
+      event: CLEANUP_EVENT,
+      status,
+      foundUsers: summarizeUsers(users),
+      ...(error ? { error: formatError(error) } : {}),
+    }),
+  );
+}
+
 export async function main(
   args: string[] = process.argv.slice(2),
   dependencies: CleanupDependencies = defaultDependencies,
@@ -242,6 +277,7 @@ export async function main(
   );
 
   if (!apply) {
+    logCleanupEvent("dry_run", users);
     for (const user of users) {
       const sessions = await listUserSessions(user.id, dependencies.clerk);
       console.log(
@@ -254,7 +290,14 @@ export async function main(
     return;
   }
 
-  await cleanupUsers(users, dependencies);
+  logCleanupEvent("started", users);
+  try {
+    await cleanupUsers(users, dependencies);
+  } catch (error) {
+    logCleanupEvent("failed", users, error);
+    throw error;
+  }
+  logCleanupEvent("succeeded", users);
   console.log("Admin regression test-user cleanup completed.");
 }
 

@@ -40,16 +40,33 @@ the test process stops. The test users are identified by the exact
 the test Clerk keys and disposable test database configured, inspect leftovers with:
 
 ```sh
-NODE_ENV=test TEST_DATABASE_URL='postgres://.../web_irc_test' \
+env -u DATABASE_URL NODE_ENV=test TEST_DATABASE_URL='postgres://.../web_irc_test' \
   CLERK_SECRET_KEY='sk_test_...' CLERK_PUBLISHABLE_KEY='pk_test_...' \
   pnpm --filter @workspace/api-server run cleanup:test-users
 ```
 
 The command is dry-run by default. Add `-- --apply` only after confirming the
 listed users belong to an interrupted regression run. It refuses non-test Clerk
-keys, requires `NODE_ENV=test`, revokes active sessions, deletes only matching
-test users, and removes their rows from the disposable database. Run it only when
-no admin regression test is still using the test Clerk environment.
+keys, requires `NODE_ENV=test` and `TEST_DATABASE_URL`, refuses a simultaneous
+`DATABASE_URL`, revokes active sessions, deletes only matching test users, and
+removes their rows from the disposable database. Run it only when no admin
+regression test is still using the test Clerk environment.
+
+The API package automatically runs
+`cleanup:test-users:scheduled` after `pnpm --filter @workspace/api-server run test`.
+The same script can be attached to a recurring maintenance job for interrupted
+runs:
+
+```sh
+env -u DATABASE_URL NODE_ENV=test TEST_DATABASE_URL='postgres://.../web_irc_test' \
+CLERK_SECRET_KEY='sk_test_...' CLERK_PUBLISHABLE_KEY='pk_test_...' \
+pnpm --filter @workspace/api-server run cleanup:test-users:scheduled
+```
+
+The scheduled entry point always applies cleanup, but the same safeguards still
+require test Clerk keys and the disposable test database. Its structured log
+records the matching user IDs/usernames and a `dry_run`, `started`, `succeeded`,
+or `failed` status; credentials are never included in the log.
 
 ## Stack
 
