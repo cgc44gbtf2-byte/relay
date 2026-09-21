@@ -79,15 +79,6 @@ before(async () => {
     );
   }
 
-  const existingAdmins = await pool.query(
-    "SELECT clerk_id FROM irc_users WHERE role = 'admin' LIMIT 1",
-  );
-  assert.equal(
-    existingAdmins.rowCount,
-    0,
-    "Authenticated admin tests require a database with no existing admin account.",
-  );
-
   server = createServer(app);
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);

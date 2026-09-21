@@ -11,6 +11,28 @@ Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing 
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
 
+### Authenticated API regression tests
+
+The admin access regression suite must use a separate disposable PostgreSQL database. In
+test mode, `@workspace/db` requires `TEST_DATABASE_URL` and never falls back to
+`DATABASE_URL`, so the suite cannot read or delete developer or preview rows.
+
+For a local run, create or provision a disposable database, push the schema to it, and
+run the suite with the test URL:
+
+```sh
+TEST_DATABASE_URL='postgres://.../web_irc_test' pnpm --filter @workspace/db run push:test
+TEST_DATABASE_URL='postgres://.../web_irc_test' \
+  CLERK_SECRET_KEY='...' CLERK_PUBLISHABLE_KEY='...' \
+  pnpm --filter @workspace/api-server run test
+```
+
+CI must provide `TEST_DATABASE_URL` as a protected environment secret pointing to a
+disposable database created for the job or test environment, then run
+`pnpm --filter @workspace/db run push:test` before
+`pnpm --filter @workspace/api-server run test`. Do not set `TEST_DATABASE_URL` to the
+development or preview `DATABASE_URL`.
+
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
