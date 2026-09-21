@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { getAuth } from "@clerk/express";
 import healthRouter from "./health";
 import ircRouter from "./irc";
 import adminRouter from "./admin";
@@ -13,7 +14,12 @@ router.use(ircRouter);
 router.use(adminRouter);
 router.use(storageRouter);
 router.get("/ws-ticket", requireAuth, (req: AuthenticatedRequest, res) => {
-  res.json({ ticket: wsHub.issueTicket(getUserId(req)) });
+  const sessionId = getAuth(req).sessionId;
+  if (!sessionId) {
+    res.status(401).json({ error: "Sign in to continue" });
+    return;
+  }
+  res.json({ ticket: wsHub.issueTicket(getUserId(req), sessionId) });
 });
 
 export default router;

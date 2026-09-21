@@ -3,9 +3,11 @@ import { createServer, type Server } from "node:http";
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { clerkClient } from "@clerk/express";
+import { WebSocket } from "ws";
 import { pool } from "@workspace/db";
 import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
+import { wsHub } from "./lib/ws";
 
 type TestSession = {
   userId: string;
@@ -101,6 +103,32 @@ async function unauthenticatedApiRequest(
   return { status: response.status, body };
 }
 
+function expectRejectedWebSocket(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    let settled = false;
+    const timer = setTimeout(() => {
+      finish(new Error("Timed out waiting for the WebSocket handshake to be rejected."));
+      socket.terminate();
+    }, 5_000);
+
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+
+    socket.once("open", () => {
+      socket.close();
+      finish(new Error("The revoked session established a WebSocket connection."));
+    });
+    socket.once("error", () => finish());
+    socket.once("close", () => finish());
+  });
+}
+
 async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
   await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [
@@ -174,6 +202,7 @@ before(async () => {
   }
 
   server = createServer(app);
+  wsHub.attach(server);
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });
@@ -454,6 +483,34 @@ describe("admin access controls", () => {
 
     const afterRows = await userOwnedRows(revokedSession.userId);
     assert.deepEqual(afterRows, beforeRows);
+  });
+
+  test("rejects a WebSocket ticket issued before session revocation without changing presence", async () => {
+    const revokedSession = await createTestSession("revoked_ws");
+    const profile = await apiRequest(revokedSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    await pool.query(
+      "UPDATE irc_users SET status = 'offline' WHERE clerk_id = $1",
+      [revokedSession.userId],
+    );
+
+    const ticketResponse = await apiRequest(revokedSession, "/ws-ticket");
+    assert.equal(ticketResponse.status, 200, JSON.stringify(ticketResponse));
+    assert.ok(ticketResponse.body && typeof ticketResponse.body === "object");
+    const ticket = (ticketResponse.body as { ticket?: unknown }).ticket;
+    assert.equal(typeof ticket, "string");
+
+    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+
+    const wsUrl = `${baseUrl.replace(/^http/, "ws")}/ws?ticket=${encodeURIComponent(ticket as string)}`;
+    await expectRejectedWebSocket(wsUrl);
+    await expectRejectedWebSocket(wsUrl);
+
+    const afterConnection = await pool.query(
+      "SELECT status FROM irc_users WHERE clerk_id = $1",
+      [revokedSession.userId],
+    );
+    assert.deepEqual(afterConnection.rows, [{ status: "offline" }]);
   });
 
   test("only one concurrent first-account claim succeeds", async () => {
