@@ -8,6 +8,7 @@ import {
   uuid,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -23,7 +24,12 @@ export const usersTable = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_users_username_idx").on(table.username)],
+  (table) => [
+    uniqueIndex("irc_users_username_idx").on(table.username),
+    uniqueIndex("irc_users_single_admin_idx")
+      .on(table.role)
+      .where(sql`${table.role} = 'admin'`),
+  ],
 );
 
 export const channelsTable = pgTable(

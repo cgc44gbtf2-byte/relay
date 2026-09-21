@@ -11,6 +11,15 @@ import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from
 
 const router: IRouter = Router();
 
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505"
+  );
+}
+
 async function adminProfile(req: AuthenticatedRequest) {
   const profile = await ensureProfile(getUserId(req));
   return profile.role === "admin" ? profile : null;
@@ -50,12 +59,17 @@ router.post("/admin/claim", requireAuth, async (req: AuthenticatedRequest, res):
     res.status(403).json({ error: "An admin account has already been claimed." });
     return;
   }
-  const [updated] = await db
-    .update(usersTable)
-    .set({ role: "admin" })
-    .where(eq(usersTable.clerkId, userId))
-    .returning({ role: usersTable.role });
-  res.json({ ok: true, role: updated?.role ?? "admin" });
+  try {
+    const [updated] = await db
+      .update(usersTable)
+      .set({ role: "admin" })
+      .where(eq(usersTable.clerkId, userId))
+      .returning({ role: usersTable.role });
+    res.json({ ok: true, role: updated?.role ?? "admin" });
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    res.status(403).json({ error: "An admin account has already been claimed." });
+  }
 });
 
 router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -133,11 +147,18 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
     res.status(400).json({ error: "You cannot remove your own admin access." });
     return;
   }
-  const [updated] = await db
-    .update(usersTable)
-    .set({ role })
-    .where(eq(usersTable.clerkId, targetUserId))
-    .returning({ id: usersTable.clerkId, role: usersTable.role });
+  let updated;
+  try {
+    [updated] = await db
+      .update(usersTable)
+      .set({ role })
+      .where(eq(usersTable.clerkId, targetUserId))
+      .returning({ id: usersTable.clerkId, role: usersTable.role });
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    res.status(409).json({ error: "Only one admin account is allowed." });
+    return;
+  }
   if (!updated) {
     res.status(404).json({ error: "User not found." });
     return;
