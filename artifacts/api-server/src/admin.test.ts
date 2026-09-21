@@ -108,6 +108,64 @@ async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   ]);
 }
 
+async function userOwnedRows(userId: string): Promise<unknown[]> {
+  const [
+    profiles,
+    channels,
+    members,
+    bans,
+    messages,
+    blocks,
+    notifications,
+    auditLogs,
+  ] = await Promise.all([
+    pool.query("SELECT * FROM irc_users WHERE clerk_id = $1", [userId]),
+    pool.query(
+      "SELECT * FROM irc_channels WHERE owner_id = $1 ORDER BY id",
+      [userId],
+    ),
+    pool.query(
+      "SELECT * FROM irc_channel_members WHERE user_id = $1 ORDER BY channel_id",
+      [userId],
+    ),
+    pool.query(
+      "SELECT * FROM irc_channel_bans WHERE user_id = $1 ORDER BY channel_id",
+      [userId],
+    ),
+    pool.query(
+      `SELECT * FROM irc_messages
+       WHERE sender_id = $1 OR recipient_id = $1
+       ORDER BY created_at, id`,
+      [userId],
+    ),
+    pool.query(
+      `SELECT * FROM irc_blocks
+       WHERE blocker_id = $1 OR blocked_id = $1
+       ORDER BY blocker_id, blocked_id`,
+      [userId],
+    ),
+    pool.query(
+      "SELECT * FROM irc_notifications WHERE user_id = $1 ORDER BY id",
+      [userId],
+    ),
+    pool.query(
+      "SELECT * FROM irc_admin_audit_logs WHERE actor_id = $1 ORDER BY id",
+      [userId],
+    ),
+  ]);
+
+  return [
+    profiles.rows,
+    channels.rows,
+    members.rows,
+    bans.rows,
+    messages.rows,
+    blocks.rows,
+    notifications.rows,
+    auditLogs.rows,
+  ];
+}
+
 before(async () => {
   if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
     throw new Error(
@@ -303,6 +361,99 @@ describe("admin access controls", () => {
       "SELECT * FROM irc_users ORDER BY clerk_id",
     );
     assert.deepEqual(afterProfiles.rows, beforeProfiles.rows);
+  });
+
+  test("rejects a revoked Clerk session across every IRC route without changing user records", async () => {
+    const revokedSession = await createTestSession("revoked_irc");
+    const profile = await apiRequest(revokedSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+
+    const token = (await clerkClient.sessions.getToken(revokedSession.sessionId)).jwt;
+    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+
+    const requests: Array<[string, RequestInit?]> = [
+      ["/me"],
+      [
+        "/me",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: "revoked_user", displayName: "Revoked User" }),
+        },
+      ],
+      ["/channels"],
+      [
+        "/channels",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "revoked-channel", topic: "Should not exist" }),
+        },
+      ],
+      ["/channels/1/join", { method: "POST" }],
+      ["/channels/1/leave", { method: "POST" }],
+      ["/channels/1/members"],
+      ["/channels/1/messages"],
+      [
+        "/channels/1/messages",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Should not be sent" }),
+        },
+      ],
+      [
+        "/channels/1",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Should not change" }),
+        },
+      ],
+      [
+        "/channels/1/moderation",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "mute", targetUserId: firstSession.userId }),
+        },
+      ],
+      ["/users/search?q=revoked"],
+      [
+        `/users/${firstSession.userId}/block`,
+        { method: "POST" },
+      ],
+      [
+        `/users/${firstSession.userId}/block`,
+        { method: "DELETE" },
+      ],
+      ["/dm/threads"],
+      [`/dm/${firstSession.userId}/messages`],
+      [
+        `/dm/${firstSession.userId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Should not be sent" }),
+        },
+      ],
+      ["/search/messages?q=revoked"],
+      ["/notifications"],
+      ["/notifications/1/read", { method: "POST" }],
+    ];
+    const beforeRows = await userOwnedRows(revokedSession.userId);
+
+    const responses = await Promise.all(
+      requests.map(([path, init]) => apiRequestWithToken(token, path, init)),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const afterRows = await userOwnedRows(revokedSession.userId);
+    assert.deepEqual(afterRows, beforeRows);
   });
 
   test("only one concurrent first-account claim succeeds", async () => {
