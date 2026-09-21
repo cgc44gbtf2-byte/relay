@@ -507,11 +507,11 @@ function AdminConsole() {
 }
 
 function AuthRoutes() {
-  return <Switch><Route path="/" component={Landing} /><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
+  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
 }
 
-function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} /></div>; }
-function SignUpPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} /></div>; }
+function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
+function SignUpPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
 
 const clerkAppearance = {
   theme: shadcn,
