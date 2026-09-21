@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
-import { and, asc, count, desc, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, or, sql } from "drizzle-orm";
 import {
+  adminAuditLogsTable,
   channelMembersTable,
   channelsTable,
   db,
@@ -10,6 +11,7 @@ import {
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 
 const router: IRouter = Router();
+const startedAt = Date.now();
 
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
@@ -35,6 +37,22 @@ function isUniqueViolation(error: unknown): boolean {
 async function adminProfile(req: AuthenticatedRequest) {
   const profile = await ensureProfile(getUserId(req));
   return profile.role === "admin" ? profile : null;
+}
+
+async function writeAudit(
+  actorId: string,
+  action: string,
+  targetId?: string,
+  targetLabel?: string,
+  details?: string,
+): Promise<void> {
+  await db.insert(adminAuditLogsTable).values({
+    actorId,
+    action,
+    targetId,
+    targetLabel,
+    details,
+  });
 }
 
 router.get("/admin/status", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -77,11 +95,37 @@ router.post("/admin/claim", requireAuth, async (req: AuthenticatedRequest, res):
       .set({ role: "admin" })
       .where(eq(usersTable.clerkId, userId))
       .returning({ role: usersTable.role });
+    await writeAudit(userId, "claimed_admin", userId, profile.displayName, "Initial admin seat claimed");
     res.json({ ok: true, role: updated?.role ?? "admin" });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     res.status(403).json({ error: "An admin account has already been claimed." });
   }
+});
+
+router.get("/admin/health", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const checkedAt = new Date();
+  const databaseStarted = Date.now();
+  let database = "operational";
+  let databaseLatencyMs = 0;
+  try {
+    await db.execute(sql`select 1`);
+    databaseLatencyMs = Date.now() - databaseStarted;
+  } catch {
+    database = "degraded";
+  }
+  res.json({
+    api: "operational",
+    database,
+    databaseLatencyMs,
+    environment: process.env.NODE_ENV ?? "development",
+    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+    checkedAt,
+  });
 });
 
 router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -95,6 +139,10 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     db.select({ value: count() }).from(messagesTable),
     db.select({ value: count() }).from(usersTable).where(eq(usersTable.status, "online")),
   ]);
+  const [adminCount] = await db
+    .select({ value: count() })
+    .from(usersTable)
+    .where(eq(usersTable.role, "admin"));
   const users = await db
     .select({
       id: usersTable.clerkId,
@@ -134,17 +182,68 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     .innerJoin(usersTable, eq(usersTable.clerkId, messagesTable.senderId))
     .orderBy(desc(messagesTable.createdAt))
     .limit(12);
+  const activity = await db
+    .select({
+      id: adminAuditLogsTable.id,
+      action: adminAuditLogsTable.action,
+      targetId: adminAuditLogsTable.targetId,
+      targetLabel: adminAuditLogsTable.targetLabel,
+      details: adminAuditLogsTable.details,
+      createdAt: adminAuditLogsTable.createdAt,
+      actor: usersTable.displayName,
+    })
+    .from(adminAuditLogsTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, adminAuditLogsTable.actorId))
+    .orderBy(desc(adminAuditLogsTable.createdAt))
+    .limit(20);
   res.json({
     stats: {
       users: Number(userCount?.value ?? 0),
       channels: Number(channelCount?.value ?? 0),
       messages: Number(messageCount?.value ?? 0),
       online: Number(onlineCount?.value ?? 0),
+      admins: Number(adminCount?.value ?? 0),
     },
     users,
     channels,
     recentMessages,
+    activity,
   });
+});
+
+router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const role = req.query.role === "admin" || req.query.role === "member" ? req.query.role : "";
+  const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
+  const filters = [
+    query
+      ? or(
+          ilike(usersTable.username, `%${query}%`),
+          ilike(usersTable.displayName, `%${query}%`),
+        )
+      : undefined,
+    role ? eq(usersTable.role, role) : undefined,
+    status ? eq(usersTable.status, status) : undefined,
+  ].filter((filter): filter is NonNullable<typeof filter> => Boolean(filter));
+  const users = await db
+    .select({
+      id: usersTable.clerkId,
+      username: usersTable.username,
+      displayName: usersTable.displayName,
+      role: usersTable.role,
+      status: usersTable.status,
+      createdAt: usersTable.createdAt,
+      lastSeenAt: usersTable.lastSeenAt,
+    })
+    .from(usersTable)
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(desc(usersTable.createdAt))
+    .limit(100);
+  res.json(users);
 });
 
 router.patch("/admin/users/:userId/role", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -175,7 +274,72 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
     res.status(404).json({ error: "User not found." });
     return;
   }
+  await writeAudit(
+    actor.clerkId,
+    role === "admin" ? "promoted_user" : "demoted_user",
+    updated.id,
+    targetUserId,
+    `Role changed to ${role}`,
+  );
   res.json(updated);
+});
+
+router.patch("/admin/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
+  const channelId = Number(rawId);
+  const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
+  if (!Number.isInteger(channelId) || topic === undefined) {
+    res.status(400).json({ error: "A valid channel and topic are required." });
+    return;
+  }
+  const [updated] = await db
+    .update(channelsTable)
+    .set({ topic })
+    .where(eq(channelsTable.id, channelId))
+    .returning();
+  if (!updated) {
+    res.status(404).json({ error: "Channel not found." });
+    return;
+  }
+  await writeAudit(actor.clerkId, "updated_channel_topic", String(channelId), updated.name, topic || "Cleared channel topic");
+  res.json(updated);
+});
+
+router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  if (req.body.confirm !== true) {
+    res.status(400).json({ error: "Explicit confirmation is required to clear channel history." });
+    return;
+  }
+  const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
+  const channelId = Number(rawId);
+  if (!Number.isInteger(channelId)) {
+    res.status(400).json({ error: "Invalid channel." });
+    return;
+  }
+  const [channel] = await db
+    .select({ id: channelsTable.id, name: channelsTable.name })
+    .from(channelsTable)
+    .where(eq(channelsTable.id, channelId));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found." });
+    return;
+  }
+  const deleted = await db
+    .delete(messagesTable)
+    .where(eq(messagesTable.channelId, channelId))
+    .returning({ id: messagesTable.id });
+  await writeAudit(actor.clerkId, "cleared_channel_history", String(channelId), channel.name, `${deleted.length} messages deleted`);
+  res.json({ ok: true, deleted: deleted.length });
 });
 
 export default router;

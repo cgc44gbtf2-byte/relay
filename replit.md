@@ -26,7 +26,7 @@ Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing 
 - `artifacts/web-irc/src/index.css` — terminal-inspired theme and motion
 - `artifacts/api-server/src/routes/irc.ts` — authenticated PostgreSQL-backed IRC REST endpoints
 - `artifacts/api-server/src/lib/ws.ts` — ticket-authenticated WebSocket hub for channel, DM, and presence events
-- `artifacts/api-server/src/routes/admin.ts` — one-time admin claim flow, protected overview, and role management
+- `artifacts/api-server/src/routes/admin.ts` — one-time admin claim flow, protected platform overview, health checks, account search, role management, channel maintenance, and audit logging
 - `lib/db/src/schema/irc.ts` — persistent users, channels, memberships, messages, moderation, blocks, and notifications
 - `lib/api-spec/openapi.yaml` — source of truth for the IRC API contract
 - `lib/api-client-react/src/generated/` and `lib/api-zod/src/generated/` — generated client and validation helpers
@@ -41,7 +41,7 @@ Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing 
 ## Product
 
 - Register and sign in with Clerk, then set a username and display name.
-- Claim the one-time admin seat at `/admin` from the first signed-in account, then manage users and roles from the protected admin dashboard.
+- Claim the one-time admin seat at `/admin` from the first signed-in account, then use the protected platform control room to monitor health, manage accounts and roles, maintain public room topics, clear room history with confirmation, and review the admin audit stream.
 - Browse, search, create, and join public channels with persistent topics and history.
 - Send real-time channel messages and direct messages through WebSockets.
 - See member presence, join/leave system notifications, timestamps, searchable history, and notification inbox items.
