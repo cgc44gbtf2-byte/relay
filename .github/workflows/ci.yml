@@ -12,6 +12,9 @@ permissions:
 jobs:
   api-tests:
     if: github.event_name != 'schedule'
+    concurrency:
+      group: ${{ github.repository }}-clerk-test-environment
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -54,6 +57,9 @@ jobs:
 
   cleanup-abandoned-test-users:
     if: github.event_name == 'schedule'
+    concurrency:
+      group: ${{ github.repository }}-clerk-test-environment
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     services:
       postgres:

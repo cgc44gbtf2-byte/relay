@@ -78,6 +78,12 @@ secrets. It explicitly removes `DATABASE_URL` before both database setup and
 cleanup. Configure the two Clerk secrets with `sk_test_` and `pk_test_` values;
 live Clerk keys must not be used for this job.
 
+The authenticated `api-tests` job and the scheduled cleanup use the same
+GitHub Actions concurrency group for the shared test Clerk environment.
+`cancel-in-progress: false` makes a run wait rather than canceling an active
+run, so cleanup cannot delete test identities while authenticated API tests are
+using them.
+
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
