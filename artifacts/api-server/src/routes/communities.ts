@@ -54,6 +54,10 @@ async function communityPermission(
 }
 
 async function canAccessBusiness(userId: string, communityId: number): Promise<boolean> {
+  const [community] = await db.select({ isPrivate: communitiesTable.isPrivate })
+    .from(communitiesTable)
+    .where(eq(communitiesTable.id, communityId))
+    .limit(1);
   const [membership] = await db.select({ userId: communityMembersTable.userId })
     .from(communityMembersTable)
     .where(and(
@@ -63,6 +67,7 @@ async function canAccessBusiness(userId: string, communityId: number): Promise<b
     .limit(1);
   return Boolean(
     membership
+      || community?.isPrivate === false
       || await hasPermission(userId, "view_business", { communityId })
       || await hasPermission(userId, "manage_community", { communityId }),
   );
@@ -104,7 +109,12 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
   const result = (await Promise.all(communities.map(async (community) => {
     const joined = memberIds.has(community.id);
     const canManage = await communityPermission(userId, community.id, "manage_community");
-    if (!joined && !canManage && !(await hasPermission(userId, "view_business", { communityId: community.id }))) return null;
+    if (
+      community.isPrivate
+      && !joined
+      && !canManage
+      && !(await hasPermission(userId, "view_business", { communityId: community.id }))
+    ) return null;
     return { ...community, joined, canManage };
   }))).filter((community): community is NonNullable<typeof community> => community !== null);
   res.json(result);
@@ -122,6 +132,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
   const businessHours = typeof req.body?.businessHours === "string" ? req.body.businessHours.trim().slice(0, 1000) : "";
   const contactEmail = typeof req.body?.contactEmail === "string" ? req.body.contactEmail.trim().slice(0, 320) : "";
   const contactPhone = typeof req.body?.contactPhone === "string" ? req.body.contactPhone.trim().slice(0, 40) : "";
+  const isPrivate = req.body?.isPrivate === true;
   const slug = slugify(typeof req.body?.slug === "string" ? req.body.slug : name);
   if (!name || !slug) {
     res.status(400).json({ error: "A community name is required." });
@@ -140,6 +151,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         businessHours,
         contactEmail,
         contactPhone,
+        isPrivate,
         ownerId: userId,
       }).returning();
       await tx.insert(communityMembersTable).values({ communityId: created.id, userId, status: "owner" });
@@ -225,10 +237,23 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .orderBy(desc(serverAnnouncementsTable.createdAt))
       .limit(20),
   ]);
+  const visibleChannels = (await Promise.all(channels.map(async (channel) => {
+    if (!channel.isPrivate) return channel;
+    const [member] = await db.select({ userId: communityMembersTable.userId })
+      .from(communityMembersTable)
+      .where(and(
+        eq(communityMembersTable.communityId, community.id),
+        eq(communityMembersTable.userId, userId),
+      ))
+      .limit(1);
+    return member || await communityPermission(userId, community.id, "manage_community")
+      ? channel
+      : null;
+  }))).filter((channel): channel is typeof channels[number] => channel !== null);
   res.json({
     community,
     members,
-    channels: channels.map((channel) => ({ ...channel, passwordHash: undefined })),
+    channels: visibleChannels.map((channel) => ({ ...channel, passwordHash: undefined })),
     categories,
     assignments: assignments.map((assignment) => ({ ...assignment, grantedBy: undefined })),
     announcements,
@@ -317,6 +342,7 @@ router.post("/communities/:communityId/channels", requireAuth, async (req: Authe
   const communityId = Number(param(req, "communityId"));
   const name = typeof req.body?.name === "string" ? req.body.name.trim().toLowerCase() : "";
   const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null || req.body.categoryId === "" ? null : Number(req.body.categoryId);
+  const isPrivate = req.body?.isPrivate === true;
   if (!Number.isInteger(communityId) || !(await hasPermission(userId, "create_channel", {
     communityId,
     categoryId: categoryId ?? undefined,
@@ -343,6 +369,7 @@ router.post("/communities/:communityId/channels", requireAuth, async (req: Authe
     ownerId: userId,
     communityId,
     categoryId,
+    isPrivate,
   }).returning();
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId, role: "owner" });
   await writeCommunityAudit(userId, "created_community_channel", communityId, channel.name);

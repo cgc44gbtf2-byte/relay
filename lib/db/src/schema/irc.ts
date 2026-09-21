@@ -50,6 +50,7 @@ export const communitiesTable = pgTable(
     contactPhone: text("contact_phone").notNull().default(""),
     onboardingStep: integer("onboarding_step").notNull().default(1),
     status: text("status").notNull().default("active"),
+    isPrivate: boolean("is_private").notNull().default(false),
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

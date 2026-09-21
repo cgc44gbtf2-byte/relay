@@ -19,6 +19,7 @@ import {
   channelMembersTable,
   categoriesTable,
   channelsTable,
+  communitiesTable,
   communityMembersTable,
   db,
   messageAttachmentsTable,
@@ -106,6 +107,10 @@ async function sharesBusiness(firstUserId: string, secondUserId: string): Promis
 async function canReadChannel(channel: { id: number; isPrivate: boolean; communityId?: number | null }, userId: string): Promise<boolean> {
   const communityId = channel.communityId ?? null;
   if (communityId !== null && communityId !== undefined) {
+    const [community] = await db.select({ isPrivate: communitiesTable.isPrivate })
+      .from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId))
+      .limit(1);
     const [member] = await db.select({ userId: communityMembersTable.userId })
       .from(communityMembersTable)
       .where(and(
@@ -113,7 +118,7 @@ async function canReadChannel(channel: { id: number; isPrivate: boolean; communi
         eq(communityMembersTable.userId, userId),
       ))
       .limit(1);
-    if (!member && !(await hasPermission(userId, "view_business", { communityId })) && !(await hasPermission(userId, "manage_community", { communityId }))) {
+    if (community?.isPrivate !== false && !member && !(await hasPermission(userId, "view_business", { communityId })) && !(await hasPermission(userId, "manage_community", { communityId }))) {
       return false;
     }
   }
@@ -271,12 +276,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     .from(channelMembersTable).where(eq(channelMembersTable.userId, userId));
   const joinedIds = new Set(joined.map((item) => item.channelId));
   const visibleChannels = await Promise.all(allChannels.map(async (channel) => (
-    channel.communityId === null
-      || joinedIds.has(channel.id)
-      || await hasPermission(userId, "view_business", { communityId: channel.communityId })
-      || await hasPermission(userId, "manage_community", { communityId: channel.communityId })
-      ? channel
-      : null
+    await canReadChannel(channel, userId) ? channel : null
   )));
   const channels = visibleChannels.filter((channel): channel is typeof allChannels[number] => channel !== null);
   const counts = await db.select({ channelId: channelMembersTable.channelId })
@@ -284,13 +284,22 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   const countMap = new Map<number, number>();
   for (const row of counts) countMap.set(row.channelId, (countMap.get(row.channelId) ?? 0) + 1);
   const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
-  const visibleCategories = await Promise.all(allCategories.map(async (category) => (
-    category.communityId === null
+  const visibleCategories = await Promise.all(allCategories.map(async (category) => {
+    if (category.communityId === null) return category;
+    const [community] = await db.select({ isPrivate: communitiesTable.isPrivate })
+      .from(communitiesTable)
+      .where(eq(communitiesTable.id, category.communityId))
+      .limit(1);
+    return !community?.isPrivate
       || await hasPermission(userId, "view_business", { communityId: category.communityId })
       || await hasPermission(userId, "manage_community", { communityId: category.communityId })
-      ? category
-      : null
-  )));
+      || (await db.query.communityMembersTable.findFirst({
+        where: and(
+          eq(communityMembersTable.communityId, category.communityId),
+          eq(communityMembersTable.userId, userId),
+        ),
+      })) ? category : null;
+  }));
   const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
   const pending = await db
