@@ -22,6 +22,7 @@ import {
   messageAttachmentsTable,
   messageReactionsTable,
   messagesTable,
+  moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
   usersTable,
@@ -30,6 +31,7 @@ import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from
 import { wsHub } from "../lib/ws";
 import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
+import { hasPermission } from "../lib/permissions";
 
 const router: IRouter = Router();
 
@@ -94,7 +96,11 @@ async function canReadMessage(message: typeof messagesTable.$inferSelect, userId
 
 async function isChannelOwnerOrModerator(channelId: number, userId: string): Promise<boolean> {
   const member = await membership(channelId, userId);
-  return Boolean(member && ["owner", "moderator"].includes(member.role));
+  return Boolean(
+    (member && ["owner", "moderator"].includes(member.role))
+      || await hasPermission(userId, "manage_channel", { channelId })
+      || await hasPermission(userId, "moderate_channel", { channelId }),
+  );
 }
 
 async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null): Promise<void> {
@@ -273,6 +279,9 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
   const categoryId = req.body.categoryId === null || req.body.categoryId === undefined || req.body.categoryId === ""
     ? null
     : Number(req.body.categoryId);
+  const communityId = req.body.communityId === null || req.body.communityId === undefined || req.body.communityId === ""
+    ? null
+    : Number(req.body.communityId);
   if (!/^#[a-z0-9][a-z0-9_-]{1,31}$/.test(name)) {
     res.status(400).json({ error: "Channel names must be 2–32 lowercase characters." });
     return;
@@ -285,8 +294,17 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     const category = await db.query.categoriesTable.findFirst({
       where: eq(categoriesTable.id, categoryId),
     });
-    if (!category) {
+    if (!category || (communityId !== null && category.communityId !== communityId)) {
       res.status(400).json({ error: "Category must be valid." });
+      return;
+    }
+  }
+  if (communityId !== null) {
+    if (!Number.isInteger(communityId) || !(await hasPermission(userId, "create_channel", {
+      communityId,
+      categoryId: categoryId ?? undefined,
+    }))) {
+      res.status(403).json({ error: "You cannot create channels in this community." });
       return;
     }
   }
@@ -299,6 +317,7 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     topic,
     description,
     ownerId: userId,
+    communityId,
     categoryId,
     isPrivate,
     isInviteOnly,
@@ -564,8 +583,7 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     res.status(404).json(channelNotFoundError);
     return;
   }
-  const member = await membership(channel.id, userId);
-  if (!member || !["owner", "moderator"].includes(member.role)) {
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
     res.status(403).json({ error: "Only channel owners and moderators can edit this channel." });
     return;
   }
@@ -587,6 +605,13 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     ...(isInviteOnly === undefined ? {} : { isInviteOnly }),
     ...(password === undefined ? {} : { passwordHash: password ? passwordHash(password) : null }),
   }).where(eq(channelsTable.id, channel.id)).returning();
+  await db.insert(moderationActionsTable).values({
+    actorId: userId,
+    communityId: channel.communityId,
+    channelId: channel.id,
+    action: "updated_channel",
+    details: topic !== undefined ? `topic:${topic}` : "channel settings changed",
+  });
   wsHub.broadcastChannel(channel.id, { type: "channel", channel: updated });
   res.json({ ...updated, passwordHash: undefined });
 });
@@ -600,7 +625,11 @@ router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequ
     return;
   }
   const channel = message.channelId ? await db.query.channelsTable.findFirst({ where: eq(channelsTable.id, message.channelId) }) : null;
-  const actor = message.senderId === userId || Boolean(channel && await isChannelOwnerOrModerator(channel.id, userId));
+  const actor = message.senderId === userId || Boolean(
+    channel
+      && (await hasPermission(userId, "delete_message", { channelId: channel.id }))
+      && await isChannelOwnerOrModerator(channel.id, userId),
+  );
   if (!actor) {
     res.status(403).json({ error: "You cannot delete this message." });
     return;
@@ -722,8 +751,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }
-  const actor = await membership(channel.id, userId);
-  if (!actor || !["owner", "moderator"].includes(actor.role)) {
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
     res.status(403).json({ error: "You do not have moderation permissions." });
     return;
   }
@@ -740,6 +768,14 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   } else {
     await db.update(channelMembersTable).set({ role: "moderator" }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
   }
+  await db.insert(moderationActionsTable).values({
+    actorId: userId,
+    targetUserId,
+    communityId: channel.communityId,
+    channelId: channel.id,
+    action,
+    details: typeof req.body.reason === "string" ? req.body.reason.trim().slice(0, 500) : null,
+  });
   wsHub.broadcastChannel(channel.id, { type: "moderation", action, targetUserId });
   res.json({ ok: true });
 });

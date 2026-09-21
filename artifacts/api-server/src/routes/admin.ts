@@ -2,16 +2,20 @@ import { Router, type IRouter } from "express";
 import { and, asc, count, desc, eq, ilike, or, sql } from "drizzle-orm";
 import {
   adminAuditLogsTable,
+  categoriesTable,
   channelMembersTable,
   channelsTable,
+  communitiesTable,
   db,
   messagesTable,
   notificationsTable,
   serverAnnouncementsTable,
+  userRolesTable,
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { channelNotFoundError } from "./errors";
+import { PRIMARY_ROLES } from "../lib/permissions";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -213,7 +217,10 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     return;
   }
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const role = req.query.role === "admin" || req.query.role === "member" ? req.query.role : "";
+  const requestedRole = typeof req.query.role === "string" ? req.query.role : "";
+  const role = PRIMARY_ROLES.includes(requestedRole as typeof PRIMARY_ROLES[number])
+    ? requestedRole as typeof PRIMARY_ROLES[number]
+    : "";
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
   const filters = [
     query
@@ -250,8 +257,8 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
   }
   const targetUserId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
   const role = req.body?.role;
-  if (role !== "admin" && role !== "member") {
-    res.status(400).json({ error: "Role must be either admin or member." });
+  if (!PRIMARY_ROLES.includes(role)) {
+    res.status(400).json({ error: "Role must be one of admin, moderator, community_admin, or member." });
     return;
   }
   if (targetUserId === actor.clerkId && role !== "admin") {
@@ -291,6 +298,99 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
     return;
   }
   res.json(updated);
+});
+
+router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const assignments = await db
+    .select({
+      id: userRolesTable.id,
+      userId: userRolesTable.userId,
+      username: usersTable.username,
+      displayName: usersTable.displayName,
+      role: userRolesTable.role,
+      scopeType: userRolesTable.scopeType,
+      communityId: userRolesTable.communityId,
+      communityName: communitiesTable.name,
+      categoryId: userRolesTable.categoryId,
+      categoryName: categoriesTable.name,
+      channelId: userRolesTable.channelId,
+      channelName: channelsTable.name,
+      createdAt: userRolesTable.createdAt,
+    })
+    .from(userRolesTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, userRolesTable.userId))
+    .leftJoin(communitiesTable, eq(communitiesTable.id, userRolesTable.communityId))
+    .leftJoin(categoriesTable, eq(categoriesTable.id, userRolesTable.categoryId))
+    .leftJoin(channelsTable, eq(channelsTable.id, userRolesTable.channelId))
+    .orderBy(desc(userRolesTable.createdAt));
+  res.json(assignments);
+});
+
+router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const userId = typeof req.body?.userId === "string" ? req.body.userId : "";
+  const role = req.body?.role;
+  const scopeType = req.body?.scopeType;
+  const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
+  const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null ? null : Number(req.body.categoryId);
+  const channelId = req.body?.channelId === undefined || req.body.channelId === null ? null : Number(req.body.channelId);
+  if (!userId || !["moderator", "community_admin"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
+    res.status(400).json({ error: "A valid scoped moderator or community-admin assignment is required." });
+    return;
+  }
+  if (scopeType === "platform" && role !== "moderator") {
+    res.status(400).json({ error: "Community admins must have a community, category, or channel scope." });
+    return;
+  }
+  const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "channel" ? channelId : null;
+  if (scopeType !== "platform" && !Number.isInteger(scopedId)) {
+    res.status(400).json({ error: "The selected scope is required." });
+    return;
+  }
+  const target = await db.query.usersTable.findFirst({ where: eq(usersTable.clerkId, userId) });
+  if (!target) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  const [assignment] = await db.insert(userRolesTable).values({
+    userId,
+    role,
+    scopeType,
+    communityId,
+    categoryId,
+    channelId,
+    grantedBy: actor.clerkId,
+  }).returning();
+  await writeAudit(actor.clerkId, "granted_scoped_role", userId, target.displayName, `${role} on ${scopeType}`);
+  res.status(201).json(assignment);
+});
+
+router.delete("/admin/role-assignments/:assignmentId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const assignmentId = Number(Array.isArray(req.params.assignmentId) ? req.params.assignmentId[0] : req.params.assignmentId);
+  if (!Number.isInteger(assignmentId)) {
+    res.status(400).json({ error: "Invalid role assignment." });
+    return;
+  }
+  const [removed] = await db.delete(userRolesTable).where(eq(userRolesTable.id, assignmentId)).returning();
+  if (!removed) {
+    res.status(404).json({ error: "Role assignment not found." });
+    return;
+  }
+  await writeAudit(actor.clerkId, "revoked_scoped_role", removed.userId, removed.role, `Assignment ${assignmentId}`);
+  res.json({ ok: true });
 });
 
 router.patch("/admin/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

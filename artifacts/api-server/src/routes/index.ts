@@ -4,6 +4,7 @@ import healthRouter from "./health";
 import ircRouter from "./irc";
 import adminRouter from "./admin";
 import storageRouter from "./storage";
+import communitiesRouter from "./communities";
 import { requireAuth, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
 
@@ -13,6 +14,7 @@ router.use(healthRouter);
 router.use(ircRouter);
 router.use(adminRouter);
 router.use(storageRouter);
+router.use(communitiesRouter);
 router.get("/ws-ticket", requireAuth, (req: AuthenticatedRequest, res) => {
   const sessionId = getAuth(req).sessionId;
   if (!sessionId) {

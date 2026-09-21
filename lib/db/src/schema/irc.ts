@@ -33,6 +33,68 @@ export const usersTable = pgTable(
   ],
 );
 
+export const communitiesTable = pgTable(
+  "irc_communities",
+  {
+    id: serial("id").primaryKey(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description").notNull().default(""),
+    rules: text("rules").notNull().default(""),
+    ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("irc_communities_slug_idx").on(table.slug)],
+);
+
+export const permissionDefinitionsTable = pgTable(
+  "irc_permission_definitions",
+  {
+    id: serial("id").primaryKey(),
+    key: text("key").notNull(),
+    description: text("description").notNull().default(""),
+  },
+  (table) => [uniqueIndex("irc_permission_definitions_key_idx").on(table.key)],
+);
+
+export const rolePermissionsTable = pgTable(
+  "irc_role_permissions",
+  {
+    role: text("role").notNull(),
+    permissionId: integer("permission_id").notNull().references(() => permissionDefinitionsTable.id, { onDelete: "cascade" }),
+  },
+  (table) => [primaryKey({ columns: [table.role, table.permissionId] })],
+);
+
+export const userRolesTable = pgTable(
+  "irc_user_roles",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    scopeType: text("scope_type").notNull().default("platform"),
+    communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
+    categoryId: integer("category_id"),
+    channelId: integer("channel_id").references(() => channelsTable.id, { onDelete: "cascade" }),
+    grantedBy: text("granted_by").notNull().references(() => usersTable.clerkId),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("irc_user_roles_scope_idx").on(table.userId, table.role, table.scopeType, table.communityId, table.categoryId, table.channelId),
+  ],
+);
+
+export const communityMembersTable = pgTable(
+  "irc_community_members",
+  {
+    communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+    status: text("status").notNull().default("member"),
+    joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.communityId, table.userId] })],
+);
+
 export const channelsTable = pgTable(
   "irc_channels",
   {
@@ -41,6 +103,7 @@ export const channelsTable = pgTable(
     topic: text("topic").notNull().default(""),
     description: text("description").notNull().default(""),
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
+    communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "set null" }),
     categoryId: integer("category_id"),
     isPrivate: boolean("is_private").notNull().default(false),
     isInviteOnly: boolean("is_invite_only").notNull().default(false),
@@ -57,6 +120,7 @@ export const categoriesTable = pgTable(
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
+    communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("irc_categories_owner_name_idx").on(table.ownerId, table.name)],
@@ -167,7 +231,19 @@ export const notificationsTable = pgTable("irc_notifications", {
 export const serverAnnouncementsTable = pgTable("irc_server_announcements", {
   id: serial("id").primaryKey(),
   authorId: text("author_id").notNull().references(() => usersTable.clerkId),
+  communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const moderationActionsTable = pgTable("irc_moderation_actions", {
+  id: serial("id").primaryKey(),
+  actorId: text("actor_id").notNull().references(() => usersTable.clerkId),
+  targetUserId: text("target_user_id").references(() => usersTable.clerkId),
+  communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
+  channelId: integer("channel_id").references(() => channelsTable.id, { onDelete: "cascade" }),
+  action: text("action").notNull(),
+  details: text("details"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -186,10 +262,12 @@ export const insertChannelSchema = createInsertSchema(channelsTable);
 export const insertMessageSchema = createInsertSchema(messagesTable);
 export const insertCategorySchema = createInsertSchema(categoriesTable);
 export const insertAdminAuditLogSchema = createInsertSchema(adminAuditLogsTable);
+export const insertCommunitySchema = createInsertSchema(communitiesTable);
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof usersTable.$inferSelect;
 export type Channel = typeof channelsTable.$inferSelect;
 export type Category = typeof categoriesTable.$inferSelect;
+export type Community = typeof communitiesTable.$inferSelect;
 export type ChannelMember = typeof channelMembersTable.$inferSelect;
 export type Message = typeof messagesTable.$inferSelect;
 export type AdminAuditLog = typeof adminAuditLogsTable.$inferSelect;
