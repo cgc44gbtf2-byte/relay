@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { createHash } from "node:crypto";
 import {
   and,
   asc,
@@ -7,19 +8,27 @@ import {
   ilike,
   inArray,
   or,
+  sql,
 } from "drizzle-orm";
 import {
   blocksTable,
   channelBansTable,
+  channelInvitesTable,
+  channelJoinRequestsTable,
   channelMembersTable,
+  categoriesTable,
   channelsTable,
   db,
+  messageAttachmentsTable,
+  messageReactionsTable,
   messagesTable,
   notificationsTable,
+  serverAnnouncementsTable,
   usersTable,
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
+import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
 
 const router: IRouter = Router();
@@ -33,6 +42,13 @@ const channelName = (value: string): string => {
   const name = value.trim().toLowerCase();
   return name.startsWith("#") ? name : `#${name}`;
 };
+
+const passwordHash = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
+
+function hasChannelPassword(channel: { passwordHash: string | null }, password: unknown): boolean {
+  return !channel.passwordHash || (typeof password === "string" && passwordHash(password) === channel.passwordHash);
+}
 
 async function channelFor(id: string) {
   const channelId = Number(id);
@@ -64,6 +80,41 @@ async function membership(channelId: number, userId: string) {
   });
 }
 
+async function canReadChannel(channel: { id: number; isPrivate: boolean }, userId: string): Promise<boolean> {
+  return !channel.isPrivate || Boolean(await membership(channel.id, userId));
+}
+
+async function canReadMessage(message: typeof messagesTable.$inferSelect, userId: string): Promise<boolean> {
+  if (message.channelId) {
+    const channel = await channelFor(String(message.channelId));
+    return Boolean(channel && await canReadChannel(channel, userId));
+  }
+  return message.senderId === userId || message.recipientId === userId;
+}
+
+async function isChannelOwnerOrModerator(channelId: number, userId: string): Promise<boolean> {
+  const member = await membership(channelId, userId);
+  return Boolean(member && ["owner", "moderator"].includes(member.role));
+}
+
+async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null): Promise<void> {
+  const names = [...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase());
+  if (names.length === 0) return;
+  const mentioned = await db
+    .select({ clerkId: usersTable.clerkId })
+    .from(usersTable)
+    .where(inArray(usersTable.username, [...new Set(names)]));
+  const recipients = mentioned.filter((user) => user.clerkId !== senderId);
+  if (recipients.length === 0) return;
+  await db.insert(notificationsTable).values(
+    recipients.map((user) => ({
+      userId: user.clerkId,
+      type: "mention",
+      body: channelId ? "You were mentioned in a channel." : "You were mentioned.",
+    })),
+  );
+}
+
 async function publicUser(userId: string) {
   const user = await db.query.usersTable.findFirst({ where: eq(usersTable.clerkId, userId) });
   return user
@@ -71,7 +122,32 @@ async function publicUser(userId: string) {
     : null;
 }
 
-async function messageView(message: typeof messagesTable.$inferSelect) {
+async function messageView(message: typeof messagesTable.$inferSelect, viewerId?: string) {
+  const attachments = await db
+    .select({
+      id: messageAttachmentsTable.id,
+      fileName: messageAttachmentsTable.fileName,
+      contentType: messageAttachmentsTable.contentType,
+      fileSize: messageAttachmentsTable.fileSize,
+    })
+    .from(messageAttachmentsTable)
+    .where(eq(messageAttachmentsTable.messageId, message.id));
+  const reactions = await db
+    .select({
+      emoji: messageReactionsTable.emoji,
+      count: sql<number>`count(*)`,
+    })
+    .from(messageReactionsTable)
+    .where(eq(messageReactionsTable.messageId, message.id))
+    .groupBy(messageReactionsTable.emoji);
+  const reacted = viewerId
+    ? await db.query.messageReactionsTable.findFirst({
+      where: and(
+        eq(messageReactionsTable.messageId, message.id),
+        eq(messageReactionsTable.userId, viewerId),
+      ),
+    })
+    : null;
   return {
     id: message.id,
     channelId: message.channelId,
@@ -81,6 +157,16 @@ async function messageView(message: typeof messagesTable.$inferSelect) {
     createdAt: message.createdAt,
     sender: await publicUser(message.senderId),
     recipientId: message.recipientId,
+    deletedAt: message.deletedAt,
+    reactions: reactions.map((reaction) => ({
+      emoji: reaction.emoji,
+      count: Number(reaction.count),
+      reacted: reaction.emoji === reacted?.emoji,
+    })),
+    attachments: attachments.map((attachment) => ({
+      ...attachment,
+      url: `/api/attachments/${attachment.id}`,
+    })),
   };
 }
 
@@ -131,11 +217,48 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     .from(channelMembersTable);
   const countMap = new Map<number, number>();
   for (const row of counts) countMap.set(row.channelId, (countMap.get(row.channelId) ?? 0) + 1);
+  const categories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  const categoryMap = new Map(categories.map((category) => [category.id, category]));
+  const pending = await db
+    .select({ channelId: channelJoinRequestsTable.channelId })
+    .from(channelJoinRequestsTable)
+    .where(and(
+      eq(channelJoinRequestsTable.userId, userId),
+      eq(channelJoinRequestsTable.status, "pending"),
+    ));
+  const pendingIds = new Set(pending.map((request) => request.channelId));
   res.json(channels.map((channel) => ({
     ...channel,
+    passwordHash: undefined,
     joined: joinedIds.has(channel.id),
+    accessStatus: joinedIds.has(channel.id)
+      ? "member"
+      : pendingIds.has(channel.id)
+        ? "pending"
+        : channel.isPrivate
+          ? "available"
+          : "open",
+    category: channel.categoryId ? categoryMap.get(channel.categoryId) ?? null : null,
     memberCount: countMap.get(channel.id) ?? 0,
   })));
+});
+
+router.get("/categories", requireAuth, async (_req: AuthenticatedRequest, res): Promise<void> => {
+  const categories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  res.json(categories);
+});
+
+router.post("/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  await ensureProfile(userId);
+  const name = typeof req.body.name === "string" ? req.body.name.trim().toLowerCase() : "";
+  const description = typeof req.body.description === "string" ? req.body.description.trim().slice(0, 240) : "";
+  if (!/^[a-z0-9][a-z0-9 _-]{1,39}$/.test(name)) {
+    res.status(400).json({ error: "Category names must be 2–40 lowercase characters." });
+    return;
+  }
+  const [category] = await db.insert(categoriesTable).values({ name, description, ownerId: userId }).returning();
+  res.status(201).json(category);
 });
 
 router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -143,13 +266,46 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
   await ensureProfile(userId);
   const name = typeof req.body.name === "string" ? channelName(req.body.name) : "";
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim() : "";
+  const description = typeof req.body.description === "string" ? req.body.description.trim().slice(0, 240) : "";
+  const isPrivate = req.body.isPrivate === true;
+  const isInviteOnly = req.body.isInviteOnly === true;
+  const password = typeof req.body.password === "string" ? req.body.password.trim() : "";
+  const categoryId = req.body.categoryId === null || req.body.categoryId === undefined || req.body.categoryId === ""
+    ? null
+    : Number(req.body.categoryId);
   if (!/^#[a-z0-9][a-z0-9_-]{1,31}$/.test(name)) {
     res.status(400).json({ error: "Channel names must be 2–32 lowercase characters." });
     return;
   }
-  const [channel] = await db.insert(channelsTable).values({ name, topic, ownerId: userId }).returning();
+  if (categoryId !== null) {
+    if (!Number.isInteger(categoryId)) {
+      res.status(400).json({ error: "Category must be valid." });
+      return;
+    }
+    const category = await db.query.categoriesTable.findFirst({
+      where: eq(categoriesTable.id, categoryId),
+    });
+    if (!category) {
+      res.status(400).json({ error: "Category must be valid." });
+      return;
+    }
+  }
+  if (password && password.length < 4) {
+    res.status(400).json({ error: "Channel passwords must be at least 4 characters." });
+    return;
+  }
+  const [channel] = await db.insert(channelsTable).values({
+    name,
+    topic,
+    description,
+    ownerId: userId,
+    categoryId,
+    isPrivate,
+    isInviteOnly,
+    passwordHash: password ? passwordHash(password) : null,
+  }).returning();
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId, role: "owner" });
-  res.status(201).json(channel);
+  res.status(201).json({ ...channel, passwordHash: undefined, joined: true, accessStatus: "member", memberCount: 1 });
 });
 
 router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -167,11 +323,147 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
     return;
   }
   await ensureProfile(userId);
+  if (!hasChannelPassword(channel, req.body?.password)) {
+    res.status(403).json({ error: "A channel password is required." });
+    return;
+  }
+  if (channel.isPrivate && !(await membership(channel.id, userId))) {
+    const invite = await db.query.channelInvitesTable.findFirst({
+      where: and(eq(channelInvitesTable.channelId, channel.id), eq(channelInvitesTable.userId, userId)),
+    });
+    if (channel.isInviteOnly && !invite) {
+      res.status(403).json({ error: "This channel is invite-only." });
+      return;
+    }
+    const [existingRequest] = await db
+      .select()
+      .from(channelJoinRequestsTable)
+      .where(and(
+        eq(channelJoinRequestsTable.channelId, channel.id),
+        eq(channelJoinRequestsTable.userId, userId),
+      ));
+    if (existingRequest?.status === "pending") {
+      res.status(202).json({ ok: true, status: "pending" });
+      return;
+    }
+    const [request] = existingRequest
+      ? await db.update(channelJoinRequestsTable)
+        .set({ status: "pending", createdAt: new Date(), reviewedAt: null, reviewedBy: null })
+        .where(eq(channelJoinRequestsTable.id, existingRequest.id))
+        .returning()
+      : await db.insert(channelJoinRequestsTable)
+        .values({ channelId: channel.id, userId, status: "pending" })
+        .returning();
+    await db.insert(notificationsTable).values({
+      userId: channel.ownerId,
+      type: "channel_join_request",
+      body: `Someone requested access to ${channel.name}.`,
+    });
+    res.status(202).json({ ok: true, status: request.status });
+    return;
+  }
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
+  await db.delete(channelInvitesTable).where(and(eq(channelInvitesTable.channelId, channel.id), eq(channelInvitesTable.userId, userId)));
   const user = await publicUser(userId);
   const event = { type: "presence", channelId: channel.id, action: "join", user };
   wsHub.broadcastChannel(channel.id, event);
-  res.json({ ok: true });
+  res.json({ ok: true, status: "member" });
+});
+
+router.get("/channels/:channelId/join-requests", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+    res.status(403).json({ error: "Only channel operators can review join requests." });
+    return;
+  }
+  const rows = await db
+    .select({
+      id: channelJoinRequestsTable.id,
+      status: channelJoinRequestsTable.status,
+      createdAt: channelJoinRequestsTable.createdAt,
+      user: usersTable,
+    })
+    .from(channelJoinRequestsTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, channelJoinRequestsTable.userId))
+    .where(and(eq(channelJoinRequestsTable.channelId, channel.id), eq(channelJoinRequestsTable.status, "pending")))
+    .orderBy(asc(channelJoinRequestsTable.createdAt));
+  res.json(rows.map(({ id, status, createdAt, user }) => ({
+    id,
+    status,
+    createdAt,
+    user: {
+      id: user.clerkId,
+      username: user.username,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      status: user.status,
+    },
+  })));
+});
+
+router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  const requestId = Number(param(req, "requestId"));
+  const decision = req.body?.decision;
+  if (!channel || !Number.isInteger(requestId) || !["approve", "reject"].includes(decision)) {
+    res.status(400).json({ error: "Invalid join-request decision." });
+    return;
+  }
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+    res.status(403).json({ error: "Only channel operators can review join requests." });
+    return;
+  }
+  const [request] = await db
+    .update(channelJoinRequestsTable)
+    .set({ status: decision === "approve" ? "approved" : "rejected", reviewedAt: new Date(), reviewedBy: userId })
+    .where(and(
+      eq(channelJoinRequestsTable.id, requestId),
+      eq(channelJoinRequestsTable.channelId, channel.id),
+      eq(channelJoinRequestsTable.status, "pending"),
+    ))
+    .returning();
+  if (!request) {
+    res.status(404).json({ error: "Join request not found." });
+    return;
+  }
+  if (decision === "approve") {
+    await db.insert(channelMembersTable).values({ channelId: channel.id, userId: request.userId }).onConflictDoNothing();
+    await db.insert(notificationsTable).values({ userId: request.userId, type: "channel_join_approved", body: `Your request to join ${channel.name} was approved.` });
+  } else {
+    await db.insert(notificationsTable).values({ userId: request.userId, type: "channel_join_rejected", body: `Your request to join ${channel.name} was declined.` });
+  }
+  res.json({ ok: true, status: request.status });
+});
+
+router.post("/channels/:channelId/invites", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
+  if (!channel || !username) {
+    res.status(400).json({ error: "A channel and username are required." });
+    return;
+  }
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+    res.status(403).json({ error: "Only channel operators can invite users." });
+    return;
+  }
+  const target = await db.query.usersTable.findFirst({ where: eq(usersTable.username, username) });
+  if (!target) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+  await db.insert(channelInvitesTable).values({ channelId: channel.id, userId: target.clerkId, invitedBy: userId }).onConflictDoUpdate({
+    target: [channelInvitesTable.channelId, channelInvitesTable.userId],
+    set: { invitedBy: userId, createdAt: new Date() },
+  });
+  await db.insert(notificationsTable).values({ userId: target.clerkId, type: "channel_invite", body: `You were invited to ${channel.name}.` });
+  res.status(201).json({ ok: true });
 });
 
 router.post("/channels/:channelId/leave", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -187,9 +479,14 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
 });
 
 router.get("/channels/:channelId/members", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
     res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (!(await canReadChannel(channel, userId))) {
+    res.status(403).json({ error: "Join the private channel before viewing its members." });
     return;
   }
   const rows = await db
@@ -214,9 +511,14 @@ router.get("/channels/:channelId/members", requireAuth, async (req: Authenticate
 });
 
 router.get("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
     res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (!(await canReadChannel(channel, userId))) {
+    res.status(403).json({ error: "Join the private channel before reading its history." });
     return;
   }
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -224,7 +526,7 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
     eq(messagesTable.channelId, channel.id),
     query ? ilike(messagesTable.body, `%${query}%`) : undefined,
   )).orderBy(desc(messagesTable.createdAt)).limit(100);
-  res.json({ channel, messages: await Promise.all(rows.reverse().map(messageView)) });
+  res.json({ channel: { ...channel, passwordHash: undefined }, messages: await Promise.all(rows.reverse().map((row) => messageView(row, userId))) });
 });
 
 router.post("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -249,6 +551,7 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
     return;
   }
   const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, body }).returning();
+  await notifyMentionedUsers(body, userId, channel.id);
   const view = await messageView(message);
   wsHub.broadcastChannel(channel.id, { type: "message", message: view });
   res.status(201).json(view);
@@ -267,9 +570,143 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     return;
   }
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
-  const [updated] = await db.update(channelsTable).set(topic === undefined ? {} : { topic }).where(eq(channelsTable.id, channel.id)).returning();
+  const description = typeof req.body.description === "string" ? req.body.description.trim().slice(0, 240) : undefined;
+  const isInviteOnly = typeof req.body.isInviteOnly === "boolean" ? req.body.isInviteOnly : undefined;
+  const password = req.body.password === null
+    ? null
+    : typeof req.body.password === "string"
+      ? req.body.password.trim()
+      : undefined;
+  if (password && password.length < 4) {
+    res.status(400).json({ error: "Channel passwords must be at least 4 characters." });
+    return;
+  }
+  const [updated] = await db.update(channelsTable).set({
+    ...(topic === undefined ? {} : { topic }),
+    ...(description === undefined ? {} : { description }),
+    ...(isInviteOnly === undefined ? {} : { isInviteOnly }),
+    ...(password === undefined ? {} : { passwordHash: password ? passwordHash(password) : null }),
+  }).where(eq(channelsTable.id, channel.id)).returning();
   wsHub.broadcastChannel(channel.id, { type: "channel", channel: updated });
-  res.json(updated);
+  res.json({ ...updated, passwordHash: undefined });
+});
+
+router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const messageId = param(req, "messageId");
+  const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
+  if (!message) {
+    res.status(404).json({ error: "Message not found." });
+    return;
+  }
+  const channel = message.channelId ? await db.query.channelsTable.findFirst({ where: eq(channelsTable.id, message.channelId) }) : null;
+  const actor = message.senderId === userId || Boolean(channel && await isChannelOwnerOrModerator(channel.id, userId));
+  if (!actor) {
+    res.status(403).json({ error: "You cannot delete this message." });
+    return;
+  }
+  const [deleted] = await db.update(messagesTable)
+    .set({ body: "[message deleted]", kind: "deleted", deletedAt: new Date(), deletedBy: userId })
+    .where(eq(messagesTable.id, message.id))
+    .returning();
+  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "message_deleted", messageId: message.id });
+  res.json(await messageView(deleted, userId));
+});
+
+router.post("/messages/:messageId/attachments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const messageId = param(req, "messageId");
+  const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
+  if (!message) {
+    res.status(404).json({ error: "Message not found." });
+    return;
+  }
+  if (!(await canReadMessage(message, userId))) {
+    res.status(403).json({ error: "You cannot attach files to this message." });
+    return;
+  }
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 160) : "";
+  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.trim().slice(0, 120) : "application/octet-stream";
+  const fileSize = Number(req.body?.fileSize);
+  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+    res.status(400).json({ error: "Invalid attachment metadata." });
+    return;
+  }
+  const [attachment] = await db.insert(messageAttachmentsTable).values({
+    messageId,
+    uploaderId: userId,
+    objectPath,
+    fileName,
+    contentType,
+    fileSize,
+  }).returning();
+  res.status(201).json({ ...attachment, url: `/api/attachments/${attachment.id}` });
+});
+
+router.get("/attachments/:attachmentId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const attachmentId = Number(param(req, "attachmentId"));
+  if (!Number.isInteger(attachmentId)) {
+    res.status(404).json({ error: "Attachment not found." });
+    return;
+  }
+  const [row] = await db
+    .select({ attachment: messageAttachmentsTable, message: messagesTable })
+    .from(messageAttachmentsTable)
+    .innerJoin(messagesTable, eq(messagesTable.id, messageAttachmentsTable.messageId))
+    .where(eq(messageAttachmentsTable.id, attachmentId));
+  if (!row || !(await canReadMessage(row.message, userId))) {
+    res.status(404).json({ error: "Attachment not found." });
+    return;
+  }
+  try {
+    res.redirect(await signedObjectUrlForPath(row.attachment.objectPath));
+  } catch {
+    res.status(503).json({ error: "File storage is temporarily unavailable." });
+  }
+});
+
+router.post("/messages/:messageId/reactions", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const messageId = param(req, "messageId");
+  const emoji = typeof req.body?.emoji === "string" ? req.body.emoji.trim().slice(0, 16) : "";
+  if (!emoji) {
+    res.status(400).json({ error: "An emoji is required." });
+    return;
+  }
+  const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
+  if (!message) {
+    res.status(404).json({ error: "Message not found." });
+    return;
+  }
+  if (message.channelId && !(await canReadChannel(await channelFor(String(message.channelId)) as { id: number; isPrivate: boolean }, userId))) {
+    res.status(403).json({ error: "Join the private channel before reacting." });
+    return;
+  }
+  await db.insert(messageReactionsTable).values({ messageId, userId, emoji }).onConflictDoNothing();
+  const view = await messageView(message, userId);
+  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "reaction", messageId, reactions: view.reactions });
+  res.json(view.reactions);
+});
+
+router.delete("/messages/:messageId/reactions/:emoji", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const messageId = param(req, "messageId");
+  const emoji = decodeURIComponent(param(req, "emoji"));
+  const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
+  if (!message) {
+    res.status(404).json({ error: "Message not found." });
+    return;
+  }
+  await db.delete(messageReactionsTable).where(and(
+    eq(messageReactionsTable.messageId, messageId),
+    eq(messageReactionsTable.userId, userId),
+    eq(messageReactionsTable.emoji, emoji),
+  ));
+  const view = await messageView(message, userId);
+  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "reaction", messageId, reactions: view.reactions });
+  res.json(view.reactions);
 });
 
 router.post("/channels/:channelId/moderation", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -281,7 +718,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   }
   const targetUserId = typeof req.body.targetUserId === "string" ? req.body.targetUserId : "";
   const action = req.body.action;
-  if (!targetUserId || !["mute", "kick", "ban", "moderator"].includes(action)) {
+  if (!targetUserId || !["mute", "kick", "ban", "unban", "moderator"].includes(action)) {
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }
@@ -298,6 +735,8 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   } else if (action === "ban") {
     await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
     await db.insert(channelBansTable).values({ channelId: channel.id, userId: targetUserId, reason: String(req.body.reason ?? "") }).onConflictDoUpdate({ target: [channelBansTable.channelId, channelBansTable.userId], set: { reason: String(req.body.reason ?? "") } });
+  } else if (action === "unban") {
+    await db.delete(channelBansTable).where(and(eq(channelBansTable.channelId, channel.id), eq(channelBansTable.userId, targetUserId)));
   } else {
     await db.update(channelMembersTable).set({ role: "moderator" }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
   }
@@ -349,7 +788,7 @@ router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest
   const peerId = param(req, "userId");
   const key = threadKey(userId, peerId);
   const rows = await db.select().from(messagesTable).where(eq(messagesTable.threadKey, key)).orderBy(asc(messagesTable.createdAt)).limit(100);
-  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await Promise.all(rows.map(messageView)) });
+  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await Promise.all(rows.map((row) => messageView(row, userId))) });
 });
 
 router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -374,18 +813,34 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
 });
 
 router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
   const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
   if (q.length < 2) {
     res.json([]);
     return;
   }
   const rows = await db.select().from(messagesTable).where(ilike(messagesTable.body, `%${q}%`)).orderBy(desc(messagesTable.createdAt)).limit(100);
-  res.json(await Promise.all(rows.map(messageView)));
+  res.json(await Promise.all(rows.map((row) => messageView(row, userId))));
 });
 
 router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const rows = await db.select().from(notificationsTable).where(eq(notificationsTable.userId, getUserId(req))).orderBy(desc(notificationsTable.createdAt)).limit(50);
   res.json(rows);
+});
+
+router.get("/announcements", requireAuth, async (_req: AuthenticatedRequest, res): Promise<void> => {
+  const announcements = await db
+    .select({
+      id: serverAnnouncementsTable.id,
+      body: serverAnnouncementsTable.body,
+      createdAt: serverAnnouncementsTable.createdAt,
+      author: usersTable.displayName,
+    })
+    .from(serverAnnouncementsTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
+    .orderBy(desc(serverAnnouncementsTable.createdAt))
+    .limit(20);
+  res.json(announcements);
 });
 
 router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

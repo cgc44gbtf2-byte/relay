@@ -1,7 +1,7 @@
 import type { Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { eq } from "drizzle-orm";
-import { db, usersTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
+import { channelMembersTable, channelsTable, db, usersTable } from "@workspace/db";
 
 type Client = { socket: WebSocket; userId: string; channelIds: Set<number> };
 
@@ -22,9 +22,9 @@ class Hub {
     return entry.userId;
   }
 
-  broadcastChannel(channelId: number, event: unknown): void {
+  broadcastChannel(channelId: number, event: unknown, excludedUserId?: string): void {
     for (const client of this.clients) {
-      if (client.channelIds.has(channelId)) this.send(client.socket, event);
+      if (client.userId !== excludedUserId && client.channelIds.has(channelId)) this.send(client.socket, event);
     }
   }
 
@@ -50,9 +50,37 @@ class Hub {
         void db.update(usersTable).set({ status: "online", lastSeenAt: new Date() }).where(eq(usersTable.clerkId, userId));
         ws.on("message", (raw) => {
           try {
-            const message = JSON.parse(raw.toString()) as { type?: string; channelId?: number };
-            if (message.type === "subscribe" && Number.isInteger(message.channelId)) {
-              client.channelIds.add(Number(message.channelId));
+            const message = JSON.parse(raw.toString()) as { type?: string; channelId?: number; active?: boolean };
+            if ((message.type === "subscribe" || message.type === "typing") && Number.isInteger(message.channelId)) {
+              const channelId = Number(message.channelId);
+              void db
+                .select({ id: channelsTable.id, isPrivate: channelsTable.isPrivate })
+                .from(channelsTable)
+                .where(eq(channelsTable.id, channelId))
+                .then(async ([channel]) => {
+                  if (!channel) return;
+                  if (channel.isPrivate) {
+                    const [member] = await db
+                      .select({ userId: channelMembersTable.userId })
+                      .from(channelMembersTable)
+                      .where(and(
+                        eq(channelMembersTable.channelId, channelId),
+                        eq(channelMembersTable.userId, client.userId),
+                      ));
+                    if (!member) return;
+                  }
+                  if (message.type === "subscribe") {
+                    client.channelIds.add(channelId);
+                  } else if (client.channelIds.has(channelId)) {
+                    this.broadcastChannel(channelId, {
+                      type: "typing",
+                      channelId,
+                      userId: client.userId,
+                      active: message.active !== false,
+                    }, client.userId);
+                  }
+                })
+                .catch(() => undefined);
             }
           } catch {
             // Ignore malformed client frames.

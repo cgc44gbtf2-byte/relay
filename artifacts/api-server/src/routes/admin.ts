@@ -6,6 +6,8 @@ import {
   channelsTable,
   db,
   messagesTable,
+  notificationsTable,
+  serverAnnouncementsTable,
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
@@ -180,6 +182,29 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     recentMessages,
     activity,
   });
+});
+
+router.post("/admin/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 500) : "";
+  if (!body) {
+    res.status(400).json({ error: "Announcement text is required." });
+    return;
+  }
+  const [announcement] = await db.insert(serverAnnouncementsTable).values({ authorId: actor.clerkId, body }).returning();
+  const recipients = await db.select({ clerkId: usersTable.clerkId }).from(usersTable);
+  if (recipients.length) {
+    await db.insert(notificationsTable).values(recipients.map((user) => ({
+      userId: user.clerkId,
+      type: "server_announcement",
+      body,
+    })));
+  }
+  res.status(201).json(announcement);
 });
 
 router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
