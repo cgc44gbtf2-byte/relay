@@ -130,13 +130,31 @@ describe("admin access controls", () => {
     const requests: Array<[string, RequestInit?]> = [
       ["/admin/status"],
       ["/admin/claim", { method: "POST" }],
+      ["/admin/health"],
       ["/admin/overview"],
+      ["/admin/users"],
       [
         `/admin/users/${firstSession.userId}/role`,
         {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ role: "member" }),
+        },
+      ],
+      [
+        "/admin/channels/1",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Updated topic" }),
+        },
+      ],
+      [
+        "/admin/channels/1/messages",
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
         },
       ],
     ];
