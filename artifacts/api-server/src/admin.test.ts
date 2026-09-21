@@ -64,6 +64,21 @@ async function apiRequest(
   return { status: response.status, body };
 }
 
+async function unauthenticatedApiRequest(
+  path: string,
+  init: RequestInit = {},
+): Promise<ApiResponse> {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const text = await response.text();
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Keep non-JSON error responses available in the assertion output.
+  }
+  return { status: response.status, body };
+}
+
 async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
   await pool.query(
@@ -110,6 +125,31 @@ after(async () => {
 });
 
 describe("admin access controls", () => {
+  test("rejects unauthenticated requests for every privileged admin route", async () => {
+    const requests: Array<[string, RequestInit?]> = [
+      ["/admin/status"],
+      ["/admin/claim", { method: "POST" }],
+      ["/admin/overview"],
+      [
+        `/admin/users/${firstSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member" }),
+        },
+      ],
+    ];
+
+    const responses = await Promise.all(
+      requests.map(([path, init]) => unauthenticatedApiRequest(path, init)),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+  });
+
   test("only one concurrent first-account claim succeeds", async () => {
     const responses = await Promise.all([
       apiRequest(firstSession, "/admin/claim", { method: "POST" }),

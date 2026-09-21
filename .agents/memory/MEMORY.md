@@ -1,2 +1,3 @@
 - [Drizzle constraint errors](drizzle-constraint-errors.md) — inspect wrapped causes when translating PostgreSQL constraint failures into HTTP responses.
 - [Admin UI maintainability](admin-ui-maintainability.md) — keep large operations surfaces split into focused components so incremental edits stay safe.
+- [API test database](api-test-database.md) — admin integration tests require a dedicated disposable TEST_DATABASE_URL before the runner starts.
