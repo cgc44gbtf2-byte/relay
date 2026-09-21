@@ -27,11 +27,12 @@ TEST_DATABASE_URL='postgres://.../web_irc_test' \
   pnpm --filter @workspace/api-server run test
 ```
 
-CI must provide `TEST_DATABASE_URL` as a protected environment secret pointing to a
-disposable database created for the job or test environment, then run
-`pnpm --filter @workspace/db run push:test` before
-`pnpm --filter @workspace/api-server run test`. Do not set `TEST_DATABASE_URL` to the
-development or preview `DATABASE_URL`.
+CI should provide `CI_TEST_DATABASE_ADMIN_URL` as a protected environment secret for a
+PostgreSQL server where the validation job may create and drop databases. Run
+`pnpm --filter @workspace/api-server run test:ci`; this creates a unique database for
+the run, pushes the schema with `push:test`, runs the API tests, and drops the database
+even when setup or tests fail. The command never reads `DATABASE_URL` or a pre-existing
+`TEST_DATABASE_URL`, so development and preview databases cannot be used by accident.
 
 ## Stack
 

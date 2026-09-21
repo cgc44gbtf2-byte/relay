@@ -9,6 +9,7 @@
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/admin.test.cjs",
+    "test:ci": "pnpm --filter @workspace/db run test:ci",
     "validate": "pnpm run typecheck && pnpm run test"
   },
   "dependencies": {
