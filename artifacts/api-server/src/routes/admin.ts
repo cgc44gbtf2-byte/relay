@@ -57,14 +57,9 @@ async function writeAudit(
 
 router.get("/admin/status", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const profile = await ensureProfile(getUserId(req));
-  const [admin] = await db
-    .select({ id: usersTable.clerkId })
-    .from(usersTable)
-    .where(eq(usersTable.role, "admin"))
-    .limit(1);
   res.json({
     isAdmin: profile.role === "admin",
-    bootstrapAvailable: !admin,
+    bootstrapAvailable: false,
     profile: {
       id: profile.clerkId,
       username: profile.username,
@@ -74,33 +69,8 @@ router.get("/admin/status", requireAuth, async (req: AuthenticatedRequest, res):
 });
 
 router.post("/admin/claim", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
-  const userId = getUserId(req);
-  const profile = await ensureProfile(userId);
-  if (profile.role === "admin") {
-    res.json({ ok: true, role: "admin" });
-    return;
-  }
-  const [admin] = await db
-    .select({ id: usersTable.clerkId })
-    .from(usersTable)
-    .where(eq(usersTable.role, "admin"))
-    .limit(1);
-  if (admin) {
-    res.status(403).json({ error: "An admin account has already been claimed." });
-    return;
-  }
-  try {
-    const [updated] = await db
-      .update(usersTable)
-      .set({ role: "admin" })
-      .where(eq(usersTable.clerkId, userId))
-      .returning({ role: usersTable.role });
-    await writeAudit(userId, "claimed_admin", userId, profile.displayName, "Initial admin seat claimed");
-    res.json({ ok: true, role: updated?.role ?? "admin" });
-  } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
-    res.status(403).json({ error: "An admin account has already been claimed." });
-  }
+  await ensureProfile(getUserId(req));
+  res.status(403).json({ error: "Admin access is provisioned by the platform." });
 });
 
 router.get("/admin/health", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
