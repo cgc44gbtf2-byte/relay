@@ -66,7 +66,7 @@ export type CleanupFailureNotification = {
 
 export type CleanupFailureNotifier = (
   notification: CleanupFailureNotification,
-) => void;
+) => void | Promise<void>;
 
 const defaultDependencies: CleanupDependencies = {
   clerk: clerkClient as unknown as CleanupClerkClient,
@@ -294,20 +294,42 @@ function formatFailureNotification(
     .join(", ");
   const userLabel = notification.affectedUserCount === 1 ? "user" : "users";
 
-  return `Scheduled admin test-user cleanup failed for ${notification.affectedUserCount} affected ${userLabel}: ${
-    users || "none found"
-  }.`;
+  return redactClerkCredentials(
+    `Scheduled admin test-user cleanup failed for ${notification.affectedUserCount} affected ${userLabel}: ${
+      users || "none found"
+    }.`,
+  );
 }
 
-function notifyCleanupFailure(
+async function notifyCleanupFailure(
   notification: CleanupFailureNotification,
-): void {
+): Promise<void> {
   const message = formatFailureNotification(notification);
   if (process.env.GITHUB_ACTIONS === "true") {
     console.error(`::error title=Abandoned test-user cleanup failed::${message}`);
+  } else {
+    console.error(`ALERT: ${message}`);
+  }
+
+  const webhookUrl = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+  if (process.env.GITHUB_ACTIONS !== "true" || !webhookUrl) {
     return;
   }
-  console.error(`ALERT: ${message}`);
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: message }),
+    });
+    if (!response.ok) {
+      console.error(
+        `Failed to deliver cleanup failure notification (HTTP ${response.status}).`,
+      );
+    }
+  } catch {
+    console.error("Failed to deliver cleanup failure notification.");
+  }
 }
 
 function logCleanupEvent(
@@ -339,7 +361,7 @@ export async function main(
   } catch (error) {
     if (apply) {
       const notification = createFailureNotification(users);
-      (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
+      await (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
       logCleanupEvent("failed", users, error);
     }
     throw error;
@@ -368,7 +390,7 @@ export async function main(
     await cleanupUsers(users, dependencies);
   } catch (error) {
     const notification = createFailureNotification(users);
-    (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
+    await (dependencies.notifyFailure ?? notifyCleanupFailure)(notification);
     logCleanupEvent("failed", users, error);
     throw error;
   }

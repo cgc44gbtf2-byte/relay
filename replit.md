@@ -73,10 +73,14 @@ usernames, while diagnostic Clerk key values are redacted.
 GitHub Actions runs the scheduled cleanup every six hours in the
 `cleanup-abandoned-test-users` job. The job starts a disposable PostgreSQL
 service, creates its test schema, and sets only `TEST_DATABASE_URL`,
-`CLERK_TEST_SECRET_KEY`, and `CLERK_TEST_PUBLISHABLE_KEY` from GitHub Actions
-secrets. It explicitly removes `DATABASE_URL` before both database setup and
-cleanup. Configure the two Clerk secrets with `sk_test_` and `pk_test_` values;
-live Clerk keys must not be used for this job.
+`CLERK_TEST_SECRET_KEY`, `CLERK_TEST_PUBLISHABLE_KEY`, and
+`TEAM_NOTIFICATION_WEBHOOK_URL` from GitHub Actions secrets. The webhook should
+target the team's operational notification channel. It explicitly removes
+`DATABASE_URL` before both database setup and cleanup. Configure the two Clerk
+secrets with `sk_test_` and `pk_test_` values; live Clerk keys must not be used
+for this job. Cleanup failures POST only the redacted affected-user summary to
+the configured webhook; the webhook URL and Clerk credentials are never
+included in the message.
 
 The authenticated `api-tests` job and the scheduled cleanup use the same
 GitHub Actions concurrency group for the shared test Clerk environment.

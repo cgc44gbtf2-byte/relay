@@ -26,6 +26,7 @@ const expectedEnv = new Map([
   ],
   ["CLERK_SECRET_KEY", "${{ secrets.CLERK_TEST_SECRET_KEY }}"],
   ["CLERK_PUBLISHABLE_KEY", "${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}"],
+  ["TEAM_NOTIFICATION_WEBHOOK_URL", "${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}"],
 ]);
 
 assert.match(
@@ -44,7 +45,8 @@ for (const secretName of job.matchAll(
 )) {
   assert.ok(
     secretName[1] === "CLERK_TEST_SECRET_KEY" ||
-      secretName[1] === "CLERK_TEST_PUBLISHABLE_KEY",
+      secretName[1] === "CLERK_TEST_PUBLISHABLE_KEY" ||
+      secretName[1] === "TEAM_NOTIFICATION_WEBHOOK_URL",
     `scheduled cleanup references an unapproved secret: ${secretName[1]}`,
   );
 }

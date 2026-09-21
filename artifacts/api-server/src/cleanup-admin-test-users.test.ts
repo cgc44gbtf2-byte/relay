@@ -344,4 +344,69 @@ describe("admin test-user cleanup safeguards", () => {
       affectedUsers: [],
     });
   });
+
+  test("delivers the redacted failure summary to the team channel", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook`;
+    const clerkSecret = "sk_test_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/team";
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(
+        requests[0].url,
+        "https://notifications.example.invalid/team",
+      );
+      assert.equal(requests[0].init?.method, "POST");
+      assert.deepEqual(
+        JSON.parse(String(requests[0].init?.body)),
+        {
+          text: `Scheduled admin test-user cleanup failed for 1 affected user: ${username} (webhook-user).`,
+        },
+      );
+      assert.doesNotMatch(
+        String(requests[0].init?.body),
+        /sk_test_webhook_secret/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
 });
