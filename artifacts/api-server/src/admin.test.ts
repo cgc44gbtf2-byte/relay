@@ -1620,6 +1620,32 @@ describe("admin access controls", () => {
         [{ error: "Only one admin account is allowed." }],
       );
 
+      const winningIndex = responses.findIndex(({ status }) => status === 200);
+      assert.notEqual(winningIndex, -1);
+      const winningTarget = [firstTarget, secondTarget][winningIndex];
+      const rejectedTarget = [firstTarget, secondTarget][1 - winningIndex];
+      const promotionAudit = await pool.query(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'promoted_user'
+           AND target_id = ANY($1::text[])
+         ORDER BY id`,
+        [[firstTarget.userId, secondTarget.userId]],
+      );
+      assert.deepEqual(promotionAudit.rows, [
+        {
+          actor_id: adminSession.userId,
+          action: "promoted_user",
+          target_id: winningTarget.userId,
+          target_label: winningTarget.userId,
+          details: "Role changed to admin",
+        },
+      ]);
+      assert.equal(
+        promotionAudit.rows.some(({ target_id }) => target_id === rejectedTarget.userId),
+        false,
+      );
+
       for (const [index, response] of responses.entries()) {
         const targetRole = await pool.query(
           "SELECT role FROM irc_users WHERE clerk_id = $1",
