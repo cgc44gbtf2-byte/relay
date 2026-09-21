@@ -8,8 +8,8 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/admin.test.cjs",
-    "cleanup:test-users": "node ./build-cleanup.mjs && NODE_ENV=test node ./dist-cleanup/cleanup-admin-test-users.cjs",
+    "test": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/admin.test.cjs ./dist-tests/cleanup-admin-test-users.test.cjs",
+    "cleanup:test-users": "node ./build-cleanup.mjs && NODE_ENV=test node ./dist-cleanup/cleanup-admin-test-users-cli.cjs",
     "test:ci": "pnpm --filter @workspace/db run test:ci",
     "validate": "pnpm run typecheck && pnpm run test"
   },

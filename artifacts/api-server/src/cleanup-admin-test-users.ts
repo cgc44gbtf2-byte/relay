@@ -22,7 +22,44 @@ type CleanupSession = {
   status: string;
 };
 
-function assertSafeCleanupEnvironment(): void {
+type CleanupPage<T> = {
+  data: T[];
+};
+
+export type CleanupClerkClient = {
+  users: {
+    getUserList(args: {
+      query: string;
+      limit: number;
+      offset: number;
+    }): Promise<CleanupPage<CleanupUser>>;
+    deleteUser(userId: string): Promise<unknown>;
+  };
+  sessions: {
+    getSessionList(args: {
+      userId: string;
+      limit: number;
+      offset: number;
+    }): Promise<CleanupPage<CleanupSession>>;
+    revokeSession(sessionId: string): Promise<unknown>;
+  };
+};
+
+export type CleanupDatabase = {
+  query(text: string, values?: unknown[]): Promise<unknown>;
+};
+
+export type CleanupDependencies = {
+  clerk: CleanupClerkClient;
+  database: CleanupDatabase;
+};
+
+const defaultDependencies: CleanupDependencies = {
+  clerk: clerkClient as unknown as CleanupClerkClient,
+  database: pool,
+};
+
+export function assertSafeCleanupEnvironment(): void {
   const secretKey = process.env.CLERK_SECRET_KEY;
   const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
 
@@ -61,12 +98,14 @@ function assertSupportedArguments(args: string[]): void {
   }
 }
 
-async function listMatchingUsers(): Promise<CleanupUser[]> {
+export async function listMatchingUsers(
+  clerk: CleanupClerkClient = defaultDependencies.clerk,
+): Promise<CleanupUser[]> {
   const matchingUsers: CleanupUser[] = [];
   let offset = 0;
 
   while (true) {
-    const page = await clerkClient.users.getUserList({
+    const page = await clerk.users.getUserList({
       query: TEST_USERNAME_PREFIX,
       limit: PAGE_SIZE,
       offset,
@@ -88,12 +127,15 @@ async function listMatchingUsers(): Promise<CleanupUser[]> {
   }
 }
 
-async function listUserSessions(userId: string): Promise<CleanupSession[]> {
+export async function listUserSessions(
+  userId: string,
+  clerk: CleanupClerkClient = defaultDependencies.clerk,
+): Promise<CleanupSession[]> {
   const sessions: CleanupSession[] = [];
   let offset = 0;
 
   while (true) {
-    const page = await clerkClient.sessions.getSessionList({
+    const page = await clerk.sessions.getSessionList({
       userId,
       limit: PAGE_SIZE,
       offset,
@@ -112,32 +154,41 @@ async function listUserSessions(userId: string): Promise<CleanupSession[]> {
   }
 }
 
-async function removeDatabaseRows(userIds: string[]): Promise<void> {
+async function removeDatabaseRows(
+  userIds: string[],
+  database: CleanupDatabase,
+): Promise<void> {
   if (userIds.length === 0) {
     return;
   }
 
-  await pool.query(
+  await database.query(
     "DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])",
     [userIds],
   );
 }
 
-async function cleanupUsers(users: CleanupUser[]): Promise<void> {
+export async function cleanupUsers(
+  users: CleanupUser[],
+  dependencies: CleanupDependencies = defaultDependencies,
+): Promise<void> {
   const failures: string[] = [];
-  await removeDatabaseRows(users.map(({ id }) => id));
+  await removeDatabaseRows(
+    users.map(({ id }) => id),
+    dependencies.database,
+  );
 
   for (const user of users) {
     let sessions: CleanupSession[] = [];
     try {
-      sessions = await listUserSessions(user.id);
+      sessions = await listUserSessions(user.id, dependencies.clerk);
       const activeSessions = sessions.filter(
         ({ status }) => status === "active",
       );
       await Promise.all(
         activeSessions.map(async ({ id }) => {
           try {
-            await clerkClient.sessions.revokeSession(id);
+            await dependencies.clerk.sessions.revokeSession(id);
           } catch (error) {
             failures.push(
               `session ${id} for ${user.username ?? user.id}: ${formatError(
@@ -154,7 +205,7 @@ async function cleanupUsers(users: CleanupUser[]): Promise<void> {
     }
 
     try {
-      await clerkClient.users.deleteUser(user.id);
+      await dependencies.clerk.users.deleteUser(user.id);
       console.log(
         `Deleted ${user.username ?? user.id} and revoked ${
           sessions.filter(({ status }) => status === "active").length
@@ -176,12 +227,14 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+export async function main(
+  args: string[] = process.argv.slice(2),
+  dependencies: CleanupDependencies = defaultDependencies,
+): Promise<void> {
   assertSupportedArguments(args);
   assertSafeCleanupEnvironment();
 
-  const users = await listMatchingUsers();
+  const users = await listMatchingUsers(dependencies.clerk);
   const apply = args.includes(APPLY_FLAG);
 
   console.log(
@@ -190,7 +243,7 @@ async function main(): Promise<void> {
 
   if (!apply) {
     for (const user of users) {
-      const sessions = await listUserSessions(user.id);
+      const sessions = await listUserSessions(user.id, dependencies.clerk);
       console.log(
         `Would delete ${user.username ?? user.id} and revoke ${
           sessions.filter(({ status }) => status === "active").length
@@ -201,19 +254,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  await cleanupUsers(users);
+  await cleanupUsers(users, dependencies);
   console.log("Admin regression test-user cleanup completed.");
 }
 
-async function run(): Promise<void> {
+export async function runCleanup(
+  args: string[] = process.argv.slice(2),
+  dependencies: CleanupDependencies = defaultDependencies,
+): Promise<number> {
   try {
-    await main();
-  } finally {
-    await pool.end();
+    await main(args, dependencies);
+    return 0;
+  } catch (error: unknown) {
+    console.error(formatError(error));
+    return 1;
   }
 }
-
-run().catch((error: unknown) => {
-  console.error(formatError(error));
-  process.exitCode = 1;
-});

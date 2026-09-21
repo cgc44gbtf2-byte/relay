@@ -9,7 +9,10 @@ globalThis.require = createRequire(import.meta.url);
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
 
 await esbuild({
-  entryPoints: [path.resolve(artifactDir, "src/admin.test.ts")],
+  entryPoints: [
+    path.resolve(artifactDir, "src/admin.test.ts"),
+    path.resolve(artifactDir, "src/cleanup-admin-test-users.test.ts"),
+  ],
   platform: "node",
   bundle: true,
   format: "cjs",
