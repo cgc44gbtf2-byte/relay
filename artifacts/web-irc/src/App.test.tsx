@@ -33,6 +33,8 @@ type Channel = {
   memberCount: number;
 };
 
+let latestWebSocket: { onmessage: ((event: MessageEvent) => void) | null } | null = null;
+
 const profile = {
   id: "user-1",
   username: "mira",
@@ -91,7 +93,7 @@ function installApi({
   fallbackChannels,
   owner = false,
 }: {
-  missingRequest: "history" | "members" | "send" | "topic";
+  missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
   owner?: boolean;
 }) {
@@ -144,6 +146,9 @@ function installApi({
     onmessage: ((event: MessageEvent) => void) | null = null;
     send = vi.fn();
     close = vi.fn();
+    constructor() {
+      latestWebSocket = this;
+    }
   });
 }
 
@@ -162,6 +167,7 @@ describe("deleted room recovery", () => {
 
   afterEach(() => {
     cleanup();
+    latestWebSocket = null;
     vi.unstubAllGlobals();
   });
 
@@ -211,5 +217,30 @@ describe("deleted room recovery", () => {
       expect(screen.queryByText("stale history")).toBeNull();
       expect(screen.queryByText("Orion")).toBeNull();
     });
+  });
+
+  it("removes a room immediately when another session deletes it", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
+    } as MessageEvent);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
+    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+  });
+
+  it("shows the empty-channel state when a realtime removal deletes the selected room", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [] });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
+    } as MessageEvent);
+
+    await waitFor(() => expect(screen.getByText("no channels available")).toBeTruthy());
+    expect(screen.queryByText("#deleted-room")).toBeNull();
   });
 });

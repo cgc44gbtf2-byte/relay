@@ -688,6 +688,29 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
   res.json({ ...updated, passwordHash: undefined });
 });
 
+router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+    res.status(403).json({ error: "Only channel owners and moderators can delete this channel." });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channel.id));
+    await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channel.id));
+    await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channel.id));
+    await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channel.id));
+    await tx.delete(messagesTable).where(eq(messagesTable.channelId, channel.id));
+    await tx.delete(channelsTable).where(eq(channelsTable.id, channel.id));
+  });
+  wsHub.broadcastChannelRemoved(channel.id);
+  res.json({ ok: true });
+});
+
 router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const messageId = param(req, "messageId");

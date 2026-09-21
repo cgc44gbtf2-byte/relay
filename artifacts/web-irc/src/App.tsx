@@ -340,10 +340,14 @@ function ChatApp() {
       socket.onerror = () => setConnection("offline");
       socket.onmessage = (event) => {
         try {
-           const data = JSON.parse(event.data) as { type: string; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
+           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
           if (data.type === "message" && data.message?.channelId === currentChannelId) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
           if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
+          if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
+            setChannels((items) => items.filter((item) => item.id !== data.channelId));
+            if (currentChannelIdRef.current === data.channelId) void recoverFromMissingChannel(data.channelId);
+          }
            if (data.type === "typing" && data.userId && data.userId !== profile?.id) {
              setTypingUsers((items) => ({ ...items, [data.userId!]: Date.now() + 1800 }));
              window.setTimeout(() => setTypingUsers((items) => {

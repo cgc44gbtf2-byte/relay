@@ -39,6 +39,13 @@ class Hub {
     }
   }
 
+  broadcastChannelRemoved(channelId: number): void {
+    for (const client of this.clients) {
+      this.send(client.socket, { type: "channel_removed", channelId });
+      client.channelIds.delete(channelId);
+    }
+  }
+
   attach(server: Server): void {
     const wss = new WebSocketServer({ noServer: true });
     server.on("upgrade", (request, socket, head) => {
