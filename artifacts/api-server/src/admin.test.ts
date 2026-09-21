@@ -48,10 +48,18 @@ async function apiRequest(
   init: RequestInit = {},
 ): Promise<ApiResponse> {
   const token = await clerkClient.sessions.getToken(session.sessionId);
+  return apiRequestWithToken(token.jwt, path, init);
+}
+
+async function apiRequestWithToken(
+  token: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<ApiResponse> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
-      authorization: `Bearer ${token.jwt}`,
+      authorization: `Bearer ${token}`,
       ...(init.headers ?? {}),
     },
   });
@@ -63,6 +71,22 @@ async function apiRequest(
     // Keep non-JSON error responses available in the assertion output.
   }
   return { status: response.status, body };
+}
+
+function createExpiredToken(userId: string): string {
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+
+  return [
+    encode({ alg: "RS256", typ: "JWT" }),
+    encode({
+      sub: userId,
+      sid: `expired_${randomUUID()}`,
+      iat: 1,
+      exp: 2,
+    }),
+    "expired-signature",
+  ].join(".");
 }
 
 async function unauthenticatedApiRequest(
@@ -126,6 +150,61 @@ after(async () => {
 });
 
 describe("admin access controls", () => {
+  test("rejects malformed and expired Clerk credentials before creating profiles", async () => {
+    const requests: Array<[string, RequestInit?]> = [
+      ["/admin/status"],
+      ["/admin/claim", { method: "POST" }],
+      ["/admin/health"],
+      ["/admin/overview"],
+      ["/admin/users"],
+      [
+        `/admin/users/${firstSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member" }),
+        },
+      ],
+      [
+        "/admin/channels/1",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Updated topic" }),
+        },
+      ],
+      [
+        "/admin/channels/1/messages",
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        },
+      ],
+    ];
+    const credentials = [
+      "malformed-clerk-token",
+      createExpiredToken(firstSession.userId),
+    ];
+
+    const responses = await Promise.all(
+      credentials.flatMap((token) =>
+        requests.map(([path, init]) => apiRequestWithToken(token, path, init)),
+      ),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const profiles = await pool.query(
+      "SELECT clerk_id FROM irc_users WHERE clerk_id = ANY($1::text[])",
+      [[firstSession.userId, secondSession.userId]],
+    );
+    assert.deepEqual(profiles.rows, []);
+  });
+
   test("rejects unauthenticated requests for every privileged admin route", async () => {
     const requests: Array<[string, RequestInit?]> = [
       ["/admin/status"],

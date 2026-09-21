@@ -8,3 +8,5 @@ The API integration test runner intentionally refuses to start without a dedicat
 **Why:** Admin access tests create and remove external Clerk users and database profiles, so running them against an unspecified or shared database would risk contaminating persistent data.
 
 **How to apply:** Before relying on the API package's full validation command, provision or expose a disposable test database through `TEST_DATABASE_URL`; type checking and test compilation can still run without it.
+
+When provisioning PostgreSQL locally in this environment, pass an explicit temporary socket directory because `/run/postgresql` may not exist.
