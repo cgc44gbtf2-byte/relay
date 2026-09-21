@@ -355,6 +355,73 @@ describe("admin access controls", () => {
     assert.deepEqual(roleUpdate.body, { error: "Admin access required." });
   });
 
+  test("a non-admin cannot use health, user, or channel maintenance tools", async () => {
+    const channelName = `admin-guard-${randomUUID()}`;
+    const channelResult = await pool.query<{ id: number; topic: string }>(
+      `INSERT INTO irc_channels (name, topic, owner_id)
+       VALUES ($1, $2, $3)
+       RETURNING id, topic`,
+      [channelName, "Protected topic", adminSession.userId],
+    );
+    const channel = channelResult.rows[0];
+    assert.ok(channel);
+
+    const messageResult = await pool.query<{ id: string; body: string }>(
+      `INSERT INTO irc_messages (channel_id, sender_id, body)
+       VALUES ($1, $2, $3)
+       RETURNING id, body`,
+      [channel.id, memberSession.userId, "Protected message"],
+    );
+    const message = messageResult.rows[0];
+    assert.ok(message);
+
+    try {
+      const beforeChannel = await pool.query(
+        "SELECT id, topic FROM irc_channels WHERE id = $1",
+        [channel.id],
+      );
+      const beforeMessages = await pool.query(
+        "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+        [channel.id],
+      );
+
+      const [health, users, topicUpdate, clearMessages] = await Promise.all([
+        apiRequest(memberSession, "/admin/health"),
+        apiRequest(memberSession, "/admin/users"),
+        apiRequest(memberSession, `/admin/channels/${channel.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Rejected topic" }),
+        }),
+        apiRequest(memberSession, `/admin/channels/${channel.id}/messages`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        }),
+      ]);
+
+      for (const response of [health, users, topicUpdate, clearMessages]) {
+        assert.equal(response.status, 403, JSON.stringify(response));
+        assert.deepEqual(response.body, { error: "Admin access required." });
+      }
+
+      const afterChannel = await pool.query(
+        "SELECT id, topic FROM irc_channels WHERE id = $1",
+        [channel.id],
+      );
+      const afterMessages = await pool.query(
+        "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+        [channel.id],
+      );
+
+      assert.deepEqual(afterChannel.rows, beforeChannel.rows);
+      assert.deepEqual(afterMessages.rows, beforeMessages.rows);
+    } finally {
+      await pool.query("DELETE FROM irc_messages WHERE channel_id = $1", [channel.id]);
+      await pool.query("DELETE FROM irc_channels WHERE id = $1", [channel.id]);
+    }
+  });
+
   test("rejects promoting a second user to admin without changing their role", async () => {
     const response = await apiRequest(
       adminSession,
