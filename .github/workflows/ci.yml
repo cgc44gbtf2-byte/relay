@@ -74,6 +74,9 @@ jobs:
       - name: Run API tests
         run: pnpm --filter @workspace/api-server run test:ci
 
+      - name: Run database runner cleanup and isolation tests
+        run: pnpm --filter @workspace/db run test
+
   cleanup-abandoned-test-users:
     if: github.event_name == 'schedule'
     needs: validate-scheduled-cleanup
