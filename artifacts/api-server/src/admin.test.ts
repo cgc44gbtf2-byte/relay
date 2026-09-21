@@ -585,6 +585,80 @@ describe("admin access controls", () => {
     });
   });
 
+  test("records a successful promotion with the acting admin in activity", async () => {
+    try {
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [memberSession.userId],
+      );
+
+      const roleUpdate = await apiRequest(
+        memberSession,
+        `/admin/users/${adminSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "admin" }),
+        },
+      );
+      assert.equal(roleUpdate.status, 200);
+      assert.deepEqual(roleUpdate.body, {
+        id: adminSession.userId,
+        role: "admin",
+      });
+
+      const status = await apiRequest(memberSession, "/admin/status");
+      assert.equal(status.status, 200);
+      assert.ok(status.body && typeof status.body === "object");
+      const profile = (status.body as {
+        profile?: { id?: unknown; displayName?: unknown };
+      }).profile;
+      assert.ok(profile && profile.id === memberSession.userId);
+      assert.equal(typeof profile.displayName, "string");
+
+      const overview = await apiRequest(memberSession, "/admin/overview");
+      assert.equal(overview.status, 200);
+      assert.ok(overview.body && typeof overview.body === "object");
+      const activity = (overview.body as { activity?: unknown }).activity;
+      assert.ok(Array.isArray(activity));
+      const matchingActivity = activity.find(
+        (
+          entry,
+        ): entry is {
+          action: string;
+          targetId: string | null;
+          details: string | null;
+          actor: string | null;
+        } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "action" in entry &&
+          "targetId" in entry &&
+          (entry as { action?: unknown }).action === "promoted_user" &&
+          (entry as { targetId?: unknown }).targetId === adminSession.userId,
+      );
+      assert.deepEqual(matchingActivity, {
+        action: "promoted_user",
+        targetId: adminSession.userId,
+        details: "Role changed to admin",
+        actor: profile.displayName,
+      });
+    } finally {
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
+        [memberSession.userId],
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+    }
+  });
+
   test("rolls back a role change when recording admin activity fails", async () => {
     const triggerName = `fail_role_audit_${randomUUID().replaceAll("-", "")}`;
     const functionName = `${triggerName}_fn`;
