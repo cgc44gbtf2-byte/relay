@@ -855,6 +855,33 @@ describe("admin access controls", () => {
     assert.deepEqual(afterRows, beforeRows);
   });
 
+  test("rejects malformed and expired Clerk credentials for WebSocket tickets without changing presence", async () => {
+    const invalidSession = await createTestSession("invalid_ws_ticket");
+    const profile = await apiRequest(invalidSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    await pool.query(
+      "UPDATE irc_users SET status = 'offline' WHERE clerk_id = $1",
+      [invalidSession.userId],
+    );
+
+    const credentials = [
+      "malformed-clerk-token",
+      createExpiredToken(invalidSession.userId),
+    ];
+    const beforeRows = await userOwnedRows(invalidSession.userId);
+    const responses = await Promise.all(
+      credentials.map((token) => apiRequestWithToken(token, "/ws-ticket")),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const afterRows = await userOwnedRows(invalidSession.userId);
+    assert.deepEqual(afterRows, beforeRows);
+  });
+
   test("rejects a WebSocket ticket issued before session revocation without changing presence", async () => {
     const revokedSession = await createTestSession("revoked_ws");
     const profile = await apiRequest(revokedSession, "/me");
