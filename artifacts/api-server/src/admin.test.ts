@@ -1220,6 +1220,48 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps malformed channel IDs predictable across public and admin routes", async () => {
+    const malformedChannelId = "not-a-channel";
+    const publicRequests: Array<Promise<ApiResponse>> = [
+      apiRequest(memberSession, `/channels/${malformedChannelId}/join`, { method: "POST" }),
+      apiRequest(memberSession, `/channels/${malformedChannelId}/messages`),
+    ];
+    const adminRequests: Array<Promise<ApiResponse>> = [
+      apiRequest(adminSession, `/admin/channels/${malformedChannelId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Malformed channel topic" }),
+      }),
+      apiRequest(adminSession, `/admin/channels/${malformedChannelId}/messages`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      }),
+    ];
+
+    const [publicResponses, adminResponses] = await Promise.all([
+      Promise.all(publicRequests),
+      Promise.all(adminRequests),
+    ]);
+
+    // Public channel lookups normalize malformed IDs to the stable missing-channel contract.
+    for (const response of publicResponses) {
+      assert.equal(response.status, 404, JSON.stringify(response));
+      assert.deepEqual(response.body, {
+        error: "Channel not found.",
+        code: "CHANNEL_NOT_FOUND",
+      });
+    }
+
+    // Admin maintenance keeps its legacy validation errors for malformed IDs.
+    assert.equal(adminResponses[0].status, 400, JSON.stringify(adminResponses[0]));
+    assert.deepEqual(adminResponses[0].body, {
+      error: "A valid channel and topic are required.",
+    });
+    assert.equal(adminResponses[1].status, 400, JSON.stringify(adminResponses[1]));
+    assert.deepEqual(adminResponses[1].body, { error: "Invalid channel." });
+  });
+
   test("a non-admin cannot read the overview or update roles", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);
