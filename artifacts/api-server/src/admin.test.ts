@@ -194,6 +194,77 @@ async function userOwnedRows(userId: string): Promise<unknown[]> {
   ];
 }
 
+function ircRequests(
+  userId: string,
+  query: string,
+  moderationTargetUserId = userId,
+): Array<[string, RequestInit?]> {
+  return [
+    ["/me"],
+    [
+      "/me",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: "invalid_user", displayName: "Invalid User" }),
+      },
+    ],
+    ["/channels"],
+    [
+      "/channels",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "invalid-channel", topic: "Should not exist" }),
+      },
+    ],
+    ["/channels/1/join", { method: "POST" }],
+    ["/channels/1/leave", { method: "POST" }],
+    ["/channels/1/members"],
+    ["/channels/1/messages"],
+    [
+      "/channels/1/messages",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Should not be sent" }),
+      },
+    ],
+    [
+      "/channels/1",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Should not change" }),
+      },
+    ],
+    [
+      "/channels/1/moderation",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "mute", targetUserId: moderationTargetUserId }),
+      },
+    ],
+    [`/users/search?q=${encodeURIComponent(query)}`],
+    [`/users/${userId}/block`, { method: "POST" }],
+    [`/users/${userId}/block`, { method: "DELETE" }],
+    ["/dm/threads"],
+    [`/dm/${userId}/messages`],
+    [
+      `/dm/${userId}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Should not be sent" }),
+      },
+    ],
+    [`/search/messages?q=${encodeURIComponent(query)}`],
+    ["/notifications"],
+    ["/notifications/1/read", { method: "POST" }],
+  ];
+}
+
 before(async () => {
   if (!process.env.CLERK_SECRET_KEY || !process.env.CLERK_PUBLISHABLE_KEY) {
     throw new Error(
@@ -400,76 +471,7 @@ describe("admin access controls", () => {
     const token = (await clerkClient.sessions.getToken(revokedSession.sessionId)).jwt;
     await clerkClient.sessions.revokeSession(revokedSession.sessionId);
 
-    const requests: Array<[string, RequestInit?]> = [
-      ["/me"],
-      [
-        "/me",
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ username: "revoked_user", displayName: "Revoked User" }),
-        },
-      ],
-      ["/channels"],
-      [
-        "/channels",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: "revoked-channel", topic: "Should not exist" }),
-        },
-      ],
-      ["/channels/1/join", { method: "POST" }],
-      ["/channels/1/leave", { method: "POST" }],
-      ["/channels/1/members"],
-      ["/channels/1/messages"],
-      [
-        "/channels/1/messages",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ body: "Should not be sent" }),
-        },
-      ],
-      [
-        "/channels/1",
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ topic: "Should not change" }),
-        },
-      ],
-      [
-        "/channels/1/moderation",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "mute", targetUserId: firstSession.userId }),
-        },
-      ],
-      ["/users/search?q=revoked"],
-      [
-        `/users/${firstSession.userId}/block`,
-        { method: "POST" },
-      ],
-      [
-        `/users/${firstSession.userId}/block`,
-        { method: "DELETE" },
-      ],
-      ["/dm/threads"],
-      [`/dm/${firstSession.userId}/messages`],
-      [
-        `/dm/${firstSession.userId}/messages`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ body: "Should not be sent" }),
-        },
-      ],
-      ["/search/messages?q=revoked"],
-      ["/notifications"],
-      ["/notifications/1/read", { method: "POST" }],
-    ];
+    const requests = ircRequests(revokedSession.userId, "revoked", firstSession.userId);
     const beforeRows = await userOwnedRows(revokedSession.userId);
 
     const responses = await Promise.all(
@@ -482,6 +484,33 @@ describe("admin access controls", () => {
     }
 
     const afterRows = await userOwnedRows(revokedSession.userId);
+    assert.deepEqual(afterRows, beforeRows);
+  });
+
+  test("rejects malformed and expired Clerk credentials across IRC routes without changing user records", async () => {
+    const invalidSession = await createTestSession("invalid_irc");
+    const profile = await apiRequest(invalidSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+
+    const credentials = [
+      "malformed-clerk-token",
+      createExpiredToken(invalidSession.userId),
+    ];
+    const requests = ircRequests(invalidSession.userId, "invalid");
+    const beforeRows = await userOwnedRows(invalidSession.userId);
+
+    const responses = await Promise.all(
+      credentials.flatMap((token) =>
+        requests.map(([path, init]) => apiRequestWithToken(token, path, init)),
+      ),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const afterRows = await userOwnedRows(invalidSession.userId);
     assert.deepEqual(afterRows, beforeRows);
   });
 
