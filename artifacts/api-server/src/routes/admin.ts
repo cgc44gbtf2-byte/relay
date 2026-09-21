@@ -211,7 +211,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     .from(adminAuditLogsTable)
     .where(and(
       activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
-      activityAction ? eq(adminAuditLogsTable.action, activityAction) : undefined,
+      activityAction ? ilike(adminAuditLogsTable.action, `%${activityAction}%`) : undefined,
     ))
     .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
     .limit(activityLimit + 1)

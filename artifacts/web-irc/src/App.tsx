@@ -14,6 +14,7 @@ import {
   LogOut,
   MessageCircle,
   MessageSquare,
+  Megaphone,
   MoreHorizontal,
   Paperclip,
   Plus,
@@ -641,11 +642,31 @@ function AdminDashboard() {
 type ConsoleHealth = { api: string; database: string; databaseLatencyMs: number; environment: string; uptimeSeconds: number; checkedAt: string };
 type ConsoleOverview = {
   stats: { users: number; channels: number; messages: number; online: number; admins: number };
-  users: Array<{ id: string; username: string; displayName: string; role: string; status: string; createdAt: string; lastSeenAt: string }>;
+  users: Array<{ id: string; username: string; displayName: string; role: string; status: string; accountStatus: "active" | "suspended"; createdAt: string; lastSeenAt: string }>;
   channels: Array<{ id: number; name: string; topic: string; memberCount: number; createdAt: string }>;
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
   activityPagination: { limit: number; offset: number; hasMore: boolean; nextOffset: number | null };
+};
+type AdminAssignment = {
+  id: number;
+  userId: string;
+  username: string;
+  displayName: string;
+  role: string;
+  scopeType: string;
+  communityId: number | null;
+  communityName: string | null;
+  categoryId: number | null;
+  categoryName: string | null;
+  channelId: number | null;
+  channelName: string | null;
+  createdAt: string;
+};
+type AdminScopeOptions = {
+  communities: Array<{ id: number; name: string }>;
+  categories: Array<{ id: number; name: string; communityId: number | null }>;
+  channels: Array<{ id: number; name: string; communityId: number | null; categoryId: number | null }>;
 };
 
 function EmptyAdminState({ label }: { label: string }) {
@@ -667,12 +688,218 @@ function AdminHealthCard({ health, onOpen }: { health: ConsoleHealth | null; onO
   return <button onClick={onOpen} className="w-full rounded-lg border border-border bg-card p-5 text-left transition-colors hover:border-primary/50"><div className="flex items-start justify-between"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">system pulse</p><p className="mt-2 flex items-center gap-2 font-mono text-sm font-bold"><span className={`h-2 w-2 rounded-full ${healthy ? "bg-chart-4" : "bg-destructive"}`} />{healthy ? "all systems operational" : "attention required"}</p></div><Server className="h-4 w-4 text-primary" /></div>{health && <div className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-4"><div><p className="font-mono text-[9px] uppercase text-muted-foreground">api</p><p className="mt-1 font-mono text-xs text-chart-4">{health.api}</p></div><div><p className="font-mono text-[9px] uppercase text-muted-foreground">db</p><p className="mt-1 font-mono text-xs text-chart-4">{health.database}</p></div><div><p className="font-mono text-[9px] uppercase text-muted-foreground">latency</p><p className="mt-1 font-mono text-xs">{health.databaseLatencyMs}ms</p></div></div>}<p className="mt-4 font-mono text-[10px] text-primary">open system status →</p></button>;
 }
 
-function AdminAccountsPanel({ accounts, query, setQuery, roleFilter, setRoleFilter, statusFilter, setStatusFilter, currentId, working, onRole }: { accounts: ConsoleOverview["users"]; query: string; setQuery: (value: string) => void; roleFilter: string; setRoleFilter: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void; currentId: string; working: boolean; onRole: (account: ConsoleOverview["users"][number], role: "admin" | "moderator" | "community_admin" | "member") => void }) {
-  return <section className="rounded-lg border border-border bg-card"><div className="border-b border-border p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-mono text-sm font-bold">account directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{accounts.length} matching accounts</p></div><Users className="h-4 w-4 text-muted-foreground" /></div><div className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto_auto]"><div className="relative"><Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="search username or display name" className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-account-search" /></div><select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[10px] outline-none focus:border-primary" data-testid="select-account-role"><option value="all">all roles</option><option value="admin">admins / developers</option><option value="moderator">moderators</option><option value="community_admin">community admins</option><option value="member">members</option></select><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[10px] outline-none focus:border-primary" data-testid="select-account-status"><option value="all">all status</option><option value="online">online</option><option value="offline">offline</option></select></div></div><div className="divide-y divide-border">{accounts.map((account) => <div key={account.id} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><span className={`h-2 w-2 shrink-0 rounded-full ${account.status === "online" ? "bg-chart-4" : "bg-muted-foreground/35"}`} /><div className="min-w-[160px] flex-1"><p className="truncate font-mono text-xs font-bold">{account.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{account.username} · joined {timeLabel(account.createdAt)}</p></div><span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${account.role === "admin" ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"}`}>{account.role === "admin" ? "admin / developer" : account.role}</span>{account.id === currentId ? <span className="font-mono text-[9px] text-muted-foreground">you</span> : <select disabled={working} value={account.role} onChange={(event) => onRole(account, event.target.value as "admin" | "moderator" | "community_admin" | "member")} className="rounded border border-border bg-background px-2 py-1.5 font-mono text-[9px] text-muted-foreground outline-none hover:border-primary hover:text-primary disabled:opacity-40" data-testid={`select-role-${account.id}`}><option value="admin">admin / developer</option><option value="moderator">moderator</option><option value="community_admin">community admin</option><option value="member">member</option></select>}</div>)}{accounts.length === 0 && <EmptyAdminState label="No accounts match these filters." />}</div></section>;
+function AdminAccountsPanel({
+  accounts,
+  query,
+  setQuery,
+  roleFilter,
+  setRoleFilter,
+  statusFilter,
+  setStatusFilter,
+  accountStatusFilter,
+  setAccountStatusFilter,
+  currentId,
+  working,
+  onRole,
+  onAccountStatus,
+}: {
+  accounts: ConsoleOverview["users"];
+  query: string;
+  setQuery: (value: string) => void;
+  roleFilter: string;
+  setRoleFilter: (value: string) => void;
+  statusFilter: string;
+  setStatusFilter: (value: string) => void;
+  accountStatusFilter: string;
+  setAccountStatusFilter: (value: string) => void;
+  currentId: string;
+  working: boolean;
+  onRole: (account: ConsoleOverview["users"][number], role: "admin" | "moderator" | "community_admin" | "member") => void;
+  onAccountStatus: (account: ConsoleOverview["users"][number], accountStatus: "active" | "suspended") => void;
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-card">
+      <div className="border-b border-border p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-mono text-sm font-bold">account directory</h2>
+            <p className="mt-1 font-mono text-[10px] text-muted-foreground">{accounts.length} matching accounts</p>
+          </div>
+          <Users className="h-4 w-4 text-muted-foreground" />
+        </div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto_auto_auto]">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="search username or display name" className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-account-search" />
+          </div>
+          <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[10px] outline-none focus:border-primary" data-testid="select-account-role">
+            <option value="all">all roles</option>
+            <option value="admin">admins / developers</option>
+            <option value="moderator">moderators</option>
+            <option value="community_admin">community admins</option>
+            <option value="member">members</option>
+          </select>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[10px] outline-none focus:border-primary" data-testid="select-account-presence">
+            <option value="all">all presence</option>
+            <option value="online">online</option>
+            <option value="offline">offline</option>
+          </select>
+          <select value={accountStatusFilter} onChange={(event) => setAccountStatusFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[10px] outline-none focus:border-primary" data-testid="select-account-status">
+            <option value="all">all access</option>
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+          </select>
+        </div>
+      </div>
+      <div className="divide-y divide-border">
+        {accounts.map((account) => (
+          <div key={account.id} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${account.accountStatus === "suspended" ? "bg-destructive" : account.status === "online" ? "bg-chart-4" : "bg-muted-foreground/35"}`} />
+            <div className="min-w-[160px] flex-1">
+              <p className="truncate font-mono text-xs font-bold">{account.displayName}</p>
+              <p className="mt-1 font-mono text-[10px] text-muted-foreground">@{account.username} · joined {timeLabel(account.createdAt)}</p>
+            </div>
+            <span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${account.role === "admin" ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"}`}>{account.role === "admin" ? "admin / developer" : account.role}</span>
+            <span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${account.accountStatus === "suspended" ? "bg-destructive/10 text-destructive" : "bg-chart-4/10 text-chart-4"}`}>{account.accountStatus}</span>
+            {account.id === currentId ? (
+              <span className="font-mono text-[9px] text-muted-foreground">you</span>
+            ) : (
+              <>
+                <select disabled={working} value={account.role} onChange={(event) => onRole(account, event.target.value as "admin" | "moderator" | "community_admin" | "member")} className="rounded border border-border bg-background px-2 py-1.5 font-mono text-[9px] text-muted-foreground outline-none hover:border-primary hover:text-primary disabled:opacity-40" data-testid={`select-role-${account.id}`}>
+                  <option value="admin">admin / developer</option>
+                  <option value="moderator">moderator</option>
+                  <option value="community_admin">community admin</option>
+                  <option value="member">member</option>
+                </select>
+                <button disabled={working} onClick={() => onAccountStatus(account, account.accountStatus === "suspended" ? "active" : "suspended")} className={`rounded border px-2 py-1.5 font-mono text-[9px] disabled:opacity-40 ${account.accountStatus === "suspended" ? "border-chart-4/30 text-chart-4 hover:bg-chart-4/10" : "border-destructive/30 text-destructive hover:bg-destructive/10"}`} data-testid={`button-account-status-${account.id}`}>
+                  {account.accountStatus === "suspended" ? "restore" : "suspend"}
+                </button>
+              </>
+            )}
+          </div>
+        ))}
+        {accounts.length === 0 && <EmptyAdminState label="No accounts match these filters." />}
+      </div>
+    </section>
+  );
 }
 
 function AdminChannelsPanel({ channels, editingChannel, topicDraft, setTopicDraft, working, onEdit, onSave, onCancel, onClear }: { channels: ConsoleOverview["channels"]; editingChannel: number | null; topicDraft: string; setTopicDraft: (value: string) => void; working: boolean; onEdit: (channel: ConsoleOverview["channels"][number]) => void; onSave: (id: number) => void; onCancel: () => void; onClear: (channel: ConsoleOverview["channels"][number]) => void }) {
   return <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex items-center justify-between"><div><h2 className="font-mono text-sm font-bold">channel registry</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{channels.length} public rooms</p></div><Hash className="h-4 w-4 text-primary" /></div></div><div className="divide-y divide-border">{channels.map((channel) => <div key={channel.id} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-sm font-bold text-secondary-foreground">{channel.name}</span><span className="font-mono text-[9px] text-muted-foreground">{channel.memberCount} members</span></div>{editingChannel === channel.id ? <div className="mt-3 flex flex-col gap-2 sm:flex-row"><input autoFocus value={topicDraft} onChange={(event) => setTopicDraft(event.target.value)} className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid={`input-topic-${channel.id}`} /><button disabled={working} onClick={() => onSave(channel.id)} className="flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Save className="h-3.5 w-3.5" />save</button><button onClick={onCancel} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button></div> : <p className="mt-2 truncate text-xs text-muted-foreground">{channel.topic || "No topic set"}</p>}</div>{editingChannel !== channel.id && <div className="flex gap-2"><button onClick={() => onEdit(channel)} className="rounded-md border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary"><Settings className="mr-1 inline h-3 w-3" />edit topic</button><button onClick={() => onClear(channel)} className="rounded-md border border-destructive/30 px-2.5 py-1.5 font-mono text-[9px] text-destructive hover:bg-destructive/10"><Trash2 className="mr-1 inline h-3 w-3" />clear history</button></div>}</div><p className="mt-3 font-mono text-[9px] text-muted-foreground/70">created {timeLabel(channel.createdAt)}</p></div>)}{channels.length === 0 && <EmptyAdminState label="No public channels have been created." />}</div></section>;
+}
+
+function AdminRoleAssignmentsPanel({
+  assignments,
+  users,
+  options,
+  working,
+  onGrant,
+  onRevoke,
+}: {
+  assignments: AdminAssignment[];
+  users: ConsoleOverview["users"];
+  options: AdminScopeOptions;
+  working: boolean;
+  onGrant: (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => void;
+  onRevoke: (assignment: AdminAssignment) => void;
+}) {
+  const [userId, setUserId] = useState("");
+  const [role, setRole] = useState("moderator");
+  const [scopeType, setScopeType] = useState("platform");
+  const [scopeId, setScopeId] = useState("");
+  useEffect(() => {
+    if (!userId && users[0]) setUserId(users[0].id);
+  }, [userId, users]);
+  useEffect(() => {
+    setScopeId("");
+  }, [scopeType]);
+  const scopeOptions = scopeType === "community"
+    ? options.communities
+    : scopeType === "category"
+      ? options.categories
+      : scopeType === "channel"
+        ? options.channels
+        : [];
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const selectedId = scopeType === "platform" ? null : Number(scopeId);
+    if (scopeType !== "platform" && !Number.isInteger(selectedId)) return;
+    onGrant({
+      userId,
+      role,
+      scopeType,
+      communityId: scopeType === "community" ? selectedId : null,
+      categoryId: scopeType === "category" ? selectedId : null,
+      channelId: scopeType === "channel" ? selectedId : null,
+    });
+  };
+  const scopeLabel = (assignment: AdminAssignment) => assignment.scopeType === "platform"
+    ? "platform"
+    : assignment.scopeType === "community"
+      ? `community · ${assignment.communityName ?? assignment.communityId}`
+      : assignment.scopeType === "category"
+        ? `category · ${assignment.categoryName ?? assignment.categoryId}`
+        : `channel · ${assignment.channelName ?? assignment.channelId}`;
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-border bg-card">
+        <div className="border-b border-border px-5 py-4">
+          <h2 className="font-mono text-sm font-bold">grant scoped role</h2>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">Give a user the minimum role needed for a platform or business scope.</p>
+        </div>
+        <form onSubmit={submit} className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="font-mono text-[10px] text-muted-foreground">user
+            <select required value={userId} onChange={(event) => setUserId(event.target.value)} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
+              <option value="" disabled>select a user</option>
+              {users.map((user) => <option key={user.id} value={user.id}>{user.displayName} (@{user.username})</option>)}
+            </select>
+          </label>
+          <label className="font-mono text-[10px] text-muted-foreground">role
+            <select value={role} onChange={(event) => { const nextRole = event.target.value; setRole(nextRole); if (nextRole === "business_owner") setScopeType("community"); }} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
+              <option value="moderator">moderator</option>
+              <option value="community_admin">community admin</option>
+              <option value="business_owner">business owner</option>
+              <option value="business_manager">business manager</option>
+              <option value="employee">employee</option>
+              <option value="contractor">contractor</option>
+            </select>
+          </label>
+          <label className="font-mono text-[10px] text-muted-foreground">scope
+            <select value={scopeType} onChange={(event) => setScopeType(event.target.value)} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
+              <option value="platform">platform</option>
+              <option value="community">business workspace</option>
+              <option value="category">category</option>
+              <option value="channel">channel</option>
+            </select>
+          </label>
+          <label className="font-mono text-[10px] text-muted-foreground">{scopeType === "platform" ? "scope selection" : "scope target"}
+            <select disabled={scopeType === "platform"} required={scopeType !== "platform"} value={scopeId} onChange={(event) => setScopeId(event.target.value)} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary disabled:opacity-50">
+              <option value="">{scopeType === "platform" ? "not applicable" : "select a scope"}</option>
+              {scopeOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+            </select>
+          </label>
+          <div className="sm:col-span-2 lg:col-span-4">
+            <button disabled={working || !userId || (scopeType !== "platform" && !scopeId)} className="rounded-md bg-primary px-4 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">grant role</button>
+          </div>
+        </form>
+      </section>
+      <section className="rounded-lg border border-border bg-card">
+        <div className="border-b border-border px-5 py-4">
+          <h2 className="font-mono text-sm font-bold">active scoped assignments</h2>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">{assignments.length} assignments</p>
+        </div>
+        <div className="divide-y divide-border">
+          {assignments.map((assignment) => <div key={assignment.id} className="flex flex-wrap items-center gap-3 px-5 py-3.5">
+            <div className="min-w-[180px] flex-1"><p className="font-mono text-xs font-bold">{assignment.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{assignment.username}</p></div>
+            <span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{assignment.role}</span>
+            <span className="font-mono text-[10px] text-muted-foreground">{scopeLabel(assignment)}</span>
+            <button disabled={working} onClick={() => onRevoke(assignment)} className="rounded border border-destructive/30 px-2.5 py-1.5 font-mono text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-40">revoke</button>
+          </div>)}
+          {assignments.length === 0 && <EmptyAdminState label="No scoped roles have been assigned." />}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function AdminConfirmDialog({ title, description, confirmLabel, destructive, working, onConfirm, onCancel }: { title: string; description: string; confirmLabel: string; destructive?: boolean; working: boolean; onConfirm: () => void; onCancel: () => void }) {
@@ -684,24 +911,37 @@ function AdminConsole() {
   const [overview, setOverview] = useState<ConsoleOverview | null>(null);
   const [directory, setDirectory] = useState<ConsoleOverview["users"]>([]);
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
+  const [roleAssignments, setRoleAssignments] = useState<AdminAssignment[]>([]);
+  const [scopeOptions, setScopeOptions] = useState<AdminScopeOptions>({ communities: [], categories: [], channels: [] });
   const [health, setHealth] = useState<ConsoleHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [section, setSection] = useState<"overview" | "accounts" | "channels" | "activity" | "system">("overview");
+  const [section, setSection] = useState<"overview" | "accounts" | "channels" | "roles" | "activity" | "system">("overview");
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [accountStatusFilter, setAccountStatusFilter] = useState("all");
+  const [activityActorFilter, setActivityActorFilter] = useState("");
+  const [activityActionFilter, setActivityActionFilter] = useState("");
   const [pendingRole, setPendingRole] = useState<{ id: string; label: string; role: "admin" | "moderator" | "community_admin" | "member" } | null>(null);
+  const [pendingAccountStatus, setPendingAccountStatus] = useState<{ id: string; label: string; accountStatus: "active" | "suspended" } | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<AdminAssignment | null>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [topicDraft, setTopicDraft] = useState("");
   const [pendingClear, setPendingClear] = useState<{ id: number; name: string } | null>(null);
+  const [announcementOpen, setAnnouncementOpen] = useState(false);
+  const [announcementDraft, setAnnouncementDraft] = useState("");
   const load = async (activityOffset = 0, appendActivity = false) => {
     setError("");
     try {
-      const overviewPath = activityOffset > 0 ? `/admin/overview?activityOffset=${activityOffset}` : "/admin/overview";
+      const activityParams = new URLSearchParams();
+      if (activityOffset > 0) activityParams.set("activityOffset", String(activityOffset));
+      if (activityActorFilter.trim()) activityParams.set("activityActor", activityActorFilter.trim());
+      if (activityActionFilter.trim()) activityParams.set("activityAction", activityActionFilter.trim());
+      const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
       const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
       if (!appendActivity) {
         setOverview(nextOverview);
@@ -718,20 +958,42 @@ function AdminConsole() {
       setError(reason instanceof Error ? reason.message : "Could not load the operations console");
     }
   };
+  const loadRoleData = async () => {
+    try {
+      const [assignments, options] = await Promise.all([
+        api<AdminAssignment[]>("/admin/role-assignments"),
+        api<AdminScopeOptions>("/admin/scope-options"),
+      ]);
+      setRoleAssignments(assignments);
+      setScopeOptions(options);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load scoped roles");
+    }
+  };
   useEffect(() => { api<AdminStatus>("/admin/status").then(setStatus).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load admin status")).finally(() => setLoading(false)); }, []);
   useEffect(() => { if (status?.isAdmin) void load(); }, [status?.isAdmin]);
+  useEffect(() => { if (status?.isAdmin && section === "roles") void loadRoleData(); }, [status?.isAdmin, section]);
   useEffect(() => {
-    if (!status?.isAdmin || section !== "accounts") return;
+    if (!status?.isAdmin || (section !== "accounts" && section !== "roles")) return;
     const params = new URLSearchParams();
     if (query.trim()) params.set("q", query.trim());
     if (roleFilter !== "all") params.set("role", roleFilter);
     if (statusFilter !== "all") params.set("status", statusFilter);
+    if (accountStatusFilter !== "all") params.set("accountStatus", accountStatusFilter);
     api<ConsoleOverview["users"] | { users: ConsoleOverview["users"] }>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`)
       .then((result) => { setDirectory(Array.isArray(result) ? result : result.users); setDirectoryLoaded(true); })
       .catch(() => { setDirectory([]); setDirectoryLoaded(true); });
-  }, [status?.isAdmin, section, query, roleFilter, statusFilter]);
+  }, [status?.isAdmin, section, query, roleFilter, statusFilter, accountStatusFilter]);
+  useEffect(() => {
+    if (!status?.isAdmin || section !== "activity") return;
+    void load();
+  }, [status?.isAdmin, section, activityActorFilter, activityActionFilter]);
   const claim = async () => { setWorking(true); try { await api("/admin/claim", { method: "POST", body: "{}" }); setStatus((value) => value ? { ...value, isAdmin: true, bootstrapAvailable: false } : value); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not claim admin access"); } finally { setWorking(false); } };
   const updateRole = async () => { if (!pendingRole) return; setWorking(true); try { await api(`/admin/users/${pendingRole.id}/role`, { method: "PATCH", body: JSON.stringify({ role: pendingRole.role }) }); setNotice(`Role updated for ${pendingRole.label}.`); setPendingRole(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update role"); } finally { setWorking(false); } };
+  const updateAccountStatus = async () => { if (!pendingAccountStatus) return; setWorking(true); try { await api(`/admin/users/${pendingAccountStatus.id}/account-status`, { method: "PATCH", body: JSON.stringify({ accountStatus: pendingAccountStatus.accountStatus }) }); setNotice(`${pendingAccountStatus.label} is now ${pendingAccountStatus.accountStatus}.`); setPendingAccountStatus(null); setDirectoryLoaded(false); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update account status"); } finally { setWorking(false); } };
+  const grantRole = async (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => { setWorking(true); try { await api("/admin/role-assignments", { method: "POST", body: JSON.stringify(value) }); setNotice("Scoped role granted."); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not grant scoped role"); } finally { setWorking(false); } };
+  const revokeRole = async () => { if (!pendingRevoke) return; setWorking(true); try { await api(`/admin/role-assignments/${pendingRevoke.id}`, { method: "DELETE" }); setNotice(`Revoked ${pendingRevoke.role} from ${pendingRevoke.displayName}.`); setPendingRevoke(null); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke scoped role"); } finally { setWorking(false); } };
+  const sendAnnouncement = async (event: FormEvent) => { event.preventDefault(); const body = announcementDraft.trim(); if (!body) return; setWorking(true); try { await api("/admin/announcements", { method: "POST", body: JSON.stringify({ body }) }); setAnnouncementDraft(""); setAnnouncementOpen(false); setNotice("Announcement sent to all users."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send announcement"); } finally { setWorking(false); } };
   const saveTopic = async (id: number) => { setWorking(true); try { await api(`/admin/channels/${id}`, { method: "PATCH", body: JSON.stringify({ topic: topicDraft }) }); setEditingChannel(null); setNotice("Channel topic saved."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save channel topic"); } finally { setWorking(false); } };
   const clearHistory = async () => { if (!pendingClear) return; setWorking(true); try { await api(`/admin/channels/${pendingClear.id}/messages`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }); setNotice(`History cleared for ${pendingClear.name}.`); setPendingClear(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not clear channel history"); } finally { setWorking(false); } };
   const loadOlderActivity = async () => {
@@ -744,8 +1006,8 @@ function AdminConsole() {
       setLoadingOlderActivity(false);
     }
   };
-  const accounts = (directoryLoaded ? directory : overview?.users ?? []).filter((account) => { const q = query.trim().toLowerCase(); return (!q || account.username.toLowerCase().includes(q) || account.displayName.toLowerCase().includes(q)) && (roleFilter === "all" || account.role === roleFilter) && (statusFilter === "all" || account.status === statusFilter); });
-  const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "overview", LayoutDashboard], ["accounts", "accounts", Users], ["channels", "channels", Hash], ["activity", "activity", Activity], ["system", "system status", Server]];
+  const accounts = (directoryLoaded ? directory : overview?.users ?? []).filter((account) => { const q = query.trim().toLowerCase(); return (!q || account.username.toLowerCase().includes(q) || account.displayName.toLowerCase().includes(q)) && (roleFilter === "all" || account.role === roleFilter) && (statusFilter === "all" || account.status === statusFilter) && (accountStatusFilter === "all" || account.accountStatus === accountStatusFilter); });
+  const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "overview", LayoutDashboard], ["accounts", "accounts", Users], ["channels", "channels", Hash], ["roles", "scoped roles", Shield], ["activity", "activity", Activity], ["system", "system status", Server]];
   const title = nav.find(([key]) => key === section)?.[1] ?? "overview";
   const actor = (value: ConsoleOverview["activity"][number]["actor"]) => typeof value === "string" ? value : value?.displayName ?? value?.username ?? "system";
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading admin console…</div>;
@@ -758,7 +1020,7 @@ function AdminConsole() {
       <header className="sticky top-0 z-20 border-b border-border bg-card/95 backdrop-blur">
         <div className="mx-auto flex min-h-[72px] max-w-[1500px] items-center justify-between gap-4 px-4 sm:px-7">
           <div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground"><Shield className="h-5 w-5" /></div><div><p className="font-mono text-sm font-bold">relay / control room</p><p className="font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">trusted network operations</p></div></div>
-          <div className="flex items-center gap-2"><div className="hidden items-center gap-2 border-r border-border pr-3 sm:flex"><span className="h-2 w-2 rounded-full bg-chart-4" /><span className="font-mono text-[10px] text-muted-foreground">authenticated</span></div><button disabled={working} onClick={() => void load()} className="rounded-md border border-border p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" aria-label="Refresh console" data-testid="button-refresh-admin"><RefreshCw className={`h-4 w-4 ${working ? "animate-spin" : ""}`} /></button><a href={`${basePath}/chat`} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground">back to chat</a></div>
+          <div className="flex items-center gap-2"><div className="hidden items-center gap-2 border-r border-border pr-3 sm:flex"><span className="h-2 w-2 rounded-full bg-chart-4" /><span className="font-mono text-[10px] text-muted-foreground">authenticated</span></div><button onClick={() => setAnnouncementOpen(true)} className="hidden items-center gap-1.5 rounded-md border border-primary/40 px-3 py-2 font-mono text-[10px] text-primary hover:bg-primary/10 sm:flex"><Megaphone className="h-3.5 w-3.5" />announce</button><button disabled={working} onClick={() => void load()} className="rounded-md border border-border p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" aria-label="Refresh console" data-testid="button-refresh-admin"><RefreshCw className={`h-4 w-4 ${working ? "animate-spin" : ""}`} /></button><a href={`${basePath}/chat`} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground">back to chat</a></div>
         </div>
       </header>
       <div className="mx-auto flex max-w-[1500px]">
@@ -769,7 +1031,7 @@ function AdminConsole() {
         </aside>
         <main className="min-w-0 flex-1 px-4 py-5 sm:px-7 sm:py-7">
           <div className="mb-5 flex gap-1 overflow-x-auto pb-1 lg:hidden">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 font-mono text-[10px] ${section === key ? "bg-primary text-primary-foreground" : "border border-border text-muted-foreground"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}</div>
-          <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">/{title}</p><h1 className="mt-2 font-mono text-2xl font-bold tracking-tight sm:text-3xl">{section === "overview" ? "Network at a glance." : section === "accounts" ? "Account governance." : section === "channels" ? "Public rooms." : section === "activity" ? "A clear audit trail." : "System status."}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{section === "overview" ? "The essential signals for keeping Relay available, safe, and understandable." : section === "accounts" ? "Review identity, presence, and privilege without leaving the control room." : section === "channels" ? "Keep room context useful and remove history only when you mean to." : section === "activity" ? "Recent administrative changes and network events, newest first." : "A live read on the services behind the conversation."}</p></div><div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><Clock3 className="h-3.5 w-3.5" />{health ? `checked ${timeLabel(health.checkedAt)}` : "checking signals"}</div></div>
+           <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">/{title}</p><h1 className="mt-2 font-mono text-2xl font-bold tracking-tight sm:text-3xl">{section === "overview" ? "Network at a glance." : section === "accounts" ? "Account governance." : section === "channels" ? "Public rooms." : section === "roles" ? "Scoped access." : section === "activity" ? "A clear audit trail." : "System status."}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{section === "overview" ? "The essential signals for keeping Relay available, safe, and understandable." : section === "accounts" ? "Review identity, presence, and privilege without leaving the control room." : section === "channels" ? "Keep room context useful and remove history only when you mean to." : section === "roles" ? "Grant and revoke least-privilege access across platform and business scopes." : section === "activity" ? "Recent administrative changes and network events, newest first." : "A live read on the services behind the conversation."}</p></div><div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><Clock3 className="h-3.5 w-3.5" />{health ? `checked ${timeLabel(health.checkedAt)}` : "checking signals"}</div></div>
           {error && <div className="mb-5 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span><button onClick={() => void load()} className="ml-auto underline">retry</button></div>}
           {notice && <div className="mb-5 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notice"><X className="h-3.5 w-3.5" /></button></div>}
           {!overview ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[1, 2, 3, 4].map((item) => <div key={item} className="h-28 animate-pulse rounded-lg border border-border bg-card" />)}</div> : section === "overview" ? (
@@ -777,14 +1039,17 @@ function AdminConsole() {
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{stats.map(([label, value, Icon]) => <div key={label} className="rounded-lg border border-border bg-card p-4"><div className="flex items-center justify-between"><Icon className="h-4 w-4 text-primary" /><span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">live</span></div><p className="mt-5 font-mono text-3xl font-bold">{value}</p><p className="mt-1 font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">{label}</p></div>)}</div>
               <div className="grid gap-5 xl:grid-cols-[1.12fr_.88fr]"><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">recent activity</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">The last operational changes</p></div><button onClick={() => setSection("activity")} className="font-mono text-[10px] text-primary hover:underline">view all</button></div><div className="divide-y divide-border">{overview.activity.slice(0, 6).map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} />)}{overview.activity.length === 0 && <EmptyAdminState label="No activity recorded yet." />}</div></section><div className="space-y-5"><AdminHealthCard health={health} onOpen={() => setSection("system")} /><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">recent messages</h2></div><div className="divide-y divide-border">{overview.recentMessages.slice(0, 5).map((message) => <div key={message.id} className="px-5 py-3"><div className="flex justify-between gap-3 font-mono text-[10px]"><span className="truncate text-secondary-foreground">{message.sender}</span><span className="shrink-0 text-muted-foreground">{timeLabel(message.createdAt)}</span></div><p className="mt-1 truncate text-xs">{message.body}</p></div>)}{overview.recentMessages.length === 0 && <EmptyAdminState label="No messages have been sent yet." />}</div></section></div></div>
             </div>
-           ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} /> : section === "activity" ? (
-            <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity yet." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
+            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} /> : section === "activity" ? (
+             <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><Activity className="h-4 w-4 text-primary" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} placeholder="filter by actor" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-actor" /><input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} placeholder="filter by action" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-action" /></div></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>
           )}
         </main>
       </div>
+      {announcementOpen && <Overlay title="Platform announcement" onClose={() => { if (!working) setAnnouncementOpen(false); }}><form onSubmit={sendAnnouncement}><p className="mb-4 text-sm leading-6 text-muted-foreground">This message will be delivered to every user as a notification.</p><textarea autoFocus required maxLength={500} value={announcementDraft} onChange={(event) => setAnnouncementDraft(event.target.value)} placeholder="Write a clear message for the network…" className="min-h-32 w-full resize-y rounded-md border border-input bg-background p-3 text-sm outline-none focus:border-primary" /><div className="mt-2 text-right font-mono text-[9px] text-muted-foreground">{announcementDraft.length}/500</div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={working} onClick={() => setAnnouncementOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button><button disabled={working || !announcementDraft.trim()} className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Megaphone className="h-3.5 w-3.5" />{working ? "sending…" : "send announcement"}</button></div></form></Overlay>}
       {pendingRole && <AdminConfirmDialog title={`Change role for ${pendingRole.label}?`} description={`${pendingRole.label} will become ${pendingRole.role === "admin" ? "an Admin / Developer" : pendingRole.role.replace("_", " ")}. Platform roles are enforced on the server.`} confirmLabel={`set ${pendingRole.role === "admin" ? "admin / developer" : pendingRole.role.replace("_", " ")}`} destructive={pendingRole.role === "member"} working={working} onConfirm={() => void updateRole()} onCancel={() => setPendingRole(null)} />}
+      {pendingAccountStatus && <AdminConfirmDialog title={`${pendingAccountStatus.accountStatus === "suspended" ? "Suspend" : "Restore"} ${pendingAccountStatus.label}?`} description={pendingAccountStatus.accountStatus === "suspended" ? "This prevents the account from using the platform until an administrator restores it. Existing data is preserved." : "This restores the account's ability to sign in and use the platform."} confirmLabel={pendingAccountStatus.accountStatus === "suspended" ? "suspend account" : "restore account"} destructive={pendingAccountStatus.accountStatus === "suspended"} working={working} onConfirm={() => void updateAccountStatus()} onCancel={() => setPendingAccountStatus(null)} />}
+      {pendingRevoke && <AdminConfirmDialog title={`Revoke ${pendingRevoke.role} from ${pendingRevoke.displayName}?`} description="This removes the selected scoped access. The user will keep any other platform or scoped roles." confirmLabel="revoke role" destructive working={working} onConfirm={() => void revokeRole()} onCancel={() => setPendingRevoke(null)} />}
       {pendingClear && <AdminConfirmDialog title={`Clear ${pendingClear.name} history?`} description="This permanently deletes every message in this channel. The room and its members remain, but the conversation cannot be restored." confirmLabel="clear history" destructive working={working} onConfirm={() => void clearHistory()} onCancel={() => setPendingClear(null)} />}
     </div>
   );
