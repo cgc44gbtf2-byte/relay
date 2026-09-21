@@ -136,6 +136,141 @@ function expectRejectedWebSocket(url: string): Promise<void> {
   });
 }
 
+async function openWebSocket(session: TestSession): Promise<WebSocket> {
+  const ticketResponse = await apiRequest(session, "/ws-ticket");
+  assert.equal(ticketResponse.status, 200, JSON.stringify(ticketResponse));
+  assert.ok(ticketResponse.body && typeof ticketResponse.body === "object");
+  const ticket = (ticketResponse.body as { ticket?: unknown }).ticket;
+  assert.equal(typeof ticket, "string");
+
+  const socket = new WebSocket(
+    `${baseUrl.replace(/^http/, "ws")}/ws?ticket=${encodeURIComponent(ticket as string)}`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for the WebSocket ready event."));
+    }, 5_000);
+    const onMessage = (raw: Buffer): void => {
+      try {
+        const event = JSON.parse(raw.toString()) as { type?: unknown };
+        if (event.type !== "ready") return;
+        cleanup();
+        resolve();
+      } catch {
+        // Ignore non-JSON frames while waiting for the ready event.
+      }
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error("The WebSocket connection failed before it became ready."));
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error("The WebSocket closed before it became ready."));
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+  socket.on("error", () => undefined);
+  return socket;
+}
+
+function waitForWebSocketEvent(
+  socket: WebSocket,
+  predicate: (event: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for the expected WebSocket event."));
+    }, 5_000);
+    const onMessage = (raw: Buffer): void => {
+      try {
+        const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (!predicate(event)) return;
+        cleanup();
+        resolve(event);
+      } catch {
+        // Ignore malformed frames.
+      }
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error("The WebSocket closed before the expected event arrived."));
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.once("close", onClose);
+  });
+}
+
+function expectNoWebSocketEvent(
+  socket: WebSocket,
+  predicate: (event: Record<string, unknown>) => boolean,
+  durationMs = 500,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, durationMs);
+    const onMessage = (raw: Buffer): void => {
+      try {
+        const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (!predicate(event)) return;
+        cleanup();
+        reject(new Error("Received a WebSocket event that should have been blocked."));
+      } catch {
+        // Ignore malformed frames.
+      }
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.once("close", onClose);
+  });
+}
+
+function closeWebSocket(socket: WebSocket): void {
+  if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+    socket.terminate();
+  }
+}
+
+async function removeTestChannels(channelIds: number[], userIds: string[] = []): Promise<void> {
+  if (channelIds.length === 0) return;
+  await pool.query("DELETE FROM irc_messages WHERE channel_id = ANY($1::int[])", [channelIds]);
+  await pool.query("DELETE FROM irc_channel_join_requests WHERE channel_id = ANY($1::int[])", [channelIds]);
+  await pool.query("DELETE FROM irc_channel_invites WHERE channel_id = ANY($1::int[])", [channelIds]);
+  await pool.query("DELETE FROM irc_channel_members WHERE channel_id = ANY($1::int[])", [channelIds]);
+  await pool.query("DELETE FROM irc_channels WHERE id = ANY($1::int[])", [channelIds]);
+  if (userIds.length > 0) {
+    await pool.query("DELETE FROM irc_notifications WHERE user_id = ANY($1::text[])", [userIds]);
+  }
+}
+
 async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
   await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [
@@ -1106,5 +1241,339 @@ describe("admin access controls", () => {
       [adminSession.userId],
     );
     assert.equal(result.rows[0]?.role, "admin");
+  });
+
+  test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
+    const ownerSession = await createTestSession("channel_owner");
+    const requesterSession = await createTestSession("channel_requester");
+    const reviewerSession = await createTestSession("channel_reviewer");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const reviewerProfile = await apiRequest(reviewerSession, "/me");
+      assert.equal(reviewerProfile.status, 200, JSON.stringify(reviewerProfile));
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `private-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Approval-protected history",
+          isPrivate: true,
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [channelId, reviewerSession.userId],
+      );
+
+      const seedMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Visible after approval" }),
+        },
+      );
+      assert.equal(seedMessage.status, 201, JSON.stringify(seedMessage));
+
+      const deniedHistory = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
+      assert.deepEqual(deniedHistory.body, {
+        error: "Join the private channel before reading its history.",
+      });
+
+      const deniedMembers = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/members`,
+      );
+      assert.equal(deniedMembers.status, 403, JSON.stringify(deniedMembers));
+      assert.deepEqual(deniedMembers.body, {
+        error: "Join the private channel before viewing its members.",
+      });
+
+      const pendingJoin = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(pendingJoin.status, 202, JSON.stringify(pendingJoin));
+      assert.deepEqual(pendingJoin.body, { ok: true, status: "pending" });
+
+      const repeatedPendingJoin = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(repeatedPendingJoin.status, 202, JSON.stringify(repeatedPendingJoin));
+      assert.deepEqual(repeatedPendingJoin.body, { ok: true, status: "pending" });
+
+      const pendingRequests = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(pendingRequests.status, 200, JSON.stringify(pendingRequests));
+      assert.ok(Array.isArray(pendingRequests.body));
+      assert.equal(pendingRequests.body.length, 1);
+      const requestId = (
+        pendingRequests.body[0] as { id?: unknown }
+      ).id;
+      assert.equal(typeof requestId, "number");
+
+      const pendingSocket = await openWebSocket(requesterSession);
+      sockets.push(pendingSocket);
+      pendingSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const blockedEvent = expectNoWebSocketEvent(
+        pendingSocket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { channelId?: unknown }).channelId === channelId,
+      );
+      const blockedMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Blocked before approval" }),
+        },
+      );
+      assert.equal(blockedMessage.status, 201, JSON.stringify(blockedMessage));
+      await blockedEvent;
+
+      const approval = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(approval.status, 200, JSON.stringify(approval));
+      assert.deepEqual(approval.body, { ok: true, status: "approved" });
+
+      const history = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.ok(history.body && typeof history.body === "object");
+      const messages = (history.body as { messages?: unknown }).messages;
+      assert.ok(Array.isArray(messages));
+      assert.deepEqual(
+        messages.map((message) => (message as { body?: unknown }).body),
+        ["Visible after approval", "Blocked before approval"],
+      );
+
+      const joinAfterApproval = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(joinAfterApproval.status, 200, JSON.stringify(joinAfterApproval));
+      assert.deepEqual(joinAfterApproval.body, { ok: true, status: "member" });
+
+      const members = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/members`,
+      );
+      assert.equal(members.status, 200, JSON.stringify(members));
+      assert.ok(Array.isArray(members.body));
+      assert.ok(
+        members.body.some(
+          (user) =>
+            user &&
+            typeof user === "object" &&
+            (user as { id?: unknown }).id === requesterSession.userId,
+        ),
+      );
+
+      const approvedSocket = await openWebSocket(requesterSession);
+      sockets.push(approvedSocket);
+      approvedSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const realtimeEvent = waitForWebSocketEvent(
+        approvedSocket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { body?: unknown }).body === "Delivered after approval",
+      );
+      const realtimeMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Delivered after approval" }),
+        },
+      );
+      assert.equal(realtimeMessage.status, 201, JSON.stringify(realtimeMessage));
+      const event = await realtimeEvent;
+      assert.equal(
+        (event.message as { channelId?: unknown }).channelId,
+        channelId,
+      );
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        requesterSession.userId,
+        reviewerSession.userId,
+      ]);
+    }
+  });
+
+  test("rejects unauthorized invite-only and password-protected room joins", async () => {
+    const ownerSession = await createTestSession("invite_owner");
+    const requesterSession = await createTestSession("invite_requester");
+    const channelIds: number[] = [];
+
+    try {
+      const profile = await apiRequest(requesterSession, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+      assert.ok(profile.body && typeof profile.body === "object");
+      const username = (profile.body as { username?: unknown }).username;
+      assert.equal(typeof username, "string");
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `invite-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Invite and password protected",
+          isPrivate: true,
+          isInviteOnly: true,
+          password: "room-pass",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const missingPassword = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(missingPassword.status, 403, JSON.stringify(missingPassword));
+      assert.deepEqual(missingPassword.body, {
+        error: "A channel password is required.",
+      });
+
+      const withoutInvite = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ password: "room-pass" }),
+        },
+      );
+      assert.equal(withoutInvite.status, 403, JSON.stringify(withoutInvite));
+      assert.deepEqual(withoutInvite.body, {
+        error: "This channel is invite-only.",
+      });
+
+      const invite = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/invites`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username }),
+        },
+      );
+      assert.equal(invite.status, 201, JSON.stringify(invite));
+      assert.deepEqual(invite.body, { ok: true });
+
+      const invitedWithWrongPassword = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ password: "wrong-pass" }),
+        },
+      );
+      assert.equal(invitedWithWrongPassword.status, 403, JSON.stringify(invitedWithWrongPassword));
+      assert.deepEqual(invitedWithWrongPassword.body, {
+        error: "A channel password is required.",
+      });
+
+      const invitedWithPassword = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ password: "room-pass" }),
+        },
+      );
+      assert.equal(invitedWithPassword.status, 202, JSON.stringify(invitedWithPassword));
+      assert.deepEqual(invitedWithPassword.body, { ok: true, status: "pending" });
+
+      const pendingRequests = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(pendingRequests.status, 200, JSON.stringify(pendingRequests));
+      assert.ok(Array.isArray(pendingRequests.body));
+      assert.equal(pendingRequests.body.length, 1);
+      const requestId = (pendingRequests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof requestId, "number");
+
+      const approval = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(approval.status, 200, JSON.stringify(approval));
+      assert.deepEqual(approval.body, { ok: true, status: "approved" });
+
+      const joinAfterApproval = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ password: "room-pass" }),
+        },
+      );
+      assert.equal(joinAfterApproval.status, 200, JSON.stringify(joinAfterApproval));
+      assert.deepEqual(joinAfterApproval.body, { ok: true, status: "member" });
+
+      const history = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(history.status, 200, JSON.stringify(history));
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        requesterSession.userId,
+      ]);
+    }
   });
 });
