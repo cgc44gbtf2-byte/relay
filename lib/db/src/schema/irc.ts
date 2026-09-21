@@ -250,6 +250,7 @@ export const moderationActionsTable = pgTable("irc_moderation_actions", {
 export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   id: serial("id").primaryKey(),
   actorId: text("actor_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  actorDisplayName: text("actor_display_name"),
   action: text("action").notNull(),
   targetId: text("target_id"),
   targetLabel: text("target_label"),

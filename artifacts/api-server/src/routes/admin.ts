@@ -48,6 +48,7 @@ async function adminProfile(req: AuthenticatedRequest) {
 
 async function writeAudit(
   actorId: string,
+  actorDisplayName: string,
   action: string,
   targetId?: string,
   targetLabel?: string,
@@ -55,6 +56,7 @@ async function writeAudit(
 ): Promise<void> {
   await db.insert(adminAuditLogsTable).values({
     actorId,
+    actorDisplayName,
     action,
     targetId,
     targetLabel,
@@ -162,15 +164,15 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   const activity = await db
     .select({
       id: adminAuditLogsTable.id,
+      actorId: adminAuditLogsTable.actorId,
       action: adminAuditLogsTable.action,
       targetId: adminAuditLogsTable.targetId,
       targetLabel: adminAuditLogsTable.targetLabel,
       details: adminAuditLogsTable.details,
       createdAt: adminAuditLogsTable.createdAt,
-      actor: usersTable.displayName,
+      actor: adminAuditLogsTable.actorDisplayName,
     })
     .from(adminAuditLogsTable)
-    .innerJoin(usersTable, eq(usersTable.clerkId, adminAuditLogsTable.actorId))
     .orderBy(desc(adminAuditLogsTable.createdAt))
     .limit(20);
   res.json({
@@ -280,6 +282,7 @@ router.patch("/admin/users/:userId/role", requireAuth, async (req: Authenticated
 
       await tx.insert(adminAuditLogsTable).values({
         actorId: actor.clerkId,
+        actorDisplayName: actor.displayName,
         action: role === "admin" ? "promoted_user" : "demoted_user",
         targetId: changedUser.id,
         targetLabel: targetUserId,
@@ -415,7 +418,7 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     res.status(404).json(channelNotFoundError);
     return;
   }
-  await writeAudit(actor.clerkId, "updated_channel_topic", String(channelId), updated.name, topic || "Cleared channel topic");
+  await writeAudit(actor.clerkId, actor.displayName, "updated_channel_topic", String(channelId), updated.name, topic || "Cleared channel topic");
   res.json(updated);
 });
 
@@ -447,7 +450,7 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
     .delete(messagesTable)
     .where(eq(messagesTable.channelId, channelId))
     .returning({ id: messagesTable.id });
-  await writeAudit(actor.clerkId, "cleared_channel_history", String(channelId), channel.name, `${deleted.length} messages deleted`);
+  await writeAudit(actor.clerkId, actor.displayName, "cleared_channel_history", String(channelId), channel.name, `${deleted.length} messages deleted`);
   res.json({ ok: true, deleted: deleted.length });
 });
 

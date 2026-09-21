@@ -578,11 +578,64 @@ describe("admin access controls", () => {
         (entry as { targetId?: unknown }).targetId === memberSession.userId,
     );
     assert.deepEqual(matchingActivity, {
+      actorId: adminSession.userId,
       action: "demoted_user",
       targetId: memberSession.userId,
       details: "Role changed to member",
       actor: profile.displayName,
     });
+  });
+
+  test("keeps the original actor identity and label after the admin is renamed", async () => {
+    const beforeRename = await apiRequest(adminSession, "/me");
+    assert.equal(beforeRename.status, 200);
+    assert.ok(beforeRename.body && typeof beforeRename.body === "object");
+    const originalDisplayName = (beforeRename.body as { displayName?: unknown }).displayName;
+    assert.equal(typeof originalDisplayName, "string");
+
+    const renamedDisplayName = `Renamed admin ${randomUUID().slice(0, 8)}`;
+    try {
+      const rename = await apiRequest(adminSession, "/me", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: renamedDisplayName }),
+      });
+      assert.equal(rename.status, 200);
+
+      const overview = await apiRequest(adminSession, "/admin/overview");
+      assert.equal(overview.status, 200);
+      assert.ok(overview.body && typeof overview.body === "object");
+      const activity = (overview.body as { activity?: unknown }).activity;
+      assert.ok(Array.isArray(activity));
+      const matchingActivity = activity.find(
+        (
+          entry,
+        ): entry is {
+          actorId: string;
+          action: string;
+          targetId: string | null;
+          details: string | null;
+          actor: string | null;
+        } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as { action?: unknown }).action === "demoted_user" &&
+          (entry as { targetId?: unknown }).targetId === memberSession.userId,
+      );
+      assert.deepEqual(matchingActivity, {
+        actorId: adminSession.userId,
+        action: "demoted_user",
+        targetId: memberSession.userId,
+        details: "Role changed to member",
+        actor: originalDisplayName,
+      });
+    } finally {
+      await apiRequest(adminSession, "/me", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: originalDisplayName }),
+      });
+    }
   });
 
   test("records a successful promotion with the acting admin in activity", async () => {
@@ -642,6 +695,7 @@ describe("admin access controls", () => {
           (entry as { targetId?: unknown }).targetId === adminSession.userId,
       );
       assert.deepEqual(matchingActivity, {
+        actorId: memberSession.userId,
         action: "promoted_user",
         targetId: adminSession.userId,
         details: "Role changed to admin",
