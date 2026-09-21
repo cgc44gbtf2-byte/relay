@@ -301,12 +301,23 @@ function formatFailureNotification(
   );
 }
 
+function escapeGitHubActionsCommandData(message: string): string {
+  return message
+    .replaceAll("%", "%25")
+    .replaceAll("\r", "%0D")
+    .replaceAll("\n", "%0A");
+}
+
 async function notifyCleanupFailure(
   notification: CleanupFailureNotification,
 ): Promise<void> {
   const message = formatFailureNotification(notification);
   if (process.env.GITHUB_ACTIONS === "true") {
-    console.error(`::error title=Abandoned test-user cleanup failed::${message}`);
+    console.error(
+      `::error title=Abandoned test-user cleanup failed::${escapeGitHubActionsCommandData(
+        message,
+      )}`,
+    );
   } else {
     console.error(`ALERT: ${message}`);
   }

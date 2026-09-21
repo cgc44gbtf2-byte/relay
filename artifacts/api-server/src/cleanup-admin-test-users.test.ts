@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   assertSafeCleanupEnvironment,
+  cleanupUsers,
   listMatchingUsers,
   listUserSessions,
   main,
@@ -284,6 +285,41 @@ describe("admin test-user cleanup safeguards", () => {
     assert.equal(result, 1);
   });
 
+  test("reports multiple failed users and falls back to IDs without usernames", async () => {
+    const namedUsername = `${TEST_USERNAME_PREFIX}named`;
+    const users = [
+      createUser("named-user", namedUsername, [
+        `${namedUsername}@${TEST_EMAIL_DOMAIN}`,
+      ]),
+      createUser("user-without-username", null, []),
+    ];
+    const clerk = createClerk({
+      getSessionList: async () => ({ data: [] }),
+      deleteUser: async (userId) => {
+        throw new Error(`delete failed for ${userId}`);
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        cleanupUsers(users, {
+          clerk,
+          database: createDatabase(),
+        }),
+      (error: unknown) => {
+        assert.match(
+          String(error),
+          new RegExp(`user ${namedUsername}: delete failed for named-user`),
+        );
+        assert.match(
+          String(error),
+          /user user-without-username: delete failed for user-without-username/,
+        );
+        return true;
+      },
+    );
+  });
+
   test("notifies maintenance with affected users without Clerk credentials", async () => {
     const username = `${TEST_USERNAME_PREFIX}alert`;
     const clerkSecret = "sk_test_alert_secret";
@@ -318,6 +354,55 @@ describe("admin test-user cleanup safeguards", () => {
       affectedUsers: [{ id: "alert-user", username }],
     });
     assert.doesNotMatch(JSON.stringify(notification), /sk_test_alert_secret/);
+  });
+
+  test("redacts every Clerk key format from failure output", async () => {
+    const username = `${TEST_USERNAME_PREFIX}redaction`;
+    const keys = [
+      "pk_test_publishable",
+      "sk_test_secret",
+      "pk_live_publishable",
+      "sk_live_secret",
+    ];
+    const errors: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("redaction-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${keys.join(" ")}`);
+        },
+      });
+
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      const output = errors.join("\n");
+      for (const key of keys) {
+        assert.doesNotMatch(output, new RegExp(key));
+      }
+      assert.match(
+        output,
+        /\[REDACTED_CLERK_KEY\].*\[REDACTED_CLERK_KEY\]/,
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 
   test("notifies maintenance when listing abandoned users fails", async () => {
@@ -407,6 +492,56 @@ describe("admin test-user cleanup safeguards", () => {
       } else {
         process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
       }
+    }
+  });
+
+  test("escapes affected identities in GitHub Actions annotations", async () => {
+    const firstUsername = `${TEST_USERNAME_PREFIX}first`;
+    const unsafeId = "second-user%\r\n::warning title=Injected::message";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const originalConsoleError = console.error;
+    const errors: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("first-user", firstUsername, [
+              `${firstUsername}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+            createUser(unsafeId, `${TEST_USERNAME_PREFIX}second`, [
+              `${TEST_USERNAME_PREFIX}second@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.match(
+        errors[0] ?? "",
+        /::error title=Abandoned test-user cleanup failed::/,
+      );
+      assert.match(errors[0] ?? "", /second-user%25%0D%0A::warning/);
+      assert.doesNotMatch(errors[0] ?? "", /second-user%\r\n/);
+    } finally {
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
     }
   });
 });
