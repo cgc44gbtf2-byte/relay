@@ -91,6 +91,7 @@ router.get("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<v
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
     status: user.status,
+    role: user.role,
     lastSeenAt: user.lastSeenAt,
   });
 });

@@ -19,6 +19,7 @@ export const usersTable = pgTable(
     displayName: text("display_name").notNull(),
     avatarUrl: text("avatar_url"),
     status: text("status").notNull().default("offline"),
+    role: text("role").notNull().default("member"),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
