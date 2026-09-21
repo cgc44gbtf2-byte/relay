@@ -85,7 +85,7 @@ function jsonResponse(data: unknown, status = 200) {
 }
 
 function channelNotFound() {
-  return jsonResponse({ error: "Channel not found." }, 404);
+  return jsonResponse({ error: "This channel is no longer available.", code: "CHANNEL_NOT_FOUND" }, 404);
 }
 
 function installApi({

@@ -95,7 +95,7 @@ type JoinRequest = { id: number; status: string; createdAt: string; user: Profil
 type Notification = { id: number; type: string; body: string; readAt?: string | null; createdAt: string };
 
 class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
     this.name = "ApiError";
   }
@@ -108,12 +108,12 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(data.error ?? "Something went wrong", response.status);
+  if (!response.ok) throw new ApiError(data.error ?? "Something went wrong", response.status, data.code);
   return data as T;
 }
 
 function isMissingChannelError(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404 && error.message === "Channel not found.";
+  return error instanceof ApiError && error.code === "CHANNEL_NOT_FOUND";
 }
 
 function preferredChannel(channels: Channel[]): Channel | null {
