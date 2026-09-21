@@ -782,7 +782,7 @@ describe("admin access controls", () => {
     assert.deepEqual(afterRows, beforeRows);
   });
 
-  test("keeps another IRC session active when one session is revoked", async () => {
+  test("keeps another IRC session active when one session is revoked and refreshed", async () => {
     const revokedSession = await createTestSession("revoked_scoped");
     const activeSession = await createSessionForUser(revokedSession.userId);
     const [revokedToken, activeToken] = await Promise.all([
@@ -799,6 +799,14 @@ describe("admin access controls", () => {
     const activeResponse = await apiRequestWithToken(activeToken.jwt, "/channels");
     assert.equal(activeResponse.status, 200, JSON.stringify(activeResponse));
     assert.ok(Array.isArray(activeResponse.body));
+
+    const refreshedActiveToken = await clerkClient.sessions.getToken(activeSession.sessionId);
+    const refreshedActiveResponse = await apiRequestWithToken(
+      refreshedActiveToken.jwt,
+      "/channels",
+    );
+    assert.equal(refreshedActiveResponse.status, 200, JSON.stringify(refreshedActiveResponse));
+    assert.ok(Array.isArray(refreshedActiveResponse.body));
   });
 
   test("rejects malformed and expired Clerk credentials across IRC routes without changing user records", async () => {
