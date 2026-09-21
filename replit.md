@@ -22,25 +22,28 @@ Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing 
 
 ## Where things live
 
-- `artifacts/web-irc/src/App.tsx` — responsive IRC workspace and SSE client
+- `artifacts/web-irc/src/App.tsx` — responsive authenticated IRC workspace, Clerk auth UI, REST client, and WebSocket client
 - `artifacts/web-irc/src/index.css` — terminal-inspired theme and motion
-- `artifacts/api-server/src/routes/irc.ts` — in-memory room state, IRC REST endpoints, and SSE broadcast
+- `artifacts/api-server/src/routes/irc.ts` — authenticated PostgreSQL-backed IRC REST endpoints
+- `artifacts/api-server/src/lib/ws.ts` — ticket-authenticated WebSocket hub for channel, DM, and presence events
+- `lib/db/src/schema/irc.ts` — persistent users, channels, memberships, messages, moderation, blocks, and notifications
 - `lib/api-spec/openapi.yaml` — source of truth for the IRC API contract
 - `lib/api-client-react/src/generated/` and `lib/api-zod/src/generated/` — generated client and validation helpers
 
 ## Architecture decisions
 
-- The first version uses server-sent events for room updates so browsers can reconnect without a custom WebSocket client.
-- Room state is intentionally in memory for the first build; persistence is proposed as a follow-up.
-- The frontend uses the generated React Query client for REST state and mutations, with EventSource for the streaming endpoint.
+- Clerk is the authentication provider; browser session cookies are used for HTTP and short-lived authenticated tickets are used for WebSocket upgrades.
+- IRC data is persisted in PostgreSQL through Drizzle; use `pnpm --filter @workspace/db run push` after schema changes.
+- The frontend uses direct typed fetch helpers for the expanded IRC routes and a WebSocket for live events. The older generated client remains for legacy API-spec routes.
 - The UI uses a terminal-inspired dark theme with amber, teal, and coral accents to make active conversation easy to scan.
 
 ## Product
 
-- Browse the default IRC rooms and filter the room list.
-- Join a new room with a chosen nickname.
-- Read seeded room history, see online/away users, and send messages with Enter.
-- Receive messages and presence-related system events through a reconnecting live stream.
+- Register and sign in with Clerk, then set a username and display name.
+- Browse, search, create, and join public channels with persistent topics and history.
+- Send real-time channel messages and direct messages through WebSockets.
+- See member presence, join/leave system notifications, timestamps, searchable history, and notification inbox items.
+- Edit topics, promote moderators, mute, kick, ban, block, and message other users from the member panel.
 
 ## User preferences
 

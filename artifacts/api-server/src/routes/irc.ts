@@ -1,238 +1,390 @@
-import { Router, type IRouter, type Response } from "express";
+import { Router, type IRouter } from "express";
 import {
-  GetIrcStateQueryParams,
-  GetIrcStateResponse,
-  type IrcState,
-  JoinIrcChannelBody,
-  SendIrcMessageBody,
-} from "@workspace/api-zod";
-
-type IrcMessage = {
-  id: string;
-  channel: string;
-  nick: string;
-  text: string;
-  timestamp: string;
-  kind: "message" | "system";
-};
-
-type IrcUser = {
-  nick: string;
-  status: "online" | "away";
-  color: string;
-};
-
-type Room = {
-  topic: string;
-  messages: IrcMessage[];
-  users: IrcUser[];
-  subscribers: Set<Response>;
-};
-
-const palette = ["#f5b544", "#55c2a0", "#d77bff", "#65a7ff", "#ff7b72"];
-const roomTopics: Record<string, string> = {
-  "#lobby": "The front door of the network. Say hello.",
-  "#design": "Share references, questions, and works in progress.",
-  "#help": "A friendly place for questions and troubleshooting.",
-};
-
-function now(): string {
-  return new Date().toISOString();
-}
-
-function cleanChannel(channel: string): string {
-  const trimmed = channel.trim();
-  return trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
-}
-
-function createRoom(channel: string): Room {
-  const normalized = cleanChannel(channel);
-  const seedUsers: IrcUser[] =
-    normalized === "#lobby"
-      ? [
-          { nick: "mira", status: "online", color: palette[0] },
-          { nick: "orion", status: "online", color: palette[1] },
-          { nick: "jules", status: "away", color: palette[2] },
-          { nick: "sable", status: "online", color: palette[3] },
-        ]
-      : [{ nick: "mira", status: "online", color: palette[0] }];
-
-  const seedMessages: IrcMessage[] =
-    normalized === "#lobby"
-      ? [
-          {
-            id: "lobby-1",
-            channel: normalized,
-            nick: "mira",
-            text: "Welcome to the lobby. The room is open.",
-            timestamp: "2026-09-20T15:14:00.000Z",
-            kind: "message",
-          },
-          {
-            id: "lobby-2",
-            channel: normalized,
-            nick: "orion",
-            text: "Anyone else catching up on the old net tonight?",
-            timestamp: "2026-09-20T15:15:00.000Z",
-            kind: "message",
-          },
-          {
-            id: "lobby-3",
-            channel: normalized,
-            nick: "system",
-            text: "You are connected to the local relay.",
-            timestamp: "2026-09-20T15:16:00.000Z",
-            kind: "system",
-          },
-        ]
-      : [
-          {
-            id: `${normalized}-welcome`,
-            channel: normalized,
-            nick: "system",
-            text: `You joined ${normalized}.`,
-            timestamp: now(),
-            kind: "system",
-          },
-        ];
-
-  return {
-    topic:
-      roomTopics[normalized] ??
-      "A quiet corner of the network. Make it yours.",
-    messages: seedMessages,
-    users: seedUsers,
-    subscribers: new Set<Response>(),
-  };
-}
-
-const rooms = new Map<string, Room>();
-
-function getRoom(channel: string): { channel: string; room: Room } {
-  const normalized = cleanChannel(channel);
-  const existing = rooms.get(normalized);
-  if (existing) return { channel: normalized, room: existing };
-
-  const room = createRoom(normalized);
-  rooms.set(normalized, room);
-  return { channel: normalized, room };
-}
-
-function snapshot(channel: string, room: Room): IrcState {
-  return GetIrcStateResponse.parse({
-    channel,
-    topic: room.topic,
-    messages: room.messages.slice(-100),
-    users: room.users,
-  });
-}
-
-function writeEvent(res: Response, event: IrcMessage | IrcState): void {
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
-
-function broadcast(room: Room, event: IrcMessage | IrcState): void {
-  for (const subscriber of room.subscribers) writeEvent(subscriber, event);
-}
-
-function upsertUser(room: Room, nick: string): IrcUser {
-  const existing = room.users.find(
-    (user) => user.nick.toLowerCase() === nick.toLowerCase(),
-  );
-  if (existing) {
-    existing.status = "online";
-    return existing;
-  }
-  const user = {
-    nick,
-    status: "online" as const,
-    color: palette[room.users.length % palette.length],
-  };
-  room.users.push(user);
-  return user;
-}
+  and,
+  asc,
+  desc,
+  eq,
+  ilike,
+  inArray,
+  or,
+} from "drizzle-orm";
+import {
+  blocksTable,
+  channelBansTable,
+  channelMembersTable,
+  channelsTable,
+  db,
+  messagesTable,
+  notificationsTable,
+  usersTable,
+} from "@workspace/db";
+import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
+import { wsHub } from "../lib/ws";
 
 const router: IRouter = Router();
 
-router.get("/irc/state", (req, res): void => {
-  const parsed = GetIrcStateQueryParams.safeParse(req.query);
-  if (!parsed.success) {
-    req.log.warn({ errors: parsed.error.message }, "Invalid IRC state query");
-    res.status(400).json({ error: parsed.error.message });
-    return;
+function param(req: AuthenticatedRequest, key: string): string {
+  const value = req.params[key];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+const channelName = (value: string): string => {
+  const name = value.trim().toLowerCase();
+  return name.startsWith("#") ? name : `#${name}`;
+};
+
+async function channelFor(id: string) {
+  const channelId = Number(id);
+  if (!Number.isInteger(channelId)) return null;
+  return db.query.channelsTable.findFirst({ where: eq(channelsTable.id, channelId) });
+}
+
+async function ensureDefaults(ownerId: string): Promise<void> {
+  const existing = await db.select({ id: channelsTable.id }).from(channelsTable).limit(1);
+  if (existing.length > 0) return;
+  for (const name of ["#lobby", "#design", "#help", "#music"]) {
+    await db.insert(channelsTable).values({
+      name,
+      topic:
+        name === "#lobby"
+          ? "The front door of the network. Say hello."
+          : "A quiet corner of the network. Make it yours.",
+      ownerId,
+    }).onConflictDoNothing();
   }
+}
 
-  const { channel, room } = getRoom(parsed.data.channel);
-  res.json(snapshot(channel, room));
-});
-
-router.post("/irc/join", (req, res): void => {
-  const parsed = JoinIrcChannelBody.safeParse(req.body);
-  if (!parsed.success) {
-    req.log.warn({ errors: parsed.error.message }, "Invalid IRC join request");
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const { channel, room } = getRoom(parsed.data.channel);
-  const user = upsertUser(room, parsed.data.nick);
-  const systemMessage: IrcMessage = {
-    id: crypto.randomUUID(),
-    channel,
-    nick: "system",
-    text: `${user.nick} joined ${channel}`,
-    timestamp: now(),
-    kind: "system",
-  };
-  room.messages.push(systemMessage);
-  broadcast(room, systemMessage);
-  res.json(snapshot(channel, room));
-});
-
-router.post("/irc/messages", (req, res): void => {
-  const parsed = SendIrcMessageBody.safeParse(req.body);
-  if (!parsed.success) {
-    req.log.warn({ errors: parsed.error.message }, "Invalid IRC message");
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const { channel, room } = getRoom(parsed.data.channel);
-  const user = upsertUser(room, parsed.data.nick);
-  const message: IrcMessage = {
-    id: crypto.randomUUID(),
-    channel,
-    nick: user.nick,
-    text: parsed.data.text.trim(),
-    timestamp: now(),
-    kind: "message",
-  };
-  room.messages.push(message);
-  broadcast(room, message);
-  res.status(201).json(message);
-});
-
-router.get("/irc/events", (req, res): void => {
-  const parsed = GetIrcStateQueryParams.safeParse(req.query);
-  if (!parsed.success) {
-    req.log.warn({ errors: parsed.error.message }, "Invalid IRC event query");
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const { room } = getRoom(parsed.data.channel);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  writeEvent(res, snapshot(cleanChannel(parsed.data.channel), room));
-  room.subscribers.add(res);
-
-  const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 25_000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    room.subscribers.delete(res);
+async function membership(channelId: number, userId: string) {
+  return db.query.channelMembersTable.findFirst({
+    where: and(
+      eq(channelMembersTable.channelId, channelId),
+      eq(channelMembersTable.userId, userId),
+    ),
   });
+}
+
+async function publicUser(userId: string) {
+  const user = await db.query.usersTable.findFirst({ where: eq(usersTable.clerkId, userId) });
+  return user
+    ? { id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status }
+    : null;
+}
+
+async function messageView(message: typeof messagesTable.$inferSelect) {
+  return {
+    id: message.id,
+    channelId: message.channelId,
+    threadKey: message.threadKey,
+    body: message.body,
+    kind: message.kind,
+    createdAt: message.createdAt,
+    sender: await publicUser(message.senderId),
+    recipientId: message.recipientId,
+  };
+}
+
+router.get("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const user = await ensureProfile(getUserId(req));
+  res.json({
+    id: user.clerkId,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+    status: user.status,
+    lastSeenAt: user.lastSeenAt,
+  });
+});
+
+router.patch("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  await ensureProfile(userId);
+  const username = typeof req.body.username === "string" ? req.body.username.trim().toLowerCase() : undefined;
+  const displayName = typeof req.body.displayName === "string" ? req.body.displayName.trim() : undefined;
+  if (username && !/^[a-z0-9_]{3,24}$/.test(username)) {
+    res.status(400).json({ error: "Username must be 3–24 letters, numbers, or underscores." });
+    return;
+  }
+  if (displayName !== undefined && (displayName.length < 1 || displayName.length > 48)) {
+    res.status(400).json({ error: "Display name must be 1–48 characters." });
+    return;
+  }
+  const [updated] = await db.update(usersTable).set({
+    ...(username ? { username } : {}),
+    ...(displayName !== undefined ? { displayName } : {}),
+    status: "online",
+    lastSeenAt: new Date(),
+  }).where(eq(usersTable.clerkId, userId)).returning();
+  res.json(updated);
+});
+
+router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  await ensureProfile(userId);
+  await ensureDefaults(userId);
+  const channels = await db.select().from(channelsTable).orderBy(asc(channelsTable.name));
+  const joined = await db.select({ channelId: channelMembersTable.channelId })
+    .from(channelMembersTable).where(eq(channelMembersTable.userId, userId));
+  const joinedIds = new Set(joined.map((item) => item.channelId));
+  const counts = await db.select({ channelId: channelMembersTable.channelId })
+    .from(channelMembersTable);
+  const countMap = new Map<number, number>();
+  for (const row of counts) countMap.set(row.channelId, (countMap.get(row.channelId) ?? 0) + 1);
+  res.json(channels.map((channel) => ({
+    ...channel,
+    joined: joinedIds.has(channel.id),
+    memberCount: countMap.get(channel.id) ?? 0,
+  })));
+});
+
+router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  await ensureProfile(userId);
+  const name = typeof req.body.name === "string" ? channelName(req.body.name) : "";
+  const topic = typeof req.body.topic === "string" ? req.body.topic.trim() : "";
+  if (!/^#[a-z0-9][a-z0-9_-]{1,31}$/.test(name)) {
+    res.status(400).json({ error: "Channel names must be 2–32 lowercase characters." });
+    return;
+  }
+  const [channel] = await db.insert(channelsTable).values({ name, topic, ownerId: userId }).returning();
+  await db.insert(channelMembersTable).values({ channelId: channel.id, userId, role: "owner" });
+  res.status(201).json(channel);
+});
+
+router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  const ban = await db.query.channelBansTable.findFirst({
+    where: and(eq(channelBansTable.channelId, channel.id), eq(channelBansTable.userId, userId)),
+  });
+  if (ban) {
+    res.status(403).json({ error: ban.reason || "You are banned from this channel." });
+    return;
+  }
+  await ensureProfile(userId);
+  await db.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
+  const user = await publicUser(userId);
+  const event = { type: "presence", channelId: channel.id, action: "join", user };
+  wsHub.broadcastChannel(channel.id, event);
+  res.json({ ok: true });
+});
+
+router.post("/channels/:channelId/leave", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, userId)));
+  wsHub.broadcastChannel(channel.id, { type: "presence", channelId: channel.id, action: "leave", userId });
+  res.json({ ok: true });
+});
+
+router.get("/channels/:channelId/members", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  const rows = await db
+    .select({
+      user: usersTable,
+      role: channelMembersTable.role,
+      mutedUntil: channelMembersTable.mutedUntil,
+    })
+    .from(channelMembersTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, channelMembersTable.userId))
+    .where(eq(channelMembersTable.channelId, channel.id))
+    .orderBy(asc(usersTable.displayName));
+  res.json(rows.map(({ user, role, mutedUntil }) => ({
+    id: user.clerkId,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+    status: user.status,
+    role,
+    mutedUntil,
+  })));
+});
+
+router.get("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const rows = await db.select().from(messagesTable).where(and(
+    eq(messagesTable.channelId, channel.id),
+    query ? ilike(messagesTable.body, `%${query}%`) : undefined,
+  )).orderBy(desc(messagesTable.createdAt)).limit(100);
+  res.json({ channel, messages: await Promise.all(rows.reverse().map(messageView)) });
+});
+
+router.post("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  const member = await membership(channel.id, userId);
+  if (!member) {
+    res.status(403).json({ error: "Join the channel before sending messages." });
+    return;
+  }
+  if (member.mutedUntil && member.mutedUntil > new Date()) {
+    res.status(403).json({ error: "You are muted in this channel." });
+    return;
+  }
+  const body = typeof req.body.body === "string" ? req.body.body.trim() : "";
+  if (!body || body.length > 500) {
+    res.status(400).json({ error: "Messages must be 1–500 characters." });
+    return;
+  }
+  const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, body }).returning();
+  const view = await messageView(message);
+  wsHub.broadcastChannel(channel.id, { type: "message", message: view });
+  res.status(201).json(view);
+});
+
+router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found" });
+    return;
+  }
+  const member = await membership(channel.id, userId);
+  if (!member || !["owner", "moderator"].includes(member.role)) {
+    res.status(403).json({ error: "Only channel owners and moderators can edit this channel." });
+    return;
+  }
+  const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
+  const [updated] = await db.update(channelsTable).set(topic === undefined ? {} : { topic }).where(eq(channelsTable.id, channel.id)).returning();
+  wsHub.broadcastChannel(channel.id, { type: "channel", channel: updated });
+  res.json(updated);
+});
+
+router.post("/channels/:channelId/moderation", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  const targetUserId = typeof req.body.targetUserId === "string" ? req.body.targetUserId : "";
+  const action = req.body.action;
+  if (!channel || !targetUserId || !["mute", "kick", "ban", "moderator"].includes(action)) {
+    res.status(400).json({ error: "Invalid moderation request." });
+    return;
+  }
+  const actor = await membership(channel.id, userId);
+  if (!actor || !["owner", "moderator"].includes(actor.role)) {
+    res.status(403).json({ error: "You do not have moderation permissions." });
+    return;
+  }
+  if (action === "mute") {
+    const minutes = Math.max(1, Math.min(1440, Number(req.body.minutes) || 10));
+    await db.update(channelMembersTable).set({ mutedUntil: new Date(Date.now() + minutes * 60_000) }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
+  } else if (action === "kick") {
+    await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
+  } else if (action === "ban") {
+    await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
+    await db.insert(channelBansTable).values({ channelId: channel.id, userId: targetUserId, reason: String(req.body.reason ?? "") }).onConflictDoUpdate({ target: [channelBansTable.channelId, channelBansTable.userId], set: { reason: String(req.body.reason ?? "") } });
+  } else {
+    await db.update(channelMembersTable).set({ role: "moderator" }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
+  }
+  wsHub.broadcastChannel(channel.id, { type: "moderation", action, targetUserId });
+  res.json({ ok: true });
+});
+
+router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (q.length < 2) {
+    res.json([]);
+    return;
+  }
+  const users = await db.select().from(usersTable).where(or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`))).limit(20);
+  res.json(users.map((user) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
+});
+
+router.post("/users/:userId/block", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const blockerId = getUserId(req);
+  await db.insert(blocksTable).values({ blockerId, blockedId: param(req, "userId") }).onConflictDoNothing();
+  res.json({ ok: true });
+});
+
+router.delete("/users/:userId/block", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  await db.delete(blocksTable).where(and(eq(blocksTable.blockerId, getUserId(req)), eq(blocksTable.blockedId, param(req, "userId"))));
+  res.json({ ok: true });
+});
+
+function threadKey(a: string, b: string): string {
+  return [a, b].sort().join(":");
+}
+
+router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const rows = await db.select().from(messagesTable).where(or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId))).orderBy(desc(messagesTable.createdAt));
+  const keys = [...new Set(rows.map((row) => row.threadKey).filter((key): key is string => Boolean(key)))];
+  const threads = [];
+  for (const key of keys) {
+    const peerId = key.split(":").find((id) => id !== userId) ?? userId;
+    const peer = await publicUser(peerId);
+    const last = rows.find((row) => row.threadKey === key);
+    if (peer && last) threads.push({ key, peer, lastMessage: await messageView(last) });
+  }
+  res.json(threads);
+});
+
+router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const peerId = param(req, "userId");
+  const key = threadKey(userId, peerId);
+  const rows = await db.select().from(messagesTable).where(eq(messagesTable.threadKey, key)).orderBy(asc(messagesTable.createdAt)).limit(100);
+  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await Promise.all(rows.map(messageView)) });
+});
+
+router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const senderId = getUserId(req);
+  const recipientId = param(req, "userId");
+  const body = typeof req.body.body === "string" ? req.body.body.trim() : "";
+  if (!body || body.length > 500) {
+    res.status(400).json({ error: "Messages must be 1–500 characters." });
+    return;
+  }
+  const blocked = await db.query.blocksTable.findFirst({ where: or(and(eq(blocksTable.blockerId, senderId), eq(blocksTable.blockedId, recipientId)), and(eq(blocksTable.blockerId, recipientId), eq(blocksTable.blockedId, senderId))) });
+  if (blocked) {
+    res.status(403).json({ error: "Direct messages are unavailable for this user." });
+    return;
+  }
+  const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), body }).returning();
+  await db.insert(notificationsTable).values({ userId: recipientId, type: "direct_message", body: "You have a new direct message." });
+  const view = await messageView(message);
+  wsHub.broadcastUser(senderId, { type: "dm", message: view });
+  wsHub.broadcastUser(recipientId, { type: "dm", message: view });
+  res.status(201).json(view);
+});
+
+router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (q.length < 2) {
+    res.json([]);
+    return;
+  }
+  const rows = await db.select().from(messagesTable).where(ilike(messagesTable.body, `%${q}%`)).orderBy(desc(messagesTable.createdAt)).limit(100);
+  res.json(await Promise.all(rows.map(messageView)));
+});
+
+router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const rows = await db.select().from(notificationsTable).where(eq(notificationsTable.userId, getUserId(req))).orderBy(desc(notificationsTable.createdAt)).limit(50);
+  res.json(rows);
+});
+
+router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  await db.update(notificationsTable).set({ readAt: new Date() }).where(and(eq(notificationsTable.id, Number(param(req, "id"))), eq(notificationsTable.userId, getUserId(req))));
+  res.json({ ok: true });
 });
 
 export default router;
