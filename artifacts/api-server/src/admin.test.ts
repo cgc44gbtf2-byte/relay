@@ -339,6 +339,15 @@ describe("admin access controls", () => {
       role: "member",
     });
 
+    const status = await apiRequest(adminSession, "/admin/status");
+    assert.equal(status.status, 200);
+    assert.ok(status.body && typeof status.body === "object");
+    const profile = (status.body as {
+      profile?: { id?: unknown; displayName?: unknown };
+    }).profile;
+    assert.ok(profile && profile.id === adminSession.userId);
+    assert.equal(typeof profile.displayName, "string");
+
     const overview = await apiRequest(adminSession, "/admin/overview");
     assert.equal(overview.status, 200);
     assert.ok(overview.body && typeof overview.body === "object");
@@ -351,6 +360,7 @@ describe("admin access controls", () => {
         action: string;
         targetId: string | null;
         details: string | null;
+        actor: string | null;
       } =>
         typeof entry === "object" &&
         entry !== null &&
@@ -363,6 +373,7 @@ describe("admin access controls", () => {
       action: "demoted_user",
       targetId: memberSession.userId,
       details: "Role changed to member",
+      actor: profile.displayName,
     });
   });
 
