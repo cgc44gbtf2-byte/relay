@@ -1893,6 +1893,184 @@ describe("admin access controls", () => {
     }
   });
 
+  test("revokes private-room access after leaving and requires approval again to rejoin", async () => {
+    const ownerSession = await createTestSession("leave_owner");
+    const memberSession = await createTestSession("leave_member");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const memberProfile = await apiRequest(memberSession, "/me");
+      assert.equal(memberProfile.status, 200, JSON.stringify(memberProfile));
+      assert.ok(memberProfile.body && typeof memberProfile.body === "object");
+      const username = (memberProfile.body as { username?: unknown }).username;
+      assert.equal(typeof username, "string");
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `leave-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Leave access revocation",
+          isPrivate: true,
+          isInviteOnly: true,
+          password: "room-pass",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const invite = await apiRequest(ownerSession, `/channels/${channelId}/invites`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
+      assert.equal(invite.status, 201, JSON.stringify(invite));
+
+      const joinRequest = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "room-pass" }),
+      });
+      assert.equal(joinRequest.status, 202, JSON.stringify(joinRequest));
+      assert.deepEqual(joinRequest.body, { ok: true, status: "pending" });
+
+      const requests = await apiRequest(ownerSession, `/channels/${channelId}/join-requests`);
+      assert.equal(requests.status, 200, JSON.stringify(requests));
+      assert.ok(Array.isArray(requests.body));
+      assert.equal(requests.body.length, 1);
+      const requestId = (requests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof requestId, "number");
+
+      const approval = await apiRequest(ownerSession, `/channels/${channelId}/join-requests/${requestId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "approve" }),
+      });
+      assert.equal(approval.status, 200, JSON.stringify(approval));
+
+      const joinAfterApproval = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "room-pass" }),
+      });
+      assert.equal(joinAfterApproval.status, 200, JSON.stringify(joinAfterApproval));
+
+      const memberSocket = await openWebSocket(memberSession);
+      const postLeaveSocket = await openWebSocket(memberSession);
+      sockets.push(memberSocket, postLeaveSocket);
+      memberSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const leave = await apiRequest(memberSession, `/channels/${channelId}/leave`, {
+        method: "POST",
+      });
+      assert.equal(leave.status, 200, JSON.stringify(leave));
+      assert.deepEqual(leave.body, { ok: true });
+
+      const deniedHistory = await apiRequest(memberSession, `/channels/${channelId}/messages`);
+      assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
+      assert.deepEqual(deniedHistory.body, {
+        error: "Join the private channel before reading its history.",
+      });
+
+      const deniedMembers = await apiRequest(memberSession, `/channels/${channelId}/members`);
+      assert.equal(deniedMembers.status, 403, JSON.stringify(deniedMembers));
+      assert.deepEqual(deniedMembers.body, {
+        error: "Join the private channel before viewing its members.",
+      });
+
+      postLeaveSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const blockedExistingSubscription = expectNoWebSocketEvent(
+        memberSocket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { channelId?: unknown }).channelId === channelId,
+      );
+      const blockedNewSubscription = expectNoWebSocketEvent(
+        postLeaveSocket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { channelId?: unknown }).channelId === channelId,
+      );
+      const postLeaveMessage = await apiRequest(ownerSession, `/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Should stay hidden after leaving" }),
+      });
+      assert.equal(postLeaveMessage.status, 201, JSON.stringify(postLeaveMessage));
+      await Promise.all([blockedExistingSubscription, blockedNewSubscription]);
+
+      const wrongPassword = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "wrong-pass" }),
+      });
+      assert.equal(wrongPassword.status, 403, JSON.stringify(wrongPassword));
+      assert.deepEqual(wrongPassword.body, { error: "A channel password is required." });
+
+      const withoutInvite = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "room-pass" }),
+      });
+      assert.equal(withoutInvite.status, 403, JSON.stringify(withoutInvite));
+      assert.deepEqual(withoutInvite.body, { error: "This channel is invite-only." });
+
+      const reInvite = await apiRequest(ownerSession, `/channels/${channelId}/invites`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
+      assert.equal(reInvite.status, 201, JSON.stringify(reInvite));
+
+      const rejoinRequest = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "room-pass" }),
+      });
+      assert.equal(rejoinRequest.status, 202, JSON.stringify(rejoinRequest));
+      assert.deepEqual(rejoinRequest.body, { ok: true, status: "pending" });
+
+      const rejoinRequests = await apiRequest(ownerSession, `/channels/${channelId}/join-requests`);
+      assert.equal(rejoinRequests.status, 200, JSON.stringify(rejoinRequests));
+      assert.ok(Array.isArray(rejoinRequests.body));
+      assert.equal(rejoinRequests.body.length, 1);
+      const rejoinRequestId = (rejoinRequests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof rejoinRequestId, "number");
+
+      const reapproval = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/join-requests/${rejoinRequestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(reapproval.status, 200, JSON.stringify(reapproval));
+
+      const rejoinAfterApproval = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: "room-pass" }),
+      });
+      assert.equal(rejoinAfterApproval.status, 200, JSON.stringify(rejoinAfterApproval));
+
+      const restoredHistory = await apiRequest(memberSession, `/channels/${channelId}/messages`);
+      assert.equal(restoredHistory.status, 200, JSON.stringify(restoredHistory));
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [ownerSession.userId, memberSession.userId]);
+    }
+  });
+
   test("scopes private-room join-request review to the moderator's channel", async () => {
     const ownerSession = await createTestSession("scoped_request_owner");
     const requesterSession = await createTestSession("scoped_request_requester");

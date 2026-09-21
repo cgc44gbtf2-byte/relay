@@ -569,7 +569,17 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
     res.status(404).json(channelNotFoundError);
     return;
   }
-  await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, userId)));
+  await db.transaction(async (tx) => {
+    await tx.delete(channelMembersTable).where(and(
+      eq(channelMembersTable.channelId, channel.id),
+      eq(channelMembersTable.userId, userId),
+    ));
+    await tx.delete(channelJoinRequestsTable).where(and(
+      eq(channelJoinRequestsTable.channelId, channel.id),
+      eq(channelJoinRequestsTable.userId, userId),
+    ));
+  });
+  if (channel.isPrivate) wsHub.revokeChannelAccess(channel.id, userId);
   wsHub.broadcastChannel(channel.id, { type: "presence", channelId: channel.id, action: "leave", userId });
   res.json({ ok: true });
 });

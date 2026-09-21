@@ -39,6 +39,12 @@ class Hub {
     }
   }
 
+  revokeChannelAccess(channelId: number, userId: string): void {
+    for (const client of this.clients) {
+      if (client.userId === userId) client.channelIds.delete(channelId);
+    }
+  }
+
   broadcastChannelRemoved(channelId: number): void {
     for (const client of this.clients) {
       this.send(client.socket, { type: "channel_removed", channelId });
