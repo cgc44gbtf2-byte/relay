@@ -97,11 +97,23 @@ export const notificationsTable = pgTable("irc_notifications", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
+  id: serial("id").primaryKey(),
+  actorId: text("actor_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  action: text("action").notNull(),
+  targetId: text("target_id"),
+  targetLabel: text("target_label"),
+  details: text("details"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const insertUserSchema = createInsertSchema(usersTable);
 export const insertChannelSchema = createInsertSchema(channelsTable);
 export const insertMessageSchema = createInsertSchema(messagesTable);
+export const insertAdminAuditLogSchema = createInsertSchema(adminAuditLogsTable);
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof usersTable.$inferSelect;
 export type Channel = typeof channelsTable.$inferSelect;
 export type ChannelMember = typeof channelMembersTable.$inferSelect;
 export type Message = typeof messagesTable.$inferSelect;
+export type AdminAuditLog = typeof adminAuditLogsTable.$inferSelect;
