@@ -1893,6 +1893,160 @@ describe("admin access controls", () => {
     }
   });
 
+  test("scopes private-room join-request review to the moderator's channel", async () => {
+    const ownerSession = await createTestSession("scoped_request_owner");
+    const requesterSession = await createTestSession("scoped_request_requester");
+    const reviewerSession = await createTestSession("scoped_request_reviewer");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const reviewerProfile = await apiRequest(reviewerSession, "/me");
+      assert.equal(reviewerProfile.status, 200, JSON.stringify(reviewerProfile));
+      await pool.query(
+        "UPDATE irc_users SET role = 'moderator' WHERE clerk_id = $1",
+        [reviewerSession.userId],
+      );
+
+      const createChannel = async (name: string): Promise<number> => {
+        const response = await apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `${name}-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            topic: "Scoped join-request review",
+            isPrivate: true,
+          }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        const channelId = (response.body as { id?: unknown }).id;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId as number);
+        return channelId as number;
+      };
+
+      const moderatedChannelId = await createChannel("scoped-moderated");
+      const requestedChannelId = await createChannel("scoped-requested");
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [moderatedChannelId, reviewerSession.userId],
+      );
+
+      const pendingJoin = await apiRequest(
+        requesterSession,
+        `/channels/${requestedChannelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(pendingJoin.status, 202, JSON.stringify(pendingJoin));
+      assert.deepEqual(pendingJoin.body, { ok: true, status: "pending" });
+
+      const moderatedRequests = await apiRequest(
+        reviewerSession,
+        `/channels/${moderatedChannelId}/join-requests`,
+      );
+      assert.equal(moderatedRequests.status, 200, JSON.stringify(moderatedRequests));
+      assert.deepEqual(moderatedRequests.body, []);
+
+      const unmoderatedRequests = await apiRequest(
+        reviewerSession,
+        `/channels/${requestedChannelId}/join-requests`,
+      );
+      assert.equal(unmoderatedRequests.status, 403, JSON.stringify(unmoderatedRequests));
+      assert.deepEqual(unmoderatedRequests.body, {
+        error: "Only channel operators can review join requests.",
+      });
+
+      const ownerRequests = await apiRequest(
+        ownerSession,
+        `/channels/${requestedChannelId}/join-requests`,
+      );
+      assert.equal(ownerRequests.status, 200, JSON.stringify(ownerRequests));
+      assert.ok(Array.isArray(ownerRequests.body));
+      assert.equal(ownerRequests.body.length, 1);
+      const requestId = (ownerRequests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof requestId, "number");
+
+      const crossChannelApproval = await apiRequest(
+        reviewerSession,
+        `/channels/${moderatedChannelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(crossChannelApproval.status, 404, JSON.stringify(crossChannelApproval));
+      assert.deepEqual(crossChannelApproval.body, {
+        error: "Join request not found.",
+      });
+
+      const requestAfterCrossChannelAttempt = await apiRequest(
+        ownerSession,
+        `/channels/${requestedChannelId}/join-requests`,
+      );
+      assert.equal(
+        requestAfterCrossChannelAttempt.status,
+        200,
+        JSON.stringify(requestAfterCrossChannelAttempt),
+      );
+      assert.ok(Array.isArray(requestAfterCrossChannelAttempt.body));
+      assert.deepEqual(
+        requestAfterCrossChannelAttempt.body.map((request) => ({
+          id: (request as { id?: unknown }).id,
+          status: (request as { status?: unknown }).status,
+        })),
+        [{ id: requestId, status: "pending" }],
+      );
+
+      const deniedHistory = await apiRequest(
+        requesterSession,
+        `/channels/${requestedChannelId}/messages`,
+      );
+      assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
+      assert.deepEqual(deniedHistory.body, {
+        error: "Join the private channel before reading its history.",
+      });
+
+      const pendingSocket = await openWebSocket(requesterSession);
+      sockets.push(pendingSocket);
+      pendingSocket.send(JSON.stringify({ type: "subscribe", channelId: requestedChannelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const blockedEvent = expectNoWebSocketEvent(
+        pendingSocket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { channelId?: unknown }).channelId === requestedChannelId,
+      );
+      const roomMessage = await apiRequest(
+        ownerSession,
+        `/channels/${requestedChannelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Should remain private" }),
+        },
+      );
+      assert.equal(roomMessage.status, 201, JSON.stringify(roomMessage));
+      await blockedEvent;
+
+      const deniedMembers = await apiRequest(
+        requesterSession,
+        `/channels/${requestedChannelId}/members`,
+      );
+      assert.equal(deniedMembers.status, 403, JSON.stringify(deniedMembers));
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        requesterSession.userId,
+        reviewerSession.userId,
+      ]);
+    }
+  });
+
   test("keeps private room typing, reactions, and deletion synchronized across members", async () => {
     const ownerSession = await createTestSession("realtime_owner");
     const memberSession = await createTestSession("realtime_member");

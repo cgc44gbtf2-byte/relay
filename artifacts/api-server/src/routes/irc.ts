@@ -149,6 +149,11 @@ async function isChannelOwnerOrModerator(channelId: number, userId: string): Pro
   );
 }
 
+async function canReviewJoinRequests(channelId: number, userId: string): Promise<boolean> {
+  const member = await membership(channelId, userId);
+  return Boolean(member && ["owner", "moderator"].includes(member.role));
+}
+
 async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null): Promise<void> {
   const names = [...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase());
   if (names.length === 0) return;
@@ -468,7 +473,7 @@ router.get("/channels/:channelId/join-requests", requireAuth, async (req: Authen
     res.status(404).json(channelNotFoundError);
     return;
   }
-  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+  if (!(await canReviewJoinRequests(channel.id, userId))) {
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
   }
@@ -506,7 +511,7 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
     res.status(400).json({ error: "Invalid join-request decision." });
     return;
   }
-  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+  if (!(await canReviewJoinRequests(channel.id, userId))) {
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
   }
