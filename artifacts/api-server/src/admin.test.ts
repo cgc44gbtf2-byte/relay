@@ -41,6 +41,13 @@ async function createTestSession(label: string): Promise<TestSession> {
   return testSession;
 }
 
+async function createSessionForUser(userId: string): Promise<TestSession> {
+  const session = await clerkClient.sessions.createSession({ userId });
+  const testSession = { userId, sessionId: session.id };
+  createdSessions.push(testSession);
+  return testSession;
+}
+
 async function apiRequest(
   session: TestSession,
   path: string,
@@ -485,6 +492,25 @@ describe("admin access controls", () => {
 
     const afterRows = await userOwnedRows(revokedSession.userId);
     assert.deepEqual(afterRows, beforeRows);
+  });
+
+  test("keeps another IRC session active when one session is revoked", async () => {
+    const revokedSession = await createTestSession("revoked_scoped");
+    const activeSession = await createSessionForUser(revokedSession.userId);
+    const [revokedToken, activeToken] = await Promise.all([
+      clerkClient.sessions.getToken(revokedSession.sessionId),
+      clerkClient.sessions.getToken(activeSession.sessionId),
+    ]);
+
+    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+
+    const revokedResponse = await apiRequestWithToken(revokedToken.jwt, "/me");
+    assert.equal(revokedResponse.status, 401, JSON.stringify(revokedResponse));
+    assert.deepEqual(revokedResponse.body, { error: "Sign in to continue" });
+
+    const activeResponse = await apiRequestWithToken(activeToken.jwt, "/channels");
+    assert.equal(activeResponse.status, 200, JSON.stringify(activeResponse));
+    assert.ok(Array.isArray(activeResponse.body));
   });
 
   test("rejects malformed and expired Clerk credentials across IRC routes without changing user records", async () => {
