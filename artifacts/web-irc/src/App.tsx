@@ -262,8 +262,10 @@ function ChatApp() {
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
   const channelRefreshRef = useRef<Promise<Channel[]> | null>(null);
+  const profileRef = useRef<Profile | null>(profile);
   currentChannelIdRef.current = currentChannelId;
   activeDmIdRef.current = activeDm?.id ?? null;
+  profileRef.current = profile;
 
   const refreshChannels = async (): Promise<Channel[]> => {
     if (channelRefreshRef.current) return channelRefreshRef.current;
@@ -331,14 +333,22 @@ function ChatApp() {
 
   useEffect(() => {
     let cancelled = false;
+    let socket: WebSocket | null = null;
     api<{ ticket: string }>("/ws-ticket").then(({ ticket }) => {
       if (cancelled) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
-      socket.onopen = () => { setConnection("live"); setWs(socket); if (currentChannelId) socket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId })); };
-      socket.onclose = () => setConnection("offline");
-      socket.onerror = () => setConnection("offline");
-      socket.onmessage = (event) => {
+      const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+      socket = connectedSocket;
+      connectedSocket.onopen = () => {
+        setConnection("live");
+        setWs(connectedSocket);
+        if (currentChannelId && !activeDm) {
+          connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
+        }
+      };
+      connectedSocket.onclose = () => setConnection("offline");
+      connectedSocket.onerror = () => setConnection("offline");
+      connectedSocket.onmessage = (event) => {
         try {
            const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
           if (data.type === "message" && data.message?.channelId === currentChannelId) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
@@ -348,7 +358,13 @@ function ChatApp() {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
             if (currentChannelIdRef.current === data.channelId) void recoverFromMissingChannel(data.channelId);
           }
-           if (data.type === "typing" && data.userId && data.userId !== profile?.id) {
+           if (
+             data.type === "typing" &&
+             data.channelId === currentChannelIdRef.current &&
+             !activeDmIdRef.current &&
+             data.userId &&
+             data.userId !== profileRef.current?.id
+           ) {
              setTypingUsers((items) => ({ ...items, [data.userId!]: Date.now() + 1800 }));
              window.setTimeout(() => setTypingUsers((items) => {
                const next = { ...items };
@@ -370,12 +386,21 @@ function ChatApp() {
         } catch { /* ignore malformed frames */ }
       };
     }).catch(() => setConnection("offline"));
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+        if (socket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
+          socket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
+        }
+        socket.close();
+        setWs((current) => current === socket ? null : current);
+      }
+    };
   }, [currentChannelId, activeDm]);
 
   useEffect(() => {
-    if (ws?.readyState === WebSocket.OPEN && currentChannelId) ws.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
-  }, [ws, currentChannelId]);
+    setTypingUsers({});
+  }, [currentChannelId, activeDm]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

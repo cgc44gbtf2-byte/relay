@@ -2292,6 +2292,18 @@ describe("admin access controls", () => {
       assert.equal((await memberTyping).length, 1);
       assert.equal((await outsiderTyping).length, 0);
 
+      ownerSocket.send(JSON.stringify({ type: "unsubscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const unsubscribedOwnerTyping = expectNoWebSocketEvent(
+        ownerSocket,
+        (event) =>
+          event.type === "typing" &&
+          event.channelId === channelId &&
+          event.userId === memberSession.userId,
+      );
+      memberSocket.send(JSON.stringify({ type: "typing", channelId, active: false }));
+      await unsubscribedOwnerTyping;
+
       const ownerMessageEvents = collectWebSocketEvents(
         ownerSocket,
         (event) =>

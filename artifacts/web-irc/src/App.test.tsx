@@ -33,7 +33,12 @@ type Channel = {
   memberCount: number;
 };
 
-let latestWebSocket: { onmessage: ((event: MessageEvent) => void) | null } | null = null;
+let latestWebSocket: {
+  onopen: (() => void) | null;
+  onmessage: ((event: MessageEvent) => void) | null;
+  send: ReturnType<typeof vi.fn>;
+} | null = null;
+let webSocketFrames: string[] = [];
 
 const profile = {
   id: "user-1",
@@ -144,7 +149,7 @@ function installApi({
     onclose: (() => void) | null = null;
     onerror: (() => void) | null = null;
     onmessage: ((event: MessageEvent) => void) | null = null;
-    send = vi.fn();
+    send = vi.fn((frame: string) => webSocketFrames.push(frame));
     close = vi.fn();
     constructor() {
       latestWebSocket = this;
@@ -168,6 +173,7 @@ describe("deleted room recovery", () => {
   afterEach(() => {
     cleanup();
     latestWebSocket = null;
+    webSocketFrames = [];
     vi.unstubAllGlobals();
   });
 
@@ -242,5 +248,25 @@ describe("deleted room recovery", () => {
 
     await waitFor(() => expect(screen.getByText("no channels available")).toBeTruthy());
     expect(screen.queryByText("#deleted-room")).toBeNull();
+  });
+
+  it("unsubscribes from the previous room and ignores its typing events after switching", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    latestWebSocket?.onopen?.();
+
+    fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    latestWebSocket?.onopen?.();
+
+    const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
+    expect(frames).toEqual(expect.arrayContaining([
+      { type: "unsubscribe", channelId: 1 },
+      { type: "subscribe", channelId: 2 },
+    ]));
+
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({ type: "typing", channelId: 1, userId: "user-2", active: true }),
+    } as MessageEvent);
+    expect(screen.queryByText(/Orion typing/)).toBeNull();
   });
 });

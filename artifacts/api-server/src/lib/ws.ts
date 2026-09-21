@@ -107,13 +107,20 @@ class Hub {
             active?: boolean;
           };
           if (
-            (message.type !== "subscribe" && message.type !== "typing") ||
+            (message.type !== "subscribe" &&
+              message.type !== "unsubscribe" &&
+              message.type !== "typing") ||
             !Number.isInteger(message.channelId)
           ) {
             return;
           }
 
           const channelId = Number(message.channelId);
+          if (message.type === "unsubscribe") {
+            client.channelIds.delete(channelId);
+            return;
+          }
+
           void db
             .select({ id: channelsTable.id, isPrivate: channelsTable.isPrivate })
             .from(channelsTable)
