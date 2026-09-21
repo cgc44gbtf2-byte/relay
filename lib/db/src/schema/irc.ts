@@ -268,12 +268,34 @@ export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const developerSettingsTable = pgTable("irc_developer_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull().default(""),
+  updatedBy: text("updated_by").notNull().references(() => usersTable.clerkId),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const developerReleasesTable = pgTable("irc_developer_releases", {
+  id: serial("id").primaryKey(),
+  version: text("version").notNull(),
+  title: text("title").notNull(),
+  notes: text("notes").notNull().default(""),
+  status: text("status").notNull().default("draft"),
+  createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
+  reviewedBy: text("reviewed_by").references(() => usersTable.clerkId),
+  publishedBy: text("published_by").references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+});
+
 export const insertUserSchema = createInsertSchema(usersTable);
 export const insertChannelSchema = createInsertSchema(channelsTable);
 export const insertMessageSchema = createInsertSchema(messagesTable);
 export const insertCategorySchema = createInsertSchema(categoriesTable);
 export const insertAdminAuditLogSchema = createInsertSchema(adminAuditLogsTable);
 export const insertCommunitySchema = createInsertSchema(communitiesTable);
+export const insertDeveloperReleaseSchema = createInsertSchema(developerReleasesTable);
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof usersTable.$inferSelect;
 export type Channel = typeof channelsTable.$inferSelect;
@@ -282,3 +304,5 @@ export type Community = typeof communitiesTable.$inferSelect;
 export type ChannelMember = typeof channelMembersTable.$inferSelect;
 export type Message = typeof messagesTable.$inferSelect;
 export type AdminAuditLog = typeof adminAuditLogsTable.$inferSelect;
+export type DeveloperSetting = typeof developerSettingsTable.$inferSelect;
+export type DeveloperRelease = typeof developerReleasesTable.$inferSelect;

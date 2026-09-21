@@ -93,6 +93,30 @@ type ChatMessage = {
 type Member = Profile & { role: string; mutedUntil?: string | null };
 type JoinRequest = { id: number; status: string; createdAt: string; user: Profile };
 type Notification = { id: number; type: string; body: string; readAt?: string | null; createdAt: string };
+type AppConfig = {
+  siteName: string;
+  landingEyebrow: string;
+  landingTitle: string;
+  landingDescription: string;
+  networkStatusLabel: string;
+};
+type DeveloperRelease = {
+  id: number;
+  version: string;
+  title: string;
+  notes: string;
+  status: "draft" | "review" | "published" | "archived";
+  createdAt: string;
+  reviewedAt?: string | null;
+  publishedAt?: string | null;
+};
+const defaultAppConfig: AppConfig = {
+  siteName: "relay",
+  landingEyebrow: "a quieter kind of social",
+  landingTitle: "Real rooms.\nReal presence.",
+  landingDescription: "Relay brings the immediacy of IRC to the browser, with public channels, direct messages, profiles, and the tools communities need to stay kind.",
+  networkStatusLabel: "live and open",
+};
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -144,12 +168,17 @@ function Avatar({ user, size = "md" }: { user?: Profile | null; size?: "sm" | "m
 }
 
 function Landing() {
+  const [config, setConfig] = useState<AppConfig>(defaultAppConfig);
+  useEffect(() => {
+    api<AppConfig>("/app-config").then(setConfig).catch(() => undefined);
+  }, []);
+  const titleLines = config.landingTitle.split("\n");
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
       <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground"><Hash className="h-5 w-5" /></div>
-          <div><p className="font-mono font-bold">relay</p><p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">internet relay chat</p></div>
+          <div><p className="font-mono font-bold">{config.siteName}</p><p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">internet relay chat</p></div>
         </div>
         <div className="flex gap-2">
           <a className="rounded-lg border border-border px-4 py-2 font-mono text-xs hover:bg-muted" href={`${basePath}/sign-in`}>sign in</a>
@@ -158,10 +187,10 @@ function Landing() {
       </header>
       <main className="mx-auto grid max-w-6xl gap-12 px-6 pb-20 pt-16 lg:grid-cols-[1.1fr_.9fr] lg:items-center">
         <div>
-          <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.2em] text-primary">a quieter kind of social</p>
-          <h1 className="max-w-3xl font-mono text-4xl font-bold leading-[1.1] sm:text-6xl">Real rooms.<br /><span className="text-secondary-foreground">Real presence.</span></h1>
-          <p className="mt-6 max-w-xl text-base leading-7 text-muted-foreground">Relay brings the immediacy of IRC to the browser, with public channels, direct messages, profiles, and the tools communities need to stay kind.</p>
-          <div className="mt-8 flex flex-wrap gap-3"><a className="rounded-lg bg-primary px-5 py-3 font-mono text-sm font-bold text-primary-foreground" href={`${basePath}/sign-up`}>join the network <Zap className="ml-2 inline h-4 w-4" /></a><span className="flex items-center gap-2 rounded-lg border border-border px-4 py-3 font-mono text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-chart-4" /> live and open</span></div>
+          <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.2em] text-primary">{config.landingEyebrow}</p>
+          <h1 className="max-w-3xl font-mono text-4xl font-bold leading-[1.1] sm:text-6xl">{titleLines.map((line, index) => <span key={`${line}-${index}`} className={index === titleLines.length - 1 ? "block text-secondary-foreground" : "block"}>{line}</span>)}</h1>
+          <p className="mt-6 max-w-xl text-base leading-7 text-muted-foreground">{config.landingDescription}</p>
+          <div className="mt-8 flex flex-wrap gap-3"><a className="rounded-lg bg-primary px-5 py-3 font-mono text-sm font-bold text-primary-foreground" href={`${basePath}/sign-up`}>join the network <Zap className="ml-2 inline h-4 w-4" /></a><span className="flex items-center gap-2 rounded-lg border border-border px-4 py-3 font-mono text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-chart-4" /> {config.networkStatusLabel}</span></div>
         </div>
         <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
           <div className="flex items-center justify-between border-b border-border px-4 py-3 font-mono text-xs"><span className="text-muted-foreground"># lobby</span><span className="text-chart-4">● 4 voices</span></div>
@@ -623,7 +652,7 @@ function ChatApp() {
       </main>
 
       {panel === "notifications" && <Overlay title="Notifications" onClose={() => setPanel(null)}><div className="space-y-2">{notifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : notifications.map((notice) => <button key={notice.id} onClick={() => markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}</span></span></button>)}</div></Overlay>}
-      {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "admin / developer" : profile.role?.replace("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a><a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
+      {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "admin / developer" : profile.role?.replace("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-full font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
       {panel === "search" && <Overlay title={`Search results for “${search}”`} onClose={() => setPanel(null)}><div className="space-y-4">{searchResults.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No messages found.</p> : searchResults.map((message) => <div key={message.id} className="border-b border-border pb-3"><div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span className="text-secondary-foreground">{message.sender?.displayName}</span><span>{timeLabel(message.createdAt)}</span></div><p className="mt-1 text-sm">{message.body}</p></div>)}</div></Overlay>}
        {newChannelOpen && <Overlay title="Create a room" onClose={() => setNewChannelOpen(false)}><form onSubmit={createChannel} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">channel name</span><input autoFocus required value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="#room-name" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">topic</span><input value={newChannelTopic} onChange={(event) => setNewChannelTopic(event.target.value)} placeholder="What is this room about?" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">description</span><input value={newChannelDescription} onChange={(event) => setNewChannelDescription(event.target.value)} placeholder="A short description for members" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{categories.length > 0 && <label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">category</span><select value={newChannelCategoryId} onChange={(event) => setNewChannelCategoryId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary"><option value="">no category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>}<label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelPrivate} onChange={(event) => setNewChannelPrivate(event.target.checked)} /> private room (owner approval)</label><label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelInviteOnly} onChange={(event) => setNewChannelInviteOnly(event.target.checked)} /> invite-only</label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">optional password</span><input type="password" minLength={4} value={newChannelPassword} onChange={(event) => setNewChannelPassword(event.target.value)} placeholder="at least 4 characters" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground">create room</button></form></Overlay>}
@@ -1129,6 +1158,118 @@ type CommunityDetail = {
   announcements: Array<{ id: number; body: string; author: string; createdAt: string }>;
   canManage: boolean;
 };
+
+function DeveloperConsole() {
+  const [status, setStatus] = useState<AdminStatus | null>(null);
+  const [config, setConfig] = useState<AppConfig>(defaultAppConfig);
+  const [releases, setReleases] = useState<DeveloperRelease[]>([]);
+  const [section, setSection] = useState<"overview" | "content" | "releases">("overview");
+  const [draft, setDraft] = useState(defaultAppConfig);
+  const [releaseDraft, setReleaseDraft] = useState({ version: "", title: "", notes: "" });
+  const [announcement, setAnnouncement] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = async () => {
+    try {
+      const nextStatus = await api<AdminStatus>("/admin/status");
+      setStatus(nextStatus);
+      if (!nextStatus.isAdmin) return;
+      const [nextConfig, nextReleases] = await Promise.all([
+        api<AppConfig>("/developer/settings"),
+        api<DeveloperRelease[]>("/developer/releases"),
+      ]);
+      setConfig(nextConfig);
+      setDraft(nextConfig);
+      setReleases(nextReleases);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load developer studio");
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const saveContent = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    try {
+      const saved = await api<AppConfig>("/developer/settings", { method: "PATCH", body: JSON.stringify(draft) });
+      setConfig(saved);
+      setDraft(saved);
+      setNotice("Public application content saved.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save content");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const sendAnnouncement = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!announcement.trim()) return;
+    setWorking(true);
+    try {
+      await api("/admin/announcements", { method: "POST", body: JSON.stringify({ body: announcement.trim() }) });
+      setAnnouncement("");
+      setNotice("Announcement sent to every account.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send announcement");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const createRelease = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    try {
+      const created = await api<DeveloperRelease>("/developer/releases", { method: "POST", body: JSON.stringify(releaseDraft) });
+      setReleases((items) => [created, ...items]);
+      setReleaseDraft({ version: "", title: "", notes: "" });
+      setNotice("Release draft created.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create release");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const changeReleaseStatus = async (release: DeveloperRelease, nextStatus: DeveloperRelease["status"]) => {
+    setWorking(true);
+    try {
+      const updated = await api<DeveloperRelease>(`/developer/releases/${release.id}/status`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
+      setReleases((items) => items.map((item) => item.id === updated.id ? updated : item));
+      setNotice(`Release ${updated.version} is now ${updated.status}.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update release");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading developer studio…</div>;
+  if (error && !status) return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
+  if (!status?.isAdmin) return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10"><div className="mx-auto max-w-2xl"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><div className="mt-16 rounded-2xl border border-border bg-card p-8"><Zap className="h-8 w-8 text-primary" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">developer access</p><h1 className="mt-2 font-mono text-3xl font-bold">This studio is owner-only.</h1><p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground">The developer studio is restricted to the platform owner and developer account.</p></div></div></div>;
+
+  const published = releases.find((release) => release.status === "published");
+  const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "studio overview", LayoutDashboard], ["content", "content & settings", Settings], ["releases", "release desk", Zap]];
+  return (
+    <div className="min-h-[100dvh] bg-background text-foreground">
+      <header className="sticky top-0 z-20 border-b border-border bg-card/95 backdrop-blur"><div className="mx-auto flex min-h-[76px] max-w-[1500px] items-center justify-between gap-4 px-4 sm:px-7"><div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground"><Zap className="h-5 w-5" /></div><div><p className="font-mono text-sm font-bold">relay / developer studio</p><p className="font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">owner workspace · build, review, publish</p></div></div><div className="flex items-center gap-2"><a href={`${basePath}/admin`} className="hidden rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted sm:block">operations control room</a><a href={`${basePath}/chat`} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted">back to chat</a></div></div></header>
+      <main className="mx-auto grid max-w-[1500px] gap-5 px-4 py-5 sm:px-7 sm:py-7 lg:grid-cols-[220px_1fr]">
+        <aside className="rounded-xl border border-border bg-card p-3"><p className="px-3 py-2 font-mono text-[9px] uppercase tracking-[.2em] text-muted-foreground">developer workspace</p><nav className="mt-2 space-y-1">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left font-mono text-xs ${section === key ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}><Icon className="h-4 w-4" />{label}</button>)}</nav><div className="mt-8 border-t border-border px-3 pt-5"><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">signed in as</p><p className="mt-3 truncate font-mono text-xs font-bold">{status.profile.displayName}</p><span className="mt-3 inline-flex rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">owner / developer</span></div></aside>
+        <section className="min-w-0">
+          {error && <div className="mb-5 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{error}<button onClick={() => setError("")} className="ml-auto"><X className="h-3.5 w-3.5" /></button></div>}
+          {notice && <div className="mb-5 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto"><X className="h-3.5 w-3.5" /></button></div>}
+          <div className="mb-7"><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">/{section}</p><h1 className="mt-2 font-mono text-2xl font-bold sm:text-3xl">{section === "overview" ? "The application, under your control." : section === "content" ? "Edit the public experience." : "Move updates from draft to published."}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{section === "overview" ? "Keep product content, releases, and platform operations in separate owner-only workspaces." : section === "content" ? "Change landing-page messaging and send platform-wide announcements." : "Track release notes and review state before marking an application update as published."}</p></div>
+          {section === "overview" && <div className="grid gap-5 xl:grid-cols-2"><div className="grid gap-3 sm:grid-cols-3 xl:col-span-2"><div className="rounded-lg border border-border bg-card p-4"><Zap className="h-4 w-4 text-primary" /><p className="mt-5 font-mono text-2xl font-bold">{published?.version ?? "none"}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">published release</p></div><div className="rounded-lg border border-border bg-card p-4"><Save className="h-4 w-4 text-primary" /><p className="mt-5 font-mono text-2xl font-bold">{releases.filter((item) => item.status === "draft").length}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">drafts</p></div><div className="rounded-lg border border-border bg-card p-4"><Radio className="h-4 w-4 text-primary" /><p className="mt-5 truncate font-mono text-2xl font-bold">{config.networkStatusLabel}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">landing status</p></div></div><section className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">full owner access</p><h2 className="mt-3 font-mono text-lg font-bold">Build, edit, and operate Relay.</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Use this studio for the public experience and release workflow. Use the operations control room for accounts, roles, channels, audit history, and system health.</p><a href={`${basePath}/admin`} className="mt-5 inline-flex rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">open operations control room</a></section><section className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">current release</p><h2 className="mt-3 font-mono text-lg font-bold">{published ? `${published.version} · ${published.title}` : "No published release yet"}</h2><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{published?.notes || "Create a release draft when you are ready to record an application update."}</p></section></div>}
+          {section === "content" && <div className="grid gap-5 xl:grid-cols-2"><form onSubmit={saveContent} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">landing page content</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Stored in the database and used by the public landing page.</p><div className="mt-5 space-y-3">{([["siteName", "site name"], ["landingEyebrow", "eyebrow"], ["networkStatusLabel", "network status"]] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">{label}</span><input value={draft[key]} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label>)}<label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">headline</span><textarea value={draft.landingTitle} onChange={(event) => setDraft({ ...draft, landingTitle: event.target.value })} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={draft.landingDescription} onChange={(event) => setDraft({ ...draft, landingDescription: event.target.value })} className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-4 flex items-center gap-2 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Save className="h-3.5 w-3.5" />save public content</button></form><form onSubmit={sendAnnouncement} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">platform announcement</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Send a notification to every account.</p><textarea required value={announcement} onChange={(event) => setAnnouncement(event.target.value)} className="mt-5 min-h-36 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="Write the update for everyone…" /><button disabled={working} className="mt-4 flex items-center gap-2 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Megaphone className="h-3.5 w-3.5" />send announcement</button></form></div>}
+          {section === "releases" && <div className="space-y-5"><form onSubmit={createRelease} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">create release draft</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Record the update, review it, then publish its release state.</p><div className="mt-5 grid gap-3 sm:grid-cols-[150px_1fr]"><input required value={releaseDraft.version} onChange={(event) => setReleaseDraft({ ...releaseDraft, version: event.target.value })} placeholder="v0.2.0" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /><input required value={releaseDraft.title} onChange={(event) => setReleaseDraft({ ...releaseDraft, title: event.target.value })} placeholder="Release title" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /></div><textarea value={releaseDraft.notes} onChange={(event) => setReleaseDraft({ ...releaseDraft, notes: event.target.value })} placeholder="What changed?" className="mt-3 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save release draft</button></form><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">release history</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{releases.length} tracked updates</p></div><div className="divide-y divide-border">{releases.map((release) => <div key={release.id} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-sm font-bold">{release.version} · {release.title}</p><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{release.notes || "No release notes."}</p></div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{release.status}</span></div><div className="mt-4 flex flex-wrap gap-2">{release.status === "draft" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "review")} className="rounded border border-primary/30 px-2.5 py-1.5 font-mono text-[9px] text-primary">send for review</button>}{release.status === "review" && <><button disabled={working} onClick={() => void changeReleaseStatus(release, "draft")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground">return to draft</button><button disabled={working} onClick={() => void changeReleaseStatus(release, "published")} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground">publish update</button></>}{release.status === "published" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "archived")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground">archive</button>}</div></div>)}{releases.length === 0 && <div className="p-6 font-mono text-xs text-muted-foreground">No releases have been recorded.</div>}</div></section></div>}
+        </section>
+      </main>
+    </div>
+  );
+}
 
 function CommunityConsole() {
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
