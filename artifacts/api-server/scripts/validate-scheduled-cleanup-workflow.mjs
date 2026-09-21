@@ -26,7 +26,10 @@ const expectedEnv = new Map([
   ],
   ["CLERK_SECRET_KEY", "${{ secrets.CLERK_TEST_SECRET_KEY }}"],
   ["CLERK_PUBLISHABLE_KEY", "${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}"],
-  ["TEAM_NOTIFICATION_WEBHOOK_URL", "${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}"],
+  [
+    "TEAM_NOTIFICATION_WEBHOOK_URL",
+    "${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}",
+  ],
 ]);
 
 assert.match(
@@ -38,6 +41,16 @@ assert.deepEqual(
   envEntries,
   expectedEnv,
   "scheduled cleanup must use only the disposable database and test Clerk secrets",
+);
+assert.match(
+  job,
+  /^\s{8}run:\s+env -u DATABASE_URL pnpm --filter @workspace\/db run push:test\s*$/m,
+  "scheduled cleanup must unset DATABASE_URL for schema setup",
+);
+assert.match(
+  job,
+  /^\s{10}env -u DATABASE_URL\s*\n\s{10}pnpm --filter @workspace\/api-server run cleanup:test-users:scheduled\s*$/m,
+  "scheduled cleanup must unset DATABASE_URL and invoke the scheduled cleanup command",
 );
 
 for (const secretName of job.matchAll(

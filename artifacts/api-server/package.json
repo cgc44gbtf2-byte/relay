@@ -12,7 +12,7 @@
     "posttest": "pnpm run cleanup:test-users:scheduled",
     "cleanup:test-users": "node ./build-cleanup.mjs && NODE_ENV=test node ./dist-cleanup/cleanup-admin-test-users-cli.cjs",
     "cleanup:test-users:scheduled": "NODE_ENV=test pnpm run cleanup:test-users -- --apply",
-    "validate:cleanup-workflow": "node ./scripts/validate-scheduled-cleanup-workflow.mjs",
+    "validate:cleanup-workflow": "node ./scripts/validate-scheduled-cleanup-workflow.mjs && node --test ./scripts/validate-scheduled-cleanup-workflow.test.mjs",
     "test:ci": "pnpm --filter @workspace/db run test:ci",
     "validate": "pnpm run typecheck && pnpm run test"
   },
