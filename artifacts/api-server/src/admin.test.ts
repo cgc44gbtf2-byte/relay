@@ -244,6 +244,67 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rejects a revoked Clerk session without creating or modifying its profile", async () => {
+    const revokedSession = await createTestSession("revoked");
+    const token = (await clerkClient.sessions.getToken(revokedSession.sessionId)).jwt;
+    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+
+    const requests: Array<[string, RequestInit?]> = [
+      ["/admin/status"],
+      ["/admin/claim", { method: "POST" }],
+      ["/admin/health"],
+      ["/admin/overview"],
+      ["/admin/users"],
+      [
+        `/admin/users/${firstSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member" }),
+        },
+      ],
+      [
+        "/admin/channels/1",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Revoked topic" }),
+        },
+      ],
+      [
+        "/admin/channels/1/messages",
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        },
+      ],
+    ];
+    const beforeProfiles = await pool.query(
+      "SELECT * FROM irc_users ORDER BY clerk_id",
+    );
+    assert.equal(
+      beforeProfiles.rows.some(
+        (profile) => profile.clerk_id === revokedSession.userId,
+      ),
+      false,
+    );
+
+    const responses = await Promise.all(
+      requests.map(([path, init]) => apiRequestWithToken(token, path, init)),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 401, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Sign in to continue" });
+    }
+
+    const afterProfiles = await pool.query(
+      "SELECT * FROM irc_users ORDER BY clerk_id",
+    );
+    assert.deepEqual(afterProfiles.rows, beforeProfiles.rows);
+  });
+
   test("only one concurrent first-account claim succeeds", async () => {
     const responses = await Promise.all([
       apiRequest(firstSession, "/admin/claim", { method: "POST" }),
