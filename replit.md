@@ -68,6 +68,14 @@ require test Clerk keys and the disposable test database. Its structured log
 records the matching user IDs/usernames and a `dry_run`, `started`, `succeeded`,
 or `failed` status; credentials are never included in the log.
 
+GitHub Actions runs the scheduled cleanup every six hours in the
+`cleanup-abandoned-test-users` job. The job starts a disposable PostgreSQL
+service, creates its test schema, and sets only `TEST_DATABASE_URL`,
+`CLERK_TEST_SECRET_KEY`, and `CLERK_TEST_PUBLISHABLE_KEY` from GitHub Actions
+secrets. It explicitly removes `DATABASE_URL` before both database setup and
+cleanup. Configure the two Clerk secrets with `sk_test_` and `pk_test_` values;
+live Clerk keys must not be used for this job.
+
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
