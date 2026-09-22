@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   and,
   asc,
+  count,
   desc,
   eq,
   ilike,
@@ -320,10 +321,19 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     await canReadChannel(channel, userId) ? channel : null
   )));
   const channels = visibleChannels.filter((channel): channel is typeof allChannels[number] => channel !== null);
-  const counts = await db.select({ channelId: channelMembersTable.channelId })
-    .from(channelMembersTable);
-  const countMap = new Map<number, number>();
-  for (const row of counts) countMap.set(row.channelId, (countMap.get(row.channelId) ?? 0) + 1);
+  const counts = channels.length
+    ? await db
+      .select({
+        channelId: channelMembersTable.channelId,
+        memberCount: count(),
+      })
+      .from(channelMembersTable)
+      .where(inArray(channelMembersTable.channelId, channels.map((channel) => channel.id)))
+      .groupBy(channelMembersTable.channelId)
+    : [];
+  const countMap = new Map(
+    counts.map(({ channelId, memberCount }) => [channelId, Number(memberCount)]),
+  );
   const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
   const visibleCategories = await Promise.all(allCategories.map(async (category) => {
     if (category.communityId === null) return category;
