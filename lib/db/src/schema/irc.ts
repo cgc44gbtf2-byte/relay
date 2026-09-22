@@ -118,7 +118,10 @@ export const communityMembersTable = pgTable(
     status: text("status").notNull().default("member"),
     joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.communityId, table.userId] })],
+  (table) => [
+    primaryKey({ columns: [table.communityId, table.userId] }),
+    index("irc_community_members_user_idx").on(table.userId),
+  ],
 );
 
 export const departmentsTable = pgTable("irc_departments", {
@@ -379,7 +382,10 @@ export const channelMembersTable = pgTable(
     mutedUntil: timestamp("muted_until", { withTimezone: true }),
     joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.channelId, table.userId] })],
+  (table) => [
+    primaryKey({ columns: [table.channelId, table.userId] }),
+    index("irc_channel_members_user_idx").on(table.userId),
+  ],
 );
 
 export const channelBansTable = pgTable(
@@ -404,7 +410,10 @@ export const channelJoinRequestsTable = pgTable(
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     reviewedBy: text("reviewed_by").references(() => usersTable.clerkId),
   },
-  (table) => [uniqueIndex("irc_channel_join_requests_channel_user_idx").on(table.channelId, table.userId)],
+  (table) => [
+    uniqueIndex("irc_channel_join_requests_channel_user_idx").on(table.channelId, table.userId),
+    index("irc_channel_join_requests_user_status_idx").on(table.userId, table.status),
+  ],
 );
 
 export const channelInvitesTable = pgTable(
