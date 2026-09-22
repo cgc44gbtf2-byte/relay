@@ -365,9 +365,45 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
   }
 });
 
+router.get("/communities/:communityId/tasks/:taskId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const taskId = Number(param(req, "taskId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(taskId) || !(await canAccessBusiness(userId, communityId))) {
+    res.status(404).json({ error: "Task not found." });
+    return;
+  }
+  const [task] = await db.select().from(workspaceTasksTable).where(and(
+    eq(workspaceTasksTable.id, taskId),
+    eq(workspaceTasksTable.communityId, communityId),
+  ));
+  if (!task) {
+    res.status(404).json({ error: "Task not found." });
+    return;
+  }
+  const [comments, attachments] = await Promise.all([
+    db.select({
+      id: workspaceTaskCommentsTable.id,
+      taskId: workspaceTaskCommentsTable.taskId,
+      authorId: workspaceTaskCommentsTable.authorId,
+      author: usersTable.displayName,
+      body: workspaceTaskCommentsTable.body,
+      createdAt: workspaceTaskCommentsTable.createdAt,
+    }).from(workspaceTaskCommentsTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
+      .where(eq(workspaceTaskCommentsTable.taskId, taskId))
+      .orderBy(asc(workspaceTaskCommentsTable.createdAt)),
+    db.select().from(workspaceTaskAttachmentsTable)
+      .where(eq(workspaceTaskAttachmentsTable.taskId, taskId))
+      .orderBy(asc(workspaceTaskAttachmentsTable.createdAt)),
+  ]);
+  res.json({ ...task, comments, attachments });
+});
+
 router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
+  const summaryView = req.query.view === "summary";
   const community = Number.isInteger(communityId) ? await communityForId(communityId) : null;
   if (!community) {
     res.status(404).json({ error: "Community not found." });
@@ -378,6 +414,50 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     return;
   }
   await activateDueAnnouncements(community.id);
+  const taskCommentsQuery = summaryView
+    ? Promise.resolve([] as Array<{
+      id: number;
+      taskId: number;
+      authorId: string;
+      author: string;
+      body: string;
+      createdAt: Date;
+    }>)
+    : db.select({
+      id: workspaceTaskCommentsTable.id,
+      taskId: workspaceTaskCommentsTable.taskId,
+      authorId: workspaceTaskCommentsTable.authorId,
+      author: usersTable.displayName,
+      body: workspaceTaskCommentsTable.body,
+      createdAt: workspaceTaskCommentsTable.createdAt,
+    }).from(workspaceTaskCommentsTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
+      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskCommentsTable.taskId))
+      .where(eq(workspaceTasksTable.communityId, community.id))
+      .orderBy(asc(workspaceTaskCommentsTable.createdAt));
+  const taskAttachmentsQuery = summaryView
+    ? Promise.resolve([] as Array<{
+      id: number;
+      taskId: number;
+      uploaderId: string;
+      objectPath: string;
+      fileName: string;
+      contentType: string;
+      fileSize: number;
+      createdAt: Date;
+    }>)
+    : db.select({
+      id: workspaceTaskAttachmentsTable.id,
+      taskId: workspaceTaskAttachmentsTable.taskId,
+      uploaderId: workspaceTaskAttachmentsTable.uploaderId,
+      objectPath: workspaceTaskAttachmentsTable.objectPath,
+      fileName: workspaceTaskAttachmentsTable.fileName,
+      contentType: workspaceTaskAttachmentsTable.contentType,
+      fileSize: workspaceTaskAttachmentsTable.fileSize,
+      createdAt: workspaceTaskAttachmentsTable.createdAt,
+    }).from(workspaceTaskAttachmentsTable)
+      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
+      .where(eq(workspaceTasksTable.communityId, community.id));
   const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
     db.select({
       id: usersTable.clerkId,
@@ -434,28 +514,8 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id)).orderBy(desc(workspaceInvitationsTable.createdAt)).limit(50),
     db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt)),
     db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.updatedAt)),
-    db.select({
-      id: workspaceTaskCommentsTable.id,
-      taskId: workspaceTaskCommentsTable.taskId,
-      authorId: workspaceTaskCommentsTable.authorId,
-      author: usersTable.displayName,
-      body: workspaceTaskCommentsTable.body,
-      createdAt: workspaceTaskCommentsTable.createdAt,
-    }).from(workspaceTaskCommentsTable).innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
-      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskCommentsTable.taskId))
-      .where(eq(workspaceTasksTable.communityId, community.id)).orderBy(asc(workspaceTaskCommentsTable.createdAt)),
-    db.select({
-      id: workspaceTaskAttachmentsTable.id,
-      taskId: workspaceTaskAttachmentsTable.taskId,
-      uploaderId: workspaceTaskAttachmentsTable.uploaderId,
-      objectPath: workspaceTaskAttachmentsTable.objectPath,
-      fileName: workspaceTaskAttachmentsTable.fileName,
-      contentType: workspaceTaskAttachmentsTable.contentType,
-      fileSize: workspaceTaskAttachmentsTable.fileSize,
-      createdAt: workspaceTaskAttachmentsTable.createdAt,
-    }).from(workspaceTaskAttachmentsTable)
-      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
-      .where(eq(workspaceTasksTable.communityId, community.id)),
+    taskCommentsQuery,
+    taskAttachmentsQuery,
     db.select({ teamId: teamMembersTable.teamId, userId: teamMembersTable.userId }).from(teamMembersTable)
       .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
       .where(eq(teamsTable.communityId, community.id)),
