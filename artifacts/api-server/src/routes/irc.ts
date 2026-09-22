@@ -137,6 +137,18 @@ async function canReadMessage(message: typeof messagesTable.$inferSelect, userId
   return message.senderId === userId || message.recipientId === userId;
 }
 
+function broadcastMessageEvent(
+  message: typeof messagesTable.$inferSelect,
+  event: unknown,
+): void {
+  if (message.channelId) {
+    wsHub.broadcastChannel(message.channelId, event);
+    return;
+  }
+  wsHub.broadcastUser(message.senderId, event);
+  if (message.recipientId) wsHub.broadcastUser(message.recipientId, event);
+}
+
 async function isChannelOwnerOrModerator(channelId: number, userId: string): Promise<boolean> {
   const member = await membership(channelId, userId);
   return Boolean(
@@ -891,7 +903,7 @@ router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequ
     .set({ body: "[message deleted]", kind: "deleted", deletedAt: new Date(), deletedBy: userId })
     .where(eq(messagesTable.id, message.id))
     .returning();
-  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "message_deleted", messageId: message.id });
+  broadcastMessageEvent(message, { type: "message_deleted", messageId: message.id });
   res.json(await messageView(deleted, userId));
 });
 
@@ -972,7 +984,7 @@ router.post("/messages/:messageId/reactions", requireAuth, async (req: Authentic
   }
   await db.insert(messageReactionsTable).values({ messageId, userId, emoji }).onConflictDoNothing();
   const view = await messageView(message, userId);
-  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "reaction", messageId, reactions: view.reactions });
+  broadcastMessageEvent(message, { type: "reaction", messageId, reactions: view.reactions });
   res.json(view.reactions);
 });
 
@@ -995,7 +1007,7 @@ router.delete("/messages/:messageId/reactions/:emoji", requireAuth, async (req: 
     eq(messageReactionsTable.emoji, emoji),
   ));
   const view = await messageView(message, userId);
-  if (message.channelId) wsHub.broadcastChannel(message.channelId, { type: "reaction", messageId, reactions: view.reactions });
+  broadcastMessageEvent(message, { type: "reaction", messageId, reactions: view.reactions });
   res.json(view.reactions);
 });
 
