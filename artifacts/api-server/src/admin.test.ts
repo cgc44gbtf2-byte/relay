@@ -2027,6 +2027,80 @@ describe("admin access controls", () => {
             channel.category?.communityId === privateCommunityId,
         ),
       );
+
+      const privateOwnerCategories = await apiRequest(
+        privateOwner,
+        "/categories",
+      );
+      assert.equal(
+        privateOwnerCategories.status,
+        200,
+        JSON.stringify(privateOwnerCategories),
+      );
+      assert.ok(Array.isArray(privateOwnerCategories.body));
+      assert.equal(
+        privateOwnerCategories.body.some(
+          (category) =>
+            typeof category === "object" &&
+            category !== null &&
+            (category as { communityId?: unknown }).communityId ===
+              privateCommunityId,
+        ),
+        true,
+      );
+
+      const publicOwnerCategories = await apiRequest(publicOwner, "/categories");
+      assert.equal(
+        publicOwnerCategories.status,
+        200,
+        JSON.stringify(publicOwnerCategories),
+      );
+      assert.ok(Array.isArray(publicOwnerCategories.body));
+      assert.equal(
+        publicOwnerCategories.body.some(
+          (category) =>
+            typeof category === "object" &&
+            category !== null &&
+            (category as { communityId?: unknown }).communityId ===
+              publicCommunityId,
+        ),
+        true,
+      );
+
+      const outsiderCategories = await apiRequest(outsider, "/categories");
+      assert.equal(
+        outsiderCategories.status,
+        200,
+        JSON.stringify(outsiderCategories),
+      );
+      assert.ok(Array.isArray(outsiderCategories.body));
+      assert.equal(
+        outsiderCategories.body.some(
+          (category) =>
+            typeof category === "object" &&
+            category !== null &&
+            [privateCommunityId, publicCommunityId].includes(
+              (category as { communityId?: number }).communityId ?? -1,
+            ),
+        ),
+        false,
+      );
+
+      const adminCategories = await apiRequest(adminSession, "/categories");
+      assert.equal(adminCategories.status, 200, JSON.stringify(adminCategories));
+      assert.ok(Array.isArray(adminCategories.body));
+      const adminCommunityIds = new Set(
+        adminCategories.body.flatMap((category) =>
+          typeof category === "object" &&
+          category !== null &&
+          typeof (category as { communityId?: unknown }).communityId ===
+            "number"
+            ? [(category as { communityId: number }).communityId]
+            : [],
+        ),
+      );
+      assert.equal(adminCommunityIds.has(privateCommunityId as number), true);
+      assert.equal(adminCommunityIds.has(publicCommunityId as number), true);
     } finally {
       if (communityIds.length) {
         await pool.query(
