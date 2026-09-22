@@ -1104,15 +1104,37 @@ function threadKey(a: string, b: string): string {
 
 router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const rows = await db.select().from(messagesTable).where(or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId))).orderBy(desc(messagesTable.createdAt));
-  const keys = [...new Set(rows.map((row) => row.threadKey).filter((key): key is string => Boolean(key)))];
+  const rows = await db
+    .selectDistinctOn([messagesTable.threadKey])
+    .from(messagesTable)
+    .where(or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId)))
+    .orderBy(asc(messagesTable.threadKey), desc(messagesTable.createdAt), desc(messagesTable.id));
+  const peerIds = [...new Set(
+    rows
+      .map((row) => row.threadKey?.split(":").find((id) => id !== userId))
+      .filter((id): id is string => Boolean(id)),
+  )];
+  const peers = peerIds.length
+    ? await db.select({
+      id: usersTable.clerkId,
+      username: usersTable.username,
+      displayName: usersTable.displayName,
+      avatarUrl: usersTable.avatarUrl,
+      status: usersTable.status,
+    }).from(usersTable).where(inArray(usersTable.clerkId, peerIds))
+    : [];
+  const peerById = new Map(peers.map((peer) => [peer.id, peer]));
+  const views = await messageViews(rows, userId);
+  const viewById = new Map(views.map((view) => [view.id, view]));
   const threads = [];
-  for (const key of keys) {
-    const peerId = key.split(":").find((id) => id !== userId) ?? userId;
-    if (!(await sharesBusiness(userId, peerId))) continue;
-    const peer = await publicUser(peerId);
-    const last = rows.find((row) => row.threadKey === key);
-    if (peer && last) threads.push({ key, peer, lastMessage: await messageView(last) });
+  for (const row of rows) {
+    const key = row.threadKey;
+    const peerId = key?.split(":").find((id) => id !== userId);
+    const peer = peerId ? peerById.get(peerId) : null;
+    const lastMessage = viewById.get(row.id);
+    if (key && peer && lastMessage && await sharesBusiness(userId, peerId)) {
+      threads.push({ key, peer, lastMessage });
+    }
   }
   res.json(threads);
 });
