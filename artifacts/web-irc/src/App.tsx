@@ -1294,6 +1294,21 @@ type BusinessDashboardPayload = {
   recentActivity: Array<{ id: number; action: string; details: string | null; actor: string | null; createdAt: string }>;
 };
 
+type BusinessActivityEntry = {
+  id: number;
+  actorId: string;
+  actor: string | null;
+  action: string;
+  departmentId: number | null;
+  locationId: number | null;
+  resourceType: string | null;
+  resourceId: string | null;
+  targetLabel: string | null;
+  details: string | null;
+  createdAt: string;
+};
+type BusinessActivityPayload = { entries: BusinessActivityEntry[]; actions: string[] };
+
 function BusinessDashboard({ detail, setError }: { detail: CommunityDetail; setError: (value: string) => void }) {
   const [dashboard, setDashboard] = useState<BusinessDashboardPayload | null>(null);
   useEffect(() => {
@@ -1321,6 +1336,101 @@ function BusinessDashboard({ detail, setError }: { detail: CommunityDetail; setE
       <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">tasks</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Workload and urgency</p></div><div className="grid grid-cols-3 divide-x divide-border"><div className="p-5"><p className="font-mono text-2xl font-bold">{dashboard.tasks.open}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">open</p></div><div className="p-5"><p className="font-mono text-2xl font-bold text-primary">{dashboard.tasks.dueThisWeek}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">due this week</p></div><div className="p-5"><p className="font-mono text-2xl font-bold text-destructive">{dashboard.tasks.overdue}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">overdue</p></div></div></section>
       <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">recent activity</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Latest workspace operations</p></div><div className="divide-y divide-border">{dashboard.recentActivity.length === 0 ? <p className="p-5 font-mono text-xs text-muted-foreground">No workspace activity recorded yet.</p> : dashboard.recentActivity.slice(0, 6).map((item) => <div key={item.id} className="flex items-start gap-3 px-5 py-3"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /><div className="min-w-0 flex-1"><p className="font-mono text-xs">{item.action.replaceAll("_", " ")}</p><p className="mt-1 truncate text-[10px] text-muted-foreground">{item.details || "Workspace operation"} · {item.actor || "System"}</p></div><time className="shrink-0 font-mono text-[9px] text-muted-foreground">{timeLabel(item.createdAt)}</time></div>)}</div></section>
     </div>
+  </section>;
+}
+
+function auditActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    changed_community_role: "changed a role for",
+    created_community: "created",
+    created_community_category: "created",
+    created_community_channel: "created",
+    created_workspace_department: "created",
+    created_workspace_location: "created",
+    created_workspace_task: "created",
+    created_workspace_team: "created",
+    invited_workspace_employee: "invited",
+    published_community_announcement: "published",
+    published_workspace_policy: "published",
+    scheduled_community_announcement: "scheduled",
+    updated_community_category: "updated",
+    updated_community_settings: "updated",
+    updated_employee_status: "updated",
+    updated_workspace_task: "updated",
+    uploaded_document_version: "uploaded",
+    commented_on_workspace_task: "commented on",
+  };
+  return labels[action] ?? action.replaceAll("_", " ");
+}
+
+function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; setError: (value: string) => void }) {
+  const [payload, setPayload] = useState<BusinessActivityPayload>({ entries: [], actions: [] });
+  const [userId, setUserId] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
+  const [action, setAction] = useState("");
+  const [resource, setResource] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const query = new URLSearchParams();
+    if (userId) query.set("userId", userId);
+    if (locationId) query.set("locationId", locationId);
+    if (departmentId) query.set("departmentId", departmentId);
+    if (action) query.set("action", action);
+    if (resource.trim()) query.set("resource", resource.trim());
+    if (from) query.set("from", from);
+    if (to) query.set("to", to);
+    setLoading(true);
+    api<BusinessActivityPayload>(`/communities/${detail.community.id}/activity${query.size ? `?${query.toString()}` : ""}`).then((next) => {
+      if (!cancelled) setPayload(next);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load business activity");
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [detail.community.id, userId, locationId, departmentId, action, resource, from, to, setError]);
+
+  const resetFilters = () => {
+    setUserId("");
+    setLocationId("");
+    setDepartmentId("");
+    setAction("");
+    setResource("");
+    setFrom("");
+    setTo("");
+  };
+
+  return <section className="space-y-4">
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">business activity</p><h2 className="mt-2 font-mono text-xl font-bold">Activity / Audit Center</h2><p className="mt-1 text-sm text-muted-foreground">Review who changed what in this workspace, with the original action timestamp.</p></div>
+      <span className="font-mono text-[10px] text-muted-foreground">{payload.entries.length} entries shown</span>
+    </div>
+    <div className="grid gap-2 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 xl:grid-cols-4">
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">User</span><select value={userId} onChange={(event) => setUserId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs"><option value="">All users</option>{detail.employees.map((employee) => <option key={employee.userId} value={employee.userId}>{employee.displayName}</option>)}</select></label>
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Location</span><select value={locationId} onChange={(event) => setLocationId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs"><option value="">All locations</option>{detail.locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label>
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Department</span><select value={departmentId} onChange={(event) => setDepartmentId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs"><option value="">All departments</option>{detail.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Action</span><select value={action} onChange={(event) => setAction(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs"><option value="">All actions</option>{payload.actions.map((item) => <option key={item} value={item}>{item.replaceAll("_", " ")}</option>)}</select></label>
+      <label className="space-y-1 sm:col-span-2 xl:col-span-2"><span className="font-mono text-[9px] uppercase text-muted-foreground">Resource</span><input value={resource} onChange={(event) => setResource(event.target.value)} placeholder="Search resource name, type, or ID" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></label>
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Date from</span><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs" /></label>
+      <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Date to</span><input type="date" value={to} onChange={(event) => setTo(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-2 font-mono text-xs" /></label>
+      <div className="flex items-end sm:col-span-2 xl:col-span-4"><button onClick={resetFilters} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted">clear filters</button></div>
+    </div>
+    <section className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">audit trail</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Workspace-scoped manager history</p></div>
+      {loading ? <div className="space-y-3 p-5"><div className="h-10 animate-pulse rounded bg-muted" /><div className="h-10 animate-pulse rounded bg-muted" /><div className="h-10 animate-pulse rounded bg-muted" /></div> : payload.entries.length === 0 ? <p className="p-5 font-mono text-xs text-muted-foreground">No activity matches these filters.</p> : <div className="divide-y divide-border">{payload.entries.map((entry) => {
+        const resourceLabel = entry.targetLabel ?? entry.resourceType ?? "workspace";
+        return <div key={entry.id} className="flex flex-wrap items-start gap-3 px-5 py-4">
+          <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" />
+          <div className="min-w-0 flex-1"><p className="font-mono text-xs leading-5"><span className="font-bold">{entry.actor ?? "System"}</span>{" "}{auditActionLabel(entry.action)}{" "}<span className="text-secondary-foreground">{resourceLabel}</span></p><p className="mt-1 truncate text-[10px] text-muted-foreground">{entry.details || `${entry.resourceType ?? "workspace"} ${entry.resourceId ?? ""}`}</p></div>
+          <time className="shrink-0 font-mono text-[9px] text-muted-foreground">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.createdAt))}</time>
+        </div>;
+      })}</div>}
+    </section>
   </section>;
 }
 
@@ -2083,7 +2193,8 @@ function CommunityConsole() {
               <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
-             {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
+              {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
+              {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, asc, desc, eq, gte, inArray, lte, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, notInArray, or } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
@@ -65,13 +65,40 @@ async function requireWorkspaceManager(userId: string, communityId: number): Pro
   return communityPermission(userId, communityId, "manage_community");
 }
 
-async function writeCommunityAudit(actorId: string, action: string, communityId: number, details?: string): Promise<void> {
+type CommunityAuditMetadata = {
+  details?: string;
+  resourceType?: string;
+  resourceId?: string | number;
+  resourceLabel?: string;
+  departmentId?: number | null;
+  locationId?: number | null;
+  targetId?: string;
+  targetLabel?: string;
+};
+
+async function writeCommunityAudit(
+  actorId: string,
+  action: string,
+  communityId: number,
+  metadata?: string | CommunityAuditMetadata,
+): Promise<void> {
+  const audit = typeof metadata === "string" ? { details: metadata } : (metadata ?? {});
+  const [actor] = await db.select({ displayName: usersTable.displayName })
+    .from(usersTable)
+    .where(eq(usersTable.clerkId, actorId))
+    .limit(1);
   await db.insert(adminAuditLogsTable).values({
     actorId,
+    actorDisplayName: actor?.displayName,
+    communityId,
     action,
-    targetId: String(communityId),
-    targetLabel: `community:${communityId}`,
-    details,
+    departmentId: audit.departmentId ?? null,
+    locationId: audit.locationId ?? null,
+    resourceType: audit.resourceType ?? "workspace",
+    resourceId: audit.resourceId === undefined ? String(communityId) : String(audit.resourceId),
+    targetId: audit.targetId ?? String(communityId),
+    targetLabel: audit.targetLabel ?? audit.resourceLabel ?? `community:${communityId}`,
+    details: audit.details,
   });
   const managers = await db.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
     eq(userRolesTable.communityId, communityId),
@@ -80,7 +107,7 @@ async function writeCommunityAudit(actorId: string, action: string, communityId:
   await createNotifications(managers.map((manager) => manager.userId), {
     type: "administrative_action",
     category: "administrative_action",
-    body: details ? `${action.replaceAll("_", " ")}: ${details}` : action.replaceAll("_", " "),
+    body: audit.details ? `${action.replaceAll("_", " ")}: ${audit.details}` : action.replaceAll("_", " "),
     communityId,
     entityType: "community",
     entityId: communityId,
@@ -541,7 +568,13 @@ router.get("/communities/:communityId/dashboard", requireAuth, async (req: Authe
       actor: adminAuditLogsTable.actorDisplayName,
       createdAt: adminAuditLogsTable.createdAt,
     }).from(adminAuditLogsTable)
-      .where(eq(adminAuditLogsTable.targetId, String(communityId)))
+      .where(or(
+        eq(adminAuditLogsTable.communityId, communityId),
+        and(
+          eq(adminAuditLogsTable.targetId, String(communityId)),
+          eq(adminAuditLogsTable.targetLabel, `community:${communityId}`),
+        ),
+      ))
       .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
       .limit(12),
   ]);
@@ -566,6 +599,81 @@ router.get("/communities/:communityId/dashboard", requireAuth, async (req: Authe
       overdue: overdue.length,
     },
     recentActivity: activity,
+  });
+});
+
+router.get("/communities/:communityId/activity", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "Workspace manager permission required." });
+    return;
+  }
+
+  const actorId = typeof req.query.userId === "string" && req.query.userId.trim() ? req.query.userId.trim() : null;
+  const departmentId = typeof req.query.departmentId === "string" && req.query.departmentId.trim() ? Number(req.query.departmentId) : null;
+  const locationId = typeof req.query.locationId === "string" && req.query.locationId.trim() ? Number(req.query.locationId) : null;
+  const action = typeof req.query.action === "string" && req.query.action.trim() ? req.query.action.trim() : null;
+  const resource = typeof req.query.resource === "string" && req.query.resource.trim() ? req.query.resource.trim().slice(0, 120) : null;
+  const from = typeof req.query.from === "string" && req.query.from.trim() ? new Date(`${req.query.from}T00:00:00.000Z`) : null;
+  const to = typeof req.query.to === "string" && req.query.to.trim() ? new Date(`${req.query.to}T23:59:59.999Z`) : null;
+  if (
+    (departmentId !== null && !Number.isInteger(departmentId))
+    || (locationId !== null && !Number.isInteger(locationId))
+    || (from && Number.isNaN(from.getTime()))
+    || (to && Number.isNaN(to.getTime()))
+  ) {
+    res.status(400).json({ error: "Invalid activity filter." });
+    return;
+  }
+  const workspaceScope = or(
+    eq(adminAuditLogsTable.communityId, communityId),
+    and(
+      eq(adminAuditLogsTable.targetId, String(communityId)),
+      eq(adminAuditLogsTable.targetLabel, `community:${communityId}`),
+    ),
+  );
+  const filters = and(
+    workspaceScope,
+    actorId ? eq(adminAuditLogsTable.actorId, actorId) : undefined,
+    departmentId !== null ? eq(adminAuditLogsTable.departmentId, departmentId) : undefined,
+    locationId !== null ? eq(adminAuditLogsTable.locationId, locationId) : undefined,
+    action ? eq(adminAuditLogsTable.action, action) : undefined,
+    resource ? or(
+      ilike(adminAuditLogsTable.resourceType, `%${resource}%`),
+      ilike(adminAuditLogsTable.resourceId, `%${resource}%`),
+      ilike(adminAuditLogsTable.targetLabel, `%${resource}%`),
+      ilike(adminAuditLogsTable.details, `%${resource}%`),
+    ) : undefined,
+    from ? gte(adminAuditLogsTable.createdAt, from) : undefined,
+    to ? lte(adminAuditLogsTable.createdAt, to) : undefined,
+  );
+  const [entries, actionOptions] = await Promise.all([
+    db.select({
+      id: adminAuditLogsTable.id,
+      actorId: adminAuditLogsTable.actorId,
+      actor: usersTable.displayName,
+      action: adminAuditLogsTable.action,
+      departmentId: adminAuditLogsTable.departmentId,
+      locationId: adminAuditLogsTable.locationId,
+      resourceType: adminAuditLogsTable.resourceType,
+      resourceId: adminAuditLogsTable.resourceId,
+      targetLabel: adminAuditLogsTable.targetLabel,
+      details: adminAuditLogsTable.details,
+      createdAt: adminAuditLogsTable.createdAt,
+    }).from(adminAuditLogsTable)
+      .leftJoin(usersTable, eq(usersTable.clerkId, adminAuditLogsTable.actorId))
+      .where(filters)
+      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+      .limit(200),
+    db.selectDistinct({ action: adminAuditLogsTable.action })
+      .from(adminAuditLogsTable)
+      .where(workspaceScope)
+      .orderBy(asc(adminAuditLogsTable.action)),
+  ]);
+  res.json({
+    entries,
+    actions: actionOptions.map((item) => item.action),
   });
 });
 
@@ -1323,7 +1431,24 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
       grantedBy: userId,
     });
   }
-  await writeCommunityAudit(userId, "changed_community_role", communityId, `${memberId} → ${role}`);
+  const [targetProfile] = await db.select({
+    displayName: usersTable.displayName,
+  }).from(usersTable).where(eq(usersTable.clerkId, memberId)).limit(1);
+  const [targetEmployee] = await db.select({
+    departmentId: employeeProfilesTable.departmentId,
+    locationId: employeeProfilesTable.locationId,
+  }).from(employeeProfilesTable).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, memberId),
+  )).limit(1);
+  await writeCommunityAudit(userId, "changed_community_role", communityId, {
+    resourceType: "employee",
+    resourceId: memberId,
+    resourceLabel: targetProfile?.displayName ?? memberId,
+    departmentId: targetEmployee?.departmentId,
+    locationId: targetEmployee?.locationId,
+    details: `role → ${role}`,
+  });
   res.json({ ok: true, userId: memberId, role, communityId });
 });
 
