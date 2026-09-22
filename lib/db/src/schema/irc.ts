@@ -453,10 +453,10 @@ export const messagesTable = pgTable("irc_messages", {
   deletedBy: text("deleted_by").references(() => usersTable.clerkId),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt),
+  index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt, table.id),
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
   index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
-  index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt),
+  index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt, table.id),
 ]);
 
 export const messageAttachmentsTable = pgTable("irc_message_attachments", {
