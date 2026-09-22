@@ -12,6 +12,12 @@ import {
   communitiesTable,
   communityMembersTable,
   departmentsTable,
+  documentAcknowledgementsTable,
+  documentDownloadsTable,
+  documentFoldersTable,
+  documentPermissionsTable,
+  documentVersionsTable,
+  businessDocumentsTable,
   db,
   employeeProfilesTable,
   locationsTable,
@@ -160,6 +166,29 @@ async function activateDueAnnouncements(communityId: number): Promise<void> {
       actionUrl: `/communities/${communityId}`,
     });
   }
+}
+
+const documentCategories = ["policies", "procedures", "training", "forms", "employee", "company"] as const;
+const documentVisibilities = ["company", "managers", "employee", "private"] as const;
+
+async function documentForUser(documentId: number, communityId: number, userId: string) {
+  const [document] = await db.select().from(businessDocumentsTable).where(and(
+    eq(businessDocumentsTable.id, documentId),
+    eq(businessDocumentsTable.communityId, communityId),
+  ));
+  if (!document) return null;
+  const manager = await communityPermission(userId, communityId, "manage_community");
+  const [membership] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(
+    eq(communityMembersTable.communityId, communityId),
+    eq(communityMembersTable.userId, userId),
+  ));
+  if (!membership) return null;
+  if (manager || document.visibility === "company" || (document.visibility === "employee" && document.targetUserId === userId)) return document;
+  const [permission] = await db.select({ permission: documentPermissionsTable.permission }).from(documentPermissionsTable).where(and(
+    eq(documentPermissionsTable.documentId, documentId),
+    eq(documentPermissionsTable.userId, userId),
+  ));
+  return permission ? document : null;
 }
 
 router.get("/permissions/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -853,6 +882,226 @@ router.post("/communities/:communityId/policies/:policyId/acknowledge", requireA
     });
   }
   res.json(acknowledgement);
+});
+
+router.get("/communities/:communityId/documents", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await canAccessBusiness(userId, communityId))) {
+    res.status(404).json({ error: "Business workspace not found." });
+    return;
+  }
+  const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
+  const folderId = typeof req.query.folderId === "string" && req.query.folderId ? Number(req.query.folderId) : null;
+  const manager = await communityPermission(userId, communityId, "manage_community");
+  const [folders, documents, versions, acknowledgements, permissions, downloads] = await Promise.all([
+    db.select().from(documentFoldersTable).where(eq(documentFoldersTable.communityId, communityId)).orderBy(asc(documentFoldersTable.name)),
+    db.select().from(businessDocumentsTable).where(eq(businessDocumentsTable.communityId, communityId)).orderBy(desc(businessDocumentsTable.updatedAt)),
+    db.select().from(documentVersionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)).orderBy(desc(documentVersionsTable.version)),
+    db.select().from(documentAcknowledgementsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentAcknowledgementsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
+    db.select().from(documentPermissionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentPermissionsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
+    db.select({ documentId: documentDownloadsTable.documentId }).from(documentDownloadsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentDownloadsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
+  ]);
+  const permissionsByDocument = new Map<number, Array<{ userId: string; permission: string }>>();
+  permissions.forEach(({ irc_document_permissions: permission }) => {
+    const current = permissionsByDocument.get(permission.documentId) ?? [];
+    current.push({ userId: permission.userId, permission: permission.permission });
+    permissionsByDocument.set(permission.documentId, current);
+  });
+  const visible = documents.filter((document) => {
+    if (folderId !== null && document.folderId !== folderId) return false;
+    const textMatch = !query || `${document.title} ${document.description} ${document.category}`.toLowerCase().includes(query)
+      || versions.some(({ irc_document_versions: version }) => version.documentId === document.id && version.fileName.toLowerCase().includes(query));
+    if (!textMatch) return false;
+    if (manager || document.visibility === "company" || (document.visibility === "employee" && document.targetUserId === userId)) return true;
+    return permissionsByDocument.get(document.id)?.some((permission) => permission.userId === userId) ?? false;
+  });
+  res.json({
+    folders,
+    documents: visible.map((document) => ({
+      ...document,
+      versions: versions.filter(({ irc_document_versions: version }) => version.documentId === document.id).map(({ irc_document_versions: version }) => version),
+      acknowledgedAt: acknowledgements.find(({ irc_document_acknowledgements: acknowledgement }) => acknowledgement.documentId === document.id && acknowledgement.userId === userId)?.irc_document_acknowledgements.acknowledgedAt ?? null,
+      acknowledgementCount: acknowledgements.filter(({ irc_document_acknowledgements: acknowledgement }) => acknowledgement.documentId === document.id).length,
+      downloadCount: downloads.filter((download) => download.documentId === document.id).length,
+      permissions: manager ? permissionsByDocument.get(document.id) ?? [] : undefined,
+    })),
+    canManage: manager,
+  });
+});
+
+router.post("/communities/:communityId/document-folders", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage document folders in this workspace." });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 100) : "";
+  const parentId = req.body?.parentId ? Number(req.body.parentId) : null;
+  if (!name) {
+    res.status(400).json({ error: "A folder name is required." });
+    return;
+  }
+  if (parentId) {
+    const [parent] = await db.select({ id: documentFoldersTable.id }).from(documentFoldersTable).where(and(eq(documentFoldersTable.id, parentId), eq(documentFoldersTable.communityId, communityId)));
+    if (!parent) {
+      res.status(400).json({ error: "Parent folder not found." });
+      return;
+    }
+  }
+  const [folder] = await db.insert(documentFoldersTable).values({ communityId, parentId, name, createdBy: userId }).returning();
+  await writeCommunityAudit(userId, "created_document_folder", communityId, name);
+  res.status(201).json(folder);
+});
+
+router.post("/communities/:communityId/documents", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage documents in this workspace." });
+    return;
+  }
+  const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 160) : "";
+  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 1000) : "";
+  const category = typeof req.body?.category === "string" ? req.body.category : "company";
+  const visibility = typeof req.body?.visibility === "string" ? req.body.visibility : "company";
+  const folderId = req.body?.folderId ? Number(req.body.folderId) : null;
+  const targetUserId = typeof req.body?.targetUserId === "string" && req.body.targetUserId ? req.body.targetUserId : null;
+  const requiresAcknowledgement = Boolean(req.body?.requiresAcknowledgement);
+  const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt) : null;
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
+  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
+  const fileSize = Number(req.body?.fileSize);
+  if (!title || !documentCategories.includes(category as typeof documentCategories[number]) || !documentVisibilities.includes(visibility as typeof documentVisibilities[number]) || (expiresAt && Number.isNaN(expiresAt.getTime()))) {
+    res.status(400).json({ error: "A valid document title, category, visibility, and expiration are required." });
+    return;
+  }
+  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+    res.status(400).json({ error: "A valid uploaded file is required." });
+    return;
+  }
+  if (visibility === "employee" && !targetUserId) {
+    res.status(400).json({ error: "Choose an employee for employee documents." });
+    return;
+  }
+  if (folderId) {
+    const [folder] = await db.select({ id: documentFoldersTable.id }).from(documentFoldersTable).where(and(eq(documentFoldersTable.id, folderId), eq(documentFoldersTable.communityId, communityId)));
+    if (!folder) {
+      res.status(400).json({ error: "Folder not found." });
+      return;
+    }
+  }
+  if (targetUserId) {
+    const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, targetUserId)));
+    if (!member) {
+      res.status(400).json({ error: "Employee is not a member of this workspace." });
+      return;
+    }
+  }
+  const [document] = await db.insert(businessDocumentsTable).values({
+    communityId, folderId, title, description, category, visibility, targetUserId, requiresAcknowledgement, expiresAt, ownerId: userId,
+  }).returning();
+  const [version] = await db.insert(documentVersionsTable).values({
+    documentId: document.id, version: 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId,
+  }).returning();
+  await writeCommunityAudit(userId, "created_business_document", communityId, title);
+  res.status(201).json({ ...document, versions: [version] });
+});
+
+router.post("/communities/:communityId/documents/:documentId/versions", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const documentId = Number(param(req, "documentId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot update documents in this workspace." });
+    return;
+  }
+  const [document] = await db.select().from(businessDocumentsTable).where(and(eq(businessDocumentsTable.id, documentId), eq(businessDocumentsTable.communityId, communityId)));
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
+  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
+  const fileSize = Number(req.body?.fileSize);
+  if (!document) {
+    res.status(404).json({ error: "Document not found." });
+    return;
+  }
+  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+    res.status(400).json({ error: "A valid uploaded file is required." });
+    return;
+  }
+  const [latest] = await db.select({ version: documentVersionsTable.version }).from(documentVersionsTable).where(eq(documentVersionsTable.documentId, documentId)).orderBy(desc(documentVersionsTable.version)).limit(1);
+  const [version] = await db.insert(documentVersionsTable).values({ documentId, version: (latest?.version ?? 0) + 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId }).returning();
+  await db.update(businessDocumentsTable).set({ updatedAt: new Date() }).where(eq(businessDocumentsTable.id, documentId));
+  await writeCommunityAudit(userId, "uploaded_document_version", communityId, `${document.title} v${version.version}`);
+  res.status(201).json(version);
+});
+
+router.post("/communities/:communityId/documents/:documentId/acknowledge", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const documentId = Number(param(req, "documentId"));
+  const document = await documentForUser(documentId, communityId, userId);
+  if (!document) {
+    res.status(404).json({ error: "Document not found." });
+    return;
+  }
+  if (!document.requiresAcknowledgement) {
+    res.status(400).json({ error: "This document does not require acknowledgment." });
+    return;
+  }
+  const [acknowledgement] = await db.insert(documentAcknowledgementsTable).values({ documentId, userId }).onConflictDoUpdate({
+    target: [documentAcknowledgementsTable.documentId, documentAcknowledgementsTable.userId],
+    set: { acknowledgedAt: new Date() },
+  }).returning();
+  res.json(acknowledgement);
+});
+
+router.post("/communities/:communityId/documents/:documentId/permissions", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const documentId = Number(param(req, "documentId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage document permissions in this workspace." });
+    return;
+  }
+  const targetUserId = typeof req.body?.userId === "string" ? req.body.userId : "";
+  const permission = typeof req.body?.permission === "string" ? req.body.permission : "viewer";
+  const [document] = await db.select({ id: businessDocumentsTable.id }).from(businessDocumentsTable).where(and(eq(businessDocumentsTable.id, documentId), eq(businessDocumentsTable.communityId, communityId)));
+  if (!document || !targetUserId || !["viewer", "editor", "acknowledger"].includes(permission)) {
+    res.status(400).json({ error: "Invalid document permission." });
+    return;
+  }
+  const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, targetUserId)));
+  if (!member) {
+    res.status(400).json({ error: "User is not a workspace member." });
+    return;
+  }
+  const [grant] = await db.insert(documentPermissionsTable).values({ documentId, userId: targetUserId, permission, grantedBy: userId }).onConflictDoUpdate({
+    target: [documentPermissionsTable.documentId, documentPermissionsTable.userId],
+    set: { permission, grantedBy: userId },
+  }).returning();
+  res.status(201).json(grant);
+});
+
+router.get("/communities/:communityId/documents/:documentId/download/:versionId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const documentId = Number(param(req, "documentId"));
+  const versionId = Number(param(req, "versionId"));
+  const document = await documentForUser(documentId, communityId, userId);
+  const [version] = await db.select().from(documentVersionsTable).where(and(eq(documentVersionsTable.id, versionId), eq(documentVersionsTable.documentId, documentId)));
+  if (!document || !version) {
+    res.status(404).json({ error: "Document version not found." });
+    return;
+  }
+  await db.insert(documentDownloadsTable).values({ documentId, versionId, userId });
+  try {
+    res.redirect(await signedObjectUrlForPath(version.objectPath));
+  } catch {
+    res.status(503).json({ error: "Document storage is temporarily unavailable." });
+  }
 });
 
 router.post("/communities/:communityId/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

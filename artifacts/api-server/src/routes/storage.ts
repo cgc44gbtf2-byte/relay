@@ -42,12 +42,21 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: Authenticat
   const size = Number(req.body?.size);
   const contentType = typeof req.body?.contentType === "string" ? req.body.contentType : "application/octet-stream";
   const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 160) : "";
-  if (!name || !Number.isSafeInteger(size) || size < 1 || size > 10_000_000) {
-    res.status(400).json({ error: "Files must have a name and be smaller than 10 MB." });
+  if (!name || !Number.isSafeInteger(size) || size < 1 || size > 25_000_000) {
+    res.status(400).json({ error: "Files must have a name and be smaller than 25 MB." });
     return;
   }
-  if (!contentType.startsWith("image/") && !contentType.startsWith("text/") && contentType !== "application/pdf") {
-    res.status(400).json({ error: "Only images, text files, and PDFs are supported." });
+  const supportedTypes = [
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ];
+  if (!contentType.startsWith("image/") && !contentType.startsWith("text/") && !supportedTypes.includes(contentType)) {
+    res.status(400).json({ error: "Only images, text files, PDFs, Word, Excel, and PowerPoint files are supported." });
     return;
   }
   try {

@@ -1288,6 +1288,114 @@ type CommunityDetail = {
   canManage: boolean;
 };
 
+type BusinessDocument = {
+  id: number;
+  folderId: number | null;
+  title: string;
+  description: string;
+  category: string;
+  visibility: string;
+  targetUserId: string | null;
+  requiresAcknowledgement: boolean;
+  expiresAt: string | null;
+  updatedAt: string;
+  acknowledgedAt: string | null;
+  acknowledgementCount: number;
+  downloadCount: number;
+  versions: Array<{ id: number; version: number; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
+  permissions?: Array<{ userId: string; permission: string }>;
+};
+type DocumentsPayload = { folders: Array<{ id: number; parentId: number | null; name: string }>; documents: BusinessDocument[]; canManage: boolean };
+
+function DocumentCenter({ detail, working, setWorking, setNotice, setError }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void }) {
+  const [payload, setPayload] = useState<DocumentsPayload>({ folders: [], documents: [], canManage: detail.canManage });
+  const [query, setQuery] = useState("");
+  const [folderId, setFolderId] = useState("");
+  const [category, setCategory] = useState("all");
+  const [showCreate, setShowCreate] = useState(false);
+  const [folderName, setFolderName] = useState("");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [documentCategory, setDocumentCategory] = useState("company");
+  const [visibility, setVisibility] = useState("company");
+  const [targetUserId, setTargetUserId] = useState("");
+  const [documentFolderId, setDocumentFolderId] = useState("");
+  const [requiresAcknowledgement, setRequiresAcknowledgement] = useState(false);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [permissionUserId, setPermissionUserId] = useState("");
+  const [permissionRole, setPermissionRole] = useState("viewer");
+  const loadDocuments = async () => {
+    try {
+      const next = await api<DocumentsPayload>(`/communities/${detail.community.id}/documents?q=${encodeURIComponent(query)}${folderId ? `&folderId=${folderId}` : ""}`);
+      setPayload(next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load documents");
+    }
+  };
+  useEffect(() => { void loadDocuments(); }, [detail.community.id, query, folderId]);
+  const createFolder = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/document-folders`, { method: "POST", body: JSON.stringify({ name: folderName, parentId: folderId || null }) });
+      setFolderName("");
+      setNotice("Document folder created.");
+      await loadDocuments();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create folder"); }
+    finally { setWorking(false); }
+  };
+  const uploadDocument = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!file) { setError("Choose a document file first."); return; }
+    setWorking(true);
+    try {
+      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }) });
+      const uploaded = await fetch(upload.uploadURL, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+      if (!uploaded.ok) throw new Error("Document upload failed.");
+      await api(`/communities/${detail.community.id}/documents`, { method: "POST", body: JSON.stringify({ title, description, category: documentCategory, visibility, targetUserId: visibility === "employee" ? targetUserId : null, folderId: documentFolderId || null, requiresAcknowledgement, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null, objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }) });
+      setTitle(""); setDescription(""); setFile(null); setExpiresAt(""); setRequiresAcknowledgement(false); setNotice("Document uploaded."); await loadDocuments();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not upload document"); }
+    finally { setWorking(false); }
+  };
+  const acknowledge = async (documentId: number) => {
+    setWorking(true);
+    try { await api(`/communities/${detail.community.id}/documents/${documentId}/acknowledge`, { method: "POST" }); setNotice("Document acknowledged."); await loadDocuments(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not acknowledge document"); }
+    finally { setWorking(false); }
+  };
+  const uploadVersion = async (documentId: number, nextFile: File) => {
+    setWorking(true);
+    try {
+      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: nextFile.name, size: nextFile.size, contentType: nextFile.type || "application/octet-stream" }) });
+      const uploaded = await fetch(upload.uploadURL, { method: "PUT", headers: { "content-type": nextFile.type || "application/octet-stream" }, body: nextFile });
+      if (!uploaded.ok) throw new Error("Document version upload failed.");
+      await api(`/communities/${detail.community.id}/documents/${documentId}/versions`, { method: "POST", body: JSON.stringify({ objectPath: upload.objectPath, fileName: nextFile.name, contentType: nextFile.type || "application/octet-stream", fileSize: nextFile.size }) });
+      setNotice("New document version uploaded.");
+      await loadDocuments();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not upload document version"); }
+    finally { setWorking(false); }
+  };
+  const grantPermission = async (documentId: number) => {
+    if (!permissionUserId) return;
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/documents/${documentId}/permissions`, { method: "POST", body: JSON.stringify({ userId: permissionUserId, permission: permissionRole }) });
+      setPermissionUserId("");
+      setNotice("Document permission granted.");
+      await loadDocuments();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not grant document permission"); }
+    finally { setWorking(false); }
+  };
+  const visibleDocuments = category === "all" ? payload.documents : payload.documents.filter((document) => document.category === category);
+  return <section className="space-y-5">
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">knowledge base</p><h2 className="mt-2 font-mono text-xl font-bold">Business documents</h2><p className="mt-1 text-sm text-muted-foreground">Keep policies, procedures, training, forms, and employee records organized.</p></div><span className="font-mono text-[10px] text-muted-foreground">{payload.documents.length} document{payload.documents.length === 1 ? "" : "s"}</span></div>
+    <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-card p-4"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search documents…" className="h-9 min-w-[220px] flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><select value={folderId} onChange={(event) => setFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">All folders</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={category} onChange={(event) => setCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="all">All categories</option><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select>{payload.canManage && <button onClick={() => setShowCreate((value) => !value)} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">{showCreate ? "close editor" : "add document"}</button>}</div>
+    {payload.canManage && showCreate && <div className="grid gap-5 xl:grid-cols-2"><form onSubmit={uploadDocument} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">upload document</h3><div className="mt-4 grid gap-3"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Document title" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" className="min-h-20 rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><div className="grid gap-3 sm:grid-cols-2"><select value={documentCategory} onChange={(event) => setDocumentCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select><select value={documentFolderId} onChange={(event) => setDocumentFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No folder</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={visibility} onChange={(event) => setVisibility(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="company">Everyone in workspace</option><option value="managers">Managers only</option><option value="employee">One employee</option><option value="private">Explicit permissions</option></select>{visibility === "employee" && <select required value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select>}</div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={requiresAcknowledgement} onChange={(event) => setRequiresAcknowledgement(event.target.checked)} /> require acknowledgment</label><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} aria-label="Document expiration" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><input required type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="h-9 rounded border border-input bg-background px-2 py-1.5 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">upload document</button></div></form><form onSubmit={createFolder} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">organize folders</h3><p className="mt-1 text-xs text-muted-foreground">Create folders for recurring operating materials.</p><div className="mt-4 flex gap-2"><input required value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="Folder name" className="h-9 min-w-0 flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create</button></div><div className="mt-5 space-y-2">{payload.folders.map((folder) => <button type="button" key={folder.id} onClick={() => setFolderId(String(folder.id))} className={`block w-full rounded border px-3 py-2 text-left font-mono text-xs ${folderId === String(folder.id) ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>/ {folder.name}</button>)}</div></form></div>}
+    <div className="grid gap-4 md:grid-cols-2">{visibleDocuments.map((document) => { const latest = document.versions[0]; const expired = document.expiresAt ? new Date(document.expiresAt) <= new Date() : false; return <article key={document.id} className="rounded-xl border border-border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-[9px] uppercase tracking-[.15em] text-primary">{document.category} · {document.visibility}</p><h3 className="mt-2 truncate font-mono text-sm font-bold">{document.title}</h3><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{document.description || "No description provided."}</p></div><span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${expired ? "bg-destructive/10 text-destructive" : "bg-chart-4/10 text-chart-4"}`}>{expired ? "expired" : "current"}</span></div><div className="mt-4 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>v{latest?.version ?? 0}</span><span>{document.versions.length} version{document.versions.length === 1 ? "" : "s"}</span><span>{document.downloadCount} download{document.downloadCount === 1 ? "" : "s"}</span>{document.requiresAcknowledgement && <span>{document.acknowledgementCount} acknowledged</span>}</div>{latest && <a href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${latest.id}`} target="_blank" rel="noreferrer" className="mt-4 block truncate rounded border border-border px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{latest.fileName}</a>}{payload.canManage && <label className="mt-3 block font-mono text-[10px] text-muted-foreground">upload new version<input type="file" onChange={(event) => { const nextFile = event.target.files?.[0]; if (nextFile) void uploadVersion(document.id, nextFile); }} className="mt-1 block h-8 w-full rounded border border-input bg-background px-2 py-1 font-mono text-[9px]" /></label>}{document.requiresAcknowledgement && !document.acknowledgedAt && !expired && <button disabled={working} onClick={() => void acknowledge(document.id)} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge document</button>}<div className="mt-3 space-y-1">{document.versions.slice(1).map((version) => <a key={version.id} href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${version.id}`} target="_blank" rel="noreferrer" className="block truncate font-mono text-[10px] text-muted-foreground hover:text-primary">v{version.version} · {version.fileName}</a>)}</div>{payload.canManage && <div className="mt-4 border-t border-border pt-3"><p className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">grant explicit access</p><div className="mt-2 flex gap-2"><select value={permissionUserId} onChange={(event) => setPermissionUserId(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="">employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><select value={permissionRole} onChange={(event) => setPermissionRole(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="viewer">viewer</option><option value="editor">editor</option><option value="acknowledger">acknowledger</option></select><button type="button" disabled={working || !permissionUserId} onClick={() => void grantPermission(document.id)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">grant</button></div></div>}</article>; })}{visibleDocuments.length === 0 && <div className="rounded-xl border border-dashed border-border p-8 font-mono text-xs text-muted-foreground md:col-span-2">No documents match this search.</div>}</div>
+  </section>;
+}
+
 function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -1939,6 +2047,7 @@ function CommunityConsole() {
               <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
+             <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              {detail.canManage && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
