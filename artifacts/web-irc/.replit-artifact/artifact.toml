@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Web IRC"
+description = "A browser-based Internet Relay Chat client for joining channels, chatting in real time, and seeing who is online."
+version = "1.0.0"
+id = "artifacts/web-irc"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23342
+
+[services.development]
+run = "pnpm --filter @workspace/web-irc run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/web-irc", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/web-irc/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23342"
+BASE_PATH = "/"
