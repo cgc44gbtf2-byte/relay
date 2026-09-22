@@ -294,15 +294,6 @@ function roleAllows(role: string, permission: PermissionKey): boolean {
   return role in ROLE_PERMISSIONS && ROLE_PERMISSIONS[role as AuthorizationRole].includes(permission);
 }
 
-async function customRoleAllows(role: string, permission: PermissionKey): Promise<boolean> {
-  const [match] = await db.select({ role: rolePermissionsTable.role })
-    .from(rolePermissionsTable)
-    .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
-    .where(and(eq(rolePermissionsTable.role, role), eq(permissionDefinitionsTable.key, permission)))
-    .limit(1);
-  return Boolean(match);
-}
-
 function roleRank(role: string): number {
   return role === "admin" ? 8
     : role === "platform_moderator" ? 7
@@ -335,10 +326,34 @@ export async function hasPermission(
     const primaryAssignment = assignments.find((assignment) => assignment.role === user.role);
     if (user.role !== "community_admin" || (primaryAssignment && assignmentMatches(primaryAssignment, scope))) return true;
   }
-  for (const assignment of assignments) {
-    if (assignmentMatches(assignment, scope) && (roleAllows(assignment.role, permission) || await customRoleAllows(assignment.role, permission))) return true;
+  const matchingAssignments = assignments.filter((assignment) =>
+    assignmentMatches(assignment, scope),
+  );
+  if (matchingAssignments.some((assignment) =>
+    roleAllows(assignment.role, permission),
+  )) {
+    return true;
   }
-  return false;
+  const customRoleNames = [
+    ...new Set(
+      matchingAssignments
+        .map((assignment) => assignment.role)
+        .filter((role) => !(role in ROLE_PERMISSIONS)),
+    ),
+  ];
+  if (!customRoleNames.length) return false;
+  const customRoleMatches = await db
+    .select({ role: rolePermissionsTable.role })
+    .from(rolePermissionsTable)
+    .innerJoin(
+      permissionDefinitionsTable,
+      eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId),
+    )
+    .where(and(
+      inArray(rolePermissionsTable.role, customRoleNames),
+      eq(permissionDefinitionsTable.key, permission),
+    ));
+  return customRoleMatches.length > 0;
 }
 
 export async function permissionsForCommunities(
