@@ -100,6 +100,7 @@ function installApi({
   owner = false,
   reconnectedMessages,
   notifications = [],
+  uploadFailure = false,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
@@ -134,6 +135,15 @@ function installApi({
     if (url === "/api/categories") return jsonResponse([]);
     if (url === "/api/notifications" && method === "GET") return jsonResponse(notifications);
     if (url.match(/^\/api\/notifications\/\d+\/read$/) && method === "POST") return jsonResponse({ ok: true });
+    if (url === "/api/storage/uploads/request-url" && method === "POST") {
+      return jsonResponse({
+        uploadURL: "https://upload.test/file",
+        objectPath: "/objects/uploads/123e4567-e89b-12d3-a456-426614174000",
+      });
+    }
+    if (url === "https://upload.test/file" && method === "PUT") {
+      return uploadFailure ? jsonResponse({ error: "upload failed" }, 500) : jsonResponse({});
+    }
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
@@ -156,6 +166,9 @@ function installApi({
     }
     if (url === "/api/channels/1/messages" && method === "POST") {
       return missingRequest === "send" ? channelNotFound() : jsonResponse(message(1, "sent"));
+    }
+    if (url === "/api/messages/message-1" && method === "DELETE") {
+      return jsonResponse({ ok: true });
     }
     if (url === "/api/channels/1" && method === "PATCH") {
       return missingRequest === "topic" ? channelNotFound() : jsonResponse({ ...deleted, topic: "updated" });
@@ -372,5 +385,24 @@ describe("deleted room recovery", () => {
 
     await waitFor(() => expect(window.location.pathname).toBe("/communities/1"));
     expect(screen.queryByText("Open the workspace task")).toBeNull();
+  });
+
+  it("cleans up the placeholder message when an attachment upload fails", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      uploadFailure: true,
+    });
+
+    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+        String(input) === "/api/messages/message-1" && init?.method === "DELETE",
+      )).toBe(true);
+    });
   });
 });
