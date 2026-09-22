@@ -134,6 +134,7 @@ export const departmentsTable = pgTable("irc_departments", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_departments_community_idx").on(table.communityId),
+  index("irc_departments_community_name_idx").on(table.communityId, table.name),
 ]);
 
 export const locationsTable = pgTable("irc_locations", {
@@ -147,6 +148,7 @@ export const locationsTable = pgTable("irc_locations", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_locations_community_idx").on(table.communityId),
+  index("irc_locations_community_name_idx").on(table.communityId, table.name),
 ]);
 
 export const teamsTable = pgTable("irc_teams", {
@@ -161,6 +163,7 @@ export const teamsTable = pgTable("irc_teams", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_teams_community_idx").on(table.communityId),
+  index("irc_teams_community_name_idx").on(table.communityId, table.name),
 ]);
 
 export const teamMembersTable = pgTable("irc_team_members", {
@@ -354,7 +357,10 @@ export const channelsTable = pgTable(
     passwordHash: text("password_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_channels_community_category_name_idx").on(table.communityId, table.categoryId, table.name)],
+  (table) => [
+    uniqueIndex("irc_channels_community_category_name_idx").on(table.communityId, table.categoryId, table.name),
+    index("irc_channels_community_name_idx").on(table.communityId, table.name),
+  ],
 );
 
 export const categoriesTable = pgTable(
@@ -370,6 +376,7 @@ export const categoriesTable = pgTable(
   (table) => [
     uniqueIndex("irc_categories_owner_name_idx").on(table.ownerId, table.name),
     index("irc_categories_community_idx").on(table.communityId),
+    index("irc_categories_community_name_idx").on(table.communityId, table.name),
   ],
 );
 
