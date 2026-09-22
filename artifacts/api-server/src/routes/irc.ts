@@ -915,6 +915,10 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     res.status(404).json({ error: "Message not found." });
     return;
   }
+  if (message.kind === "deleted") {
+    res.status(409).json({ error: "Deleted messages cannot receive attachments." });
+    return;
+  }
   if (!(await canReadMessage(message, userId))) {
     res.status(403).json({ error: "You cannot attach files to this message." });
     return;
