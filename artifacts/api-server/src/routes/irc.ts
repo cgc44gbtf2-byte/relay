@@ -1132,7 +1132,7 @@ router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): P
     const peerId = key?.split(":").find((id) => id !== userId);
     const peer = peerId ? peerById.get(peerId) : null;
     const lastMessage = viewById.get(row.id);
-    if (key && peer && lastMessage && await sharesBusiness(userId, peerId)) {
+    if (key && peerId && peer && lastMessage && await sharesBusiness(userId, peerId)) {
       threads.push({ key, peer, lastMessage });
     }
   }
