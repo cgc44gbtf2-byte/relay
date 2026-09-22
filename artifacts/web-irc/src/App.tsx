@@ -1338,7 +1338,7 @@ type CommunityDetail = {
   locations: Array<{ id: number; name: string; code: string; address: string; timezone: string; status: string }>;
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
   employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
-  invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string }>;
+  invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; acceptedAt?: string | null }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
   tasks: Array<{
     id: number;
@@ -1421,6 +1421,10 @@ function auditActionLabel(action: string): string {
     created_workspace_task: "created",
     created_workspace_team: "created",
     invited_workspace_employee: "invited",
+    accepted_workspace_invitation: "accepted",
+    resent_workspace_invitation: "resent",
+    offboarded_employee: "offboarded",
+    transferred_workspace_ownership: "transferred ownership of",
     published_community_announcement: "published",
     published_workspace_policy: "published",
     scheduled_community_announcement: "scheduled",
@@ -1856,6 +1860,9 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
   const [location, setLocation] = useState("");
   const [team, setTeam] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("employee");
+  const [inviteToken, setInviteToken] = useState("");
+  const [ownershipTarget, setOwnershipTarget] = useState("");
   const [policyTitle, setPolicyTitle] = useState("");
   const [policyBody, setPolicyBody] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
@@ -1879,6 +1886,56 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update employee status");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const createInvitation = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    try {
+      const created = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations`, {
+        method: "POST",
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+      setInviteToken(created.invitationToken);
+      setInviteEmail("");
+      setNotice("Invitation created. Share the one-time token with the employee.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create employee invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const resendInvitation = async (invitationId: number) => {
+    setWorking(true);
+    try {
+      const resent = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations/${invitationId}/resend`, { method: "POST", body: "{}" });
+      setInviteToken(resent.invitationToken);
+      setNotice("Invitation resent. Share the new one-time token with the employee.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not resend invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const offboardEmployee = async (employeeId: string, displayName: string) => {
+    if (!window.confirm(`Offboard ${displayName}? This immediately revokes workspace channels, teams, and roles.`)) return;
+    await updateEmployee(employeeId, "terminated");
+  };
+  const transferOwnership = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!ownershipTarget || !window.confirm("Transfer workspace ownership? You will become a workspace admin.")) return;
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/transfer-ownership`, { method: "POST", body: JSON.stringify({ userId: ownershipTarget }) });
+      setOwnershipTarget("");
+      setNotice("Workspace ownership transferred.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not transfer workspace ownership");
     } finally {
       setWorking(false);
     }
@@ -1921,13 +1978,14 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       </form>
     </div>}
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
-      <section className="rounded-xl border border-border bg-card">
-        <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
-        <div className="divide-y divide-border">{filteredEmployees.map((employee) => { const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name; const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name; const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member"; const online = employee.presenceStatus === "online"; return <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-4"><div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{employee.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p></div><div className="flex flex-wrap items-center gap-2"><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}</div></div>; })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
+       <section className="rounded-xl border border-border bg-card">
+         <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
+         <div className="divide-y divide-border">{filteredEmployees.map((employee) => { const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name; const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name; const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member"; const online = employee.presenceStatus === "online"; return <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-4"><div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{employee.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p></div><div className="flex flex-wrap items-center gap-2"><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}{detail.canManage && employee.employmentStatus !== "terminated" && <button disabled={working} onClick={() => void offboardEmployee(employee.userId, employee.displayName)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">offboard</button>}</div></div>; })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
       </section>
       {detail.canManage && <div className="space-y-5">
-        <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/invitations`, { email: inviteEmail }, "Employee invitation created."); setInviteEmail(""); }} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button></form>
+        <form onSubmit={createInvitation} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><div className="mt-4 grid gap-2"><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="employee">Employee</option><option value="contractor">Contractor</option><option value="member">Member</option></select></div><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button>{inviteToken && <div className="mt-4 rounded border border-primary/30 bg-primary/5 p-3"><p className="font-mono text-[9px] uppercase tracking-wider text-primary">one-time invitation token</p><code className="mt-2 block break-all text-[10px] text-foreground">{inviteToken}</code><p className="mt-2 text-[10px] leading-4 text-muted-foreground">Share this token securely. The recipient can accept it at the invitation page before joining the private workspace.</p></div>}<div className="mt-4 space-y-2 border-t border-border pt-4">{detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2"><div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>{invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}</div>)}</div></form>
         <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/policies`, { title: policyTitle, body: policyBody }, "Workspace policy published."); setPolicyTitle(""); setPolicyBody(""); }} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">workspace policy</h2><input required value={policyTitle} onChange={(event) => setPolicyTitle(event.target.value)} placeholder="Safety policy" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><textarea required value={policyBody} onChange={(event) => setPolicyBody(event.target.value)} placeholder="Policy details" className="mt-3 min-h-20 w-full rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">publish policy</button><div className="mt-4 space-y-2">{detail.policies.slice(0, 3).map((policy) => <div key={policy.id} className="rounded border border-border/70 p-2"><p className="font-mono text-xs">{policy.title} <span className="text-[9px] text-muted-foreground">v{policy.version}</span></p><p className="mt-1 line-clamp-2 text-[10px] text-muted-foreground">{policy.body}</p></div>)}</div></form>
+        <form onSubmit={transferOwnership} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">ownership</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Transfer control to an existing workspace member.</p><select required value={ownershipTarget} onChange={(event) => setOwnershipTarget(event.target.value)} className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose new owner</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><button disabled={working || !ownershipTarget} className="mt-3 rounded border border-destructive/30 px-3 py-2 font-mono text-[10px] font-bold text-destructive disabled:opacity-50">transfer ownership</button></form>
       </div>}
     </div>
   </section>;
@@ -2056,6 +2114,29 @@ function DeveloperConsole() {
   );
 }
 
+function InvitationAcceptance() {
+  const [communityId, setCommunityId] = useState("");
+  const [token, setToken] = useState("");
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/communities/${Number(communityId)}/invitations/accept`, { method: "POST", body: JSON.stringify({ token }) });
+      setNotice("Invitation accepted. Your employee profile is ready for onboarding.");
+      window.setTimeout(() => { window.location.assign(`${basePath}/communities`); }, 500);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not accept invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+  return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-5 py-10 text-foreground"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-7"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><p className="mt-10 font-mono text-[10px] uppercase tracking-[.18em] text-primary">workspace invitation</p><h1 className="mt-2 font-mono text-2xl font-bold">Join a business workspace.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use the workspace number and one-time token provided by your workspace manager.</p>{error && <p className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}{notice && <p className="mt-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace number</span><input required inputMode="numeric" value={communityId} onChange={(event) => setCommunityId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="42" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">invitation token</span><input required value={token} onChange={(event) => setToken(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="paste the one-time token" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "accepting…" : "accept invitation"}</button></form></div></div>;
+}
+
 function CommunityConsole() {
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [communities, setCommunities] = useState<CommunitySummary[]>([]);
@@ -2074,7 +2155,7 @@ function CommunityConsole() {
   const [newBusinessHours, setNewBusinessHours] = useState("");
   const [newContactEmail, setNewContactEmail] = useState("");
   const [newContactPhone, setNewContactPhone] = useState("");
-  const [newCommunityPrivate, setNewCommunityPrivate] = useState(false);
+  const [newCommunityPrivate, setNewCommunityPrivate] = useState(true);
   const [settings, setSettings] = useState({
     name: "",
     description: "",
@@ -2151,7 +2232,7 @@ function CommunityConsole() {
       setNewBusinessHours("");
       setNewContactEmail("");
       setNewContactPhone("");
-      setNewCommunityPrivate(false);
+       setNewCommunityPrivate(true);
       setNotice("Business workspace created with default operating channels.");
       await loadCommunities();
       setSelectedId(created.id);
@@ -2290,7 +2371,7 @@ function CommunityConsole() {
 }
 
 function AuthRoutes() {
-  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
+  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
 }
 
 function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }

@@ -60,6 +60,7 @@ const workspaceRoleRank: Record<string, number> = {
   business_manager: 2,
   business_owner: 5,
 };
+const invitationRoles = ["member", "employee", "contractor"] as const;
 
 async function requireWorkspaceManager(userId: string, communityId: number): Promise<boolean> {
   return communityPermission(userId, communityId, "manage_community");
@@ -278,7 +279,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
   const businessHours = typeof req.body?.businessHours === "string" ? req.body.businessHours.trim().slice(0, 1000) : "";
   const contactEmail = typeof req.body?.contactEmail === "string" ? req.body.contactEmail.trim().slice(0, 320) : "";
   const contactPhone = typeof req.body?.contactPhone === "string" ? req.body.contactPhone.trim().slice(0, 40) : "";
-  const isPrivate = req.body?.isPrivate === true;
+  const isPrivate = req.body?.isPrivate !== false;
   const slug = slugify(typeof req.body?.slug === "string" ? req.body.slug : name);
   if (!name || !slug) {
     res.status(400).json({ error: "A community name is required." });
@@ -925,22 +926,75 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
     return;
   }
   const now = new Date();
-  const [updated] = await db.update(employeeProfilesTable).set({
-    ...(employmentStatus === undefined ? {} : { employmentStatus }),
-    ...(employmentStatus === "onboarding" ? { onboardingStartedAt: now } : {}),
-    ...(employmentStatus === "active" ? { onboardedAt: now } : {}),
-    ...(employmentStatus === "offboarding" ? { offboardingAt: now } : {}),
-    ...(employmentStatus === "terminated" ? { offboardedAt: now } : {}),
-  }).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, employeeId))).returning();
-  if (!updated) {
+  const [current] = await db.select().from(employeeProfilesTable).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, employeeId),
+  ));
+  if (!current) {
     res.status(404).json({ error: "Employee profile not found." });
     return;
   }
   if (employmentStatus === "terminated") {
-    await db.delete(teamMembersTable).where(eq(teamMembersTable.userId, employeeId));
-    await db.delete(userRolesTable).where(and(eq(userRolesTable.userId, employeeId), eq(userRolesTable.communityId, communityId)));
+    const [workspace] = await db.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId));
+    if (workspace?.ownerId === employeeId) {
+      res.status(400).json({ error: "Transfer workspace ownership before terminating the current owner." });
+      return;
+    }
   }
-  await writeCommunityAudit(userId, "updated_employee_status", communityId, `${employeeId} → ${employmentStatus ?? "updated"}`);
+  const updated = await db.transaction(async (tx) => {
+    const [next] = await tx.update(employeeProfilesTable).set({
+      ...(employmentStatus === undefined ? {} : { employmentStatus }),
+      ...(employmentStatus === "onboarding" ? { onboardingStartedAt: now } : {}),
+      ...(employmentStatus === "active" ? { onboardedAt: now } : {}),
+      ...(employmentStatus === "offboarding" ? { offboardingAt: now } : {}),
+      ...(employmentStatus === "terminated" ? { offboardedAt: now } : {}),
+    }).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, employeeId))).returning();
+    if (!next) throw new Error("Employee profile update failed.");
+    if (employmentStatus === "terminated") {
+      const workspaceChannels = await tx.select({ id: channelsTable.id }).from(channelsTable)
+        .where(eq(channelsTable.communityId, communityId));
+      const workspaceTeams = await tx.select({ id: teamsTable.id }).from(teamsTable)
+        .where(eq(teamsTable.communityId, communityId));
+      if (workspaceChannels.length) {
+        await tx.delete(channelMembersTable).where(and(
+          eq(channelMembersTable.userId, employeeId),
+          inArray(channelMembersTable.channelId, workspaceChannels.map((channel) => channel.id)),
+        ));
+      }
+      if (workspaceTeams.length) {
+        await tx.delete(teamMembersTable).where(and(
+          eq(teamMembersTable.userId, employeeId),
+          inArray(teamMembersTable.teamId, workspaceTeams.map((team) => team.id)),
+        ));
+      }
+      await tx.delete(userRolesTable).where(and(
+        eq(userRolesTable.userId, employeeId),
+        eq(userRolesTable.communityId, communityId),
+      ));
+      await tx.delete(communityMembersTable).where(and(
+        eq(communityMembersTable.userId, employeeId),
+        eq(communityMembersTable.communityId, communityId),
+      ));
+    }
+    if (employmentStatus === "active") {
+      await tx.insert(communityMembersTable).values({ communityId, userId: employeeId }).onConflictDoNothing();
+      await tx.insert(userRolesTable).values({
+        userId: employeeId,
+        role: "employee",
+        scopeType: "community",
+        communityId,
+        grantedBy: userId,
+      }).onConflictDoNothing();
+    }
+    return next;
+  });
+  await writeCommunityAudit(userId, employmentStatus === "terminated" ? "offboarded_employee" : "updated_employee_status", communityId, {
+    resourceType: "employee",
+    resourceId: employeeId,
+    targetId: employeeId,
+    details: `${employeeId} → ${employmentStatus ?? "updated"}`,
+  });
   res.json(updated);
 });
 
@@ -957,6 +1011,10 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     res.status(400).json({ error: "A valid employee email is required." });
     return;
   }
+  if (!invitationRoles.includes(role as typeof invitationRoles[number])) {
+    res.status(400).json({ error: "Invitation role must be member, employee, or contractor." });
+    return;
+  }
   const rawToken = randomUUID();
   const [invitation] = await db.insert(workspaceInvitationsTable).values({
     communityId,
@@ -967,7 +1025,172 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   }).returning();
   await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
-  res.status(201).json({ ...invitation, tokenHash: undefined });
+  res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken });
+});
+
+router.post("/communities/:communityId/invitations/accept", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+  if (!Number.isInteger(communityId) || !token) {
+    res.status(400).json({ error: "A workspace and invitation token are required." });
+    return;
+  }
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const [invitation] = await db.select().from(workspaceInvitationsTable).where(and(
+    eq(workspaceInvitationsTable.communityId, communityId),
+    eq(workspaceInvitationsTable.tokenHash, tokenHash),
+  ));
+  if (!invitation) {
+    res.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  if (invitation.status !== "pending") {
+    res.status(409).json({ error: `This invitation is ${invitation.status}.` });
+    return;
+  }
+  if (invitation.expiresAt <= new Date()) {
+    await db.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, invitation.id));
+    res.status(410).json({ error: "This invitation has expired. Ask a workspace manager to resend it." });
+    return;
+  }
+  const now = new Date();
+  const result = await db.transaction(async (tx) => {
+    const [accepted] = await tx.update(workspaceInvitationsTable).set({
+      status: "accepted",
+      invitedUserId: userId,
+      acceptedAt: now,
+    }).where(and(
+      eq(workspaceInvitationsTable.id, invitation.id),
+      eq(workspaceInvitationsTable.status, "pending"),
+    )).returning();
+    if (!accepted) throw new Error("Invitation is no longer available.");
+    await tx.insert(communityMembersTable).values({ communityId, userId }).onConflictDoNothing();
+    await tx.insert(employeeProfilesTable).values({
+      communityId,
+      userId,
+      employmentStatus: "onboarding",
+      departmentId: invitation.departmentId,
+      locationId: invitation.locationId,
+      invitedAt: now,
+      onboardingStartedAt: now,
+    }).onConflictDoUpdate({
+      target: [employeeProfilesTable.communityId, employeeProfilesTable.userId],
+      set: {
+        employmentStatus: "onboarding",
+        departmentId: invitation.departmentId,
+        locationId: invitation.locationId,
+        invitedAt: now,
+        onboardingStartedAt: now,
+      },
+    });
+    if (invitation.teamId) {
+      await tx.insert(teamMembersTable).values({ teamId: invitation.teamId, userId }).onConflictDoNothing();
+    }
+    if (invitation.role !== "member") {
+      await tx.insert(userRolesTable).values({
+        userId,
+        role: invitation.role,
+        scopeType: "community",
+        communityId,
+        grantedBy: invitation.invitedBy,
+      }).onConflictDoNothing();
+    }
+    return accepted;
+  });
+  await writeCommunityAudit(userId, "accepted_workspace_invitation", communityId, `invitation:${result.id}`);
+  res.json({ ok: true, communityId, invitationId: result.id, employmentStatus: "onboarding" });
+});
+
+router.post("/communities/:communityId/invitations/:invitationId/resend", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const invitationId = Number(param(req, "invitationId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(invitationId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot resend invitations in this workspace." });
+    return;
+  }
+  const [existing] = await db.select().from(workspaceInvitationsTable).where(and(
+    eq(workspaceInvitationsTable.id, invitationId),
+    eq(workspaceInvitationsTable.communityId, communityId),
+  ));
+  if (!existing) {
+    res.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  if (existing.status === "accepted") {
+    res.status(409).json({ error: "Accepted invitations cannot be resent." });
+    return;
+  }
+  const rawToken = randomUUID();
+  const [updated] = await db.update(workspaceInvitationsTable).set({
+    status: "pending",
+    tokenHash: createHash("sha256").update(rawToken).digest("hex"),
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    invitedBy: userId,
+    revokedAt: null,
+  }).where(eq(workspaceInvitationsTable.id, invitationId)).returning();
+  await writeCommunityAudit(userId, "resent_workspace_invitation", communityId, existing.email);
+  res.json({ ...updated, tokenHash: undefined, invitationToken: rawToken });
+});
+
+router.post("/communities/:communityId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const targetUserId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+  const [community] = Number.isInteger(communityId)
+    ? await db.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable).where(eq(communitiesTable.id, communityId))
+    : [];
+  if (!community || (community.ownerId !== userId && !(await hasPermission(userId, "manage_business", { communityId })))) {
+    res.status(403).json({ error: "Only the workspace owner can transfer ownership." });
+    return;
+  }
+  if (!targetUserId || targetUserId === userId) {
+    res.status(400).json({ error: "Choose another workspace member as the new owner." });
+    return;
+  }
+  const [target] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(
+    eq(communityMembersTable.communityId, communityId),
+    eq(communityMembersTable.userId, targetUserId),
+  ));
+  if (!target) {
+    res.status(400).json({ error: "The new owner must already belong to this workspace." });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx.update(communitiesTable).set({ ownerId: targetUserId }).where(eq(communitiesTable.id, communityId));
+    await tx.delete(userRolesTable).where(and(
+      eq(userRolesTable.userId, userId),
+      eq(userRolesTable.communityId, communityId),
+      eq(userRolesTable.role, "workspace_owner"),
+    ));
+    await tx.insert(userRolesTable).values({
+      userId,
+      role: "workspace_admin",
+      scopeType: "community",
+      communityId,
+      grantedBy: userId,
+    }).onConflictDoNothing();
+    await tx.delete(userRolesTable).where(and(
+      eq(userRolesTable.userId, targetUserId),
+      eq(userRolesTable.communityId, communityId),
+      eq(userRolesTable.role, "workspace_owner"),
+    ));
+    await tx.insert(userRolesTable).values({
+      userId: targetUserId,
+      role: "workspace_owner",
+      scopeType: "community",
+      communityId,
+      grantedBy: userId,
+    });
+  });
+  await writeCommunityAudit(userId, "transferred_workspace_ownership", communityId, {
+    resourceType: "workspace",
+    resourceId: communityId,
+    targetId: targetUserId,
+    details: `${userId} → ${targetUserId}`,
+  });
+  res.json({ ok: true, communityId, ownerId: targetUserId });
 });
 
 router.post("/communities/:communityId/policies", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
