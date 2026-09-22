@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, asc, desc, eq, inArray, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, notInArray } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
@@ -8,6 +8,7 @@ import {
   announcementReadReceiptsTable,
   categoriesTable,
   channelMembersTable,
+  channelJoinRequestsTable,
   channelsTable,
   communitiesTable,
   communityMembersTable,
@@ -510,6 +511,61 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
     })),
     canManage,
+  });
+});
+
+router.get("/communities/:communityId/dashboard", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "Workspace manager permission required." });
+    return;
+  }
+  const now = new Date();
+  const weekAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const [members, channels, tasks, announcements, pendingRequests, activity] = await Promise.all([
+    db.select({ userId: communityMembersTable.userId, status: usersTable.status }).from(communityMembersTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+      .where(eq(communityMembersTable.communityId, communityId)),
+    db.select({ id: channelsTable.id }).from(channelsTable).where(eq(channelsTable.communityId, communityId)),
+    db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, communityId)),
+    db.select({ status: serverAnnouncementsTable.status, scheduledAt: serverAnnouncementsTable.scheduledAt, expiresAt: serverAnnouncementsTable.expiresAt })
+      .from(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.communityId, communityId)),
+    db.select({ id: channelJoinRequestsTable.id }).from(channelJoinRequestsTable)
+      .innerJoin(channelsTable, eq(channelsTable.id, channelJoinRequestsTable.channelId))
+      .where(and(eq(channelsTable.communityId, communityId), eq(channelJoinRequestsTable.status, "pending"))),
+    db.select({
+      id: adminAuditLogsTable.id,
+      action: adminAuditLogsTable.action,
+      details: adminAuditLogsTable.details,
+      actor: adminAuditLogsTable.actorDisplayName,
+      createdAt: adminAuditLogsTable.createdAt,
+    }).from(adminAuditLogsTable)
+      .where(eq(adminAuditLogsTable.targetId, String(communityId)))
+      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+      .limit(12),
+  ]);
+  const openTasks = tasks.filter((task) => !["completed", "cancelled"].includes(task.status));
+  const dueThisWeek = openTasks.filter((task) => task.dueDate && task.dueDate >= now && task.dueDate <= weekAhead);
+  const overdue = openTasks.filter((task) => task.dueDate && task.dueDate < now);
+  const currentAnnouncements = announcements.filter((announcement) => announcement.status === "published"
+    && (!announcement.scheduledAt || announcement.scheduledAt <= now)
+    && (!announcement.expiresAt || announcement.expiresAt > now));
+  res.json({
+    stats: {
+      employees: members.length,
+      online: members.filter((member) => member.status === "online").length,
+      channels: channels.length,
+      openTasks: openTasks.length,
+      announcements: currentAnnouncements.length,
+      pendingRequests: pendingRequests.length,
+    },
+    tasks: {
+      open: openTasks.length,
+      dueThisWeek: dueThisWeek.length,
+      overdue: overdue.length,
+    },
+    recentActivity: activity,
   });
 });
 

@@ -1288,6 +1288,42 @@ type CommunityDetail = {
   canManage: boolean;
 };
 
+type BusinessDashboardPayload = {
+  stats: { employees: number; online: number; channels: number; openTasks: number; announcements: number; pendingRequests: number };
+  tasks: { open: number; dueThisWeek: number; overdue: number };
+  recentActivity: Array<{ id: number; action: string; details: string | null; actor: string | null; createdAt: string }>;
+};
+
+function BusinessDashboard({ detail, setError }: { detail: CommunityDetail; setError: (value: string) => void }) {
+  const [dashboard, setDashboard] = useState<BusinessDashboardPayload | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api<BusinessDashboardPayload>(`/communities/${detail.community.id}/dashboard`).then((next) => {
+      if (!cancelled) setDashboard(next);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load business dashboard");
+    });
+    return () => { cancelled = true; };
+  }, [detail.community.id]);
+  if (!dashboard) return <section className="h-52 animate-pulse rounded-xl border border-border bg-card" />;
+  const statCards = [
+    ["Employees", dashboard.stats.employees, `${dashboard.stats.online} online`],
+    ["Online", dashboard.stats.online, "active now"],
+    ["Channels", dashboard.stats.channels, "workspace rooms"],
+    ["Open tasks", dashboard.stats.openTasks, "not completed"],
+    ["Announcements", dashboard.stats.announcements, "currently active"],
+    ["Pending requests", dashboard.stats.pendingRequests, "awaiting review"],
+  ];
+  return <section className="space-y-5">
+    <div><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">business overview</p><h2 className="mt-2 font-mono text-xl font-bold">Operational dashboard</h2><p className="mt-1 text-sm text-muted-foreground">A live view of the people, work, communication, and requests that need attention.</p></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{statCards.map(([label, value, caption]) => <div key={label} className="rounded-xl border border-border bg-card p-4"><div className="flex items-start justify-between gap-3"><p className="font-mono text-[10px] uppercase tracking-[.13em] text-muted-foreground">{label}</p><span className="h-2 w-2 rounded-full bg-chart-4" /></div><p className="mt-5 font-mono text-3xl font-bold">{value}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{caption}</p></div>)}</div>
+    <div className="grid gap-5 xl:grid-cols-[.9fr_1.1fr]">
+      <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">tasks</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Workload and urgency</p></div><div className="grid grid-cols-3 divide-x divide-border"><div className="p-5"><p className="font-mono text-2xl font-bold">{dashboard.tasks.open}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">open</p></div><div className="p-5"><p className="font-mono text-2xl font-bold text-primary">{dashboard.tasks.dueThisWeek}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">due this week</p></div><div className="p-5"><p className="font-mono text-2xl font-bold text-destructive">{dashboard.tasks.overdue}</p><p className="mt-1 font-mono text-[9px] uppercase text-muted-foreground">overdue</p></div></div></section>
+      <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">recent activity</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Latest workspace operations</p></div><div className="divide-y divide-border">{dashboard.recentActivity.length === 0 ? <p className="p-5 font-mono text-xs text-muted-foreground">No workspace activity recorded yet.</p> : dashboard.recentActivity.slice(0, 6).map((item) => <div key={item.id} className="flex items-start gap-3 px-5 py-3"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /><div className="min-w-0 flex-1"><p className="font-mono text-xs">{item.action.replaceAll("_", " ")}</p><p className="mt-1 truncate text-[10px] text-muted-foreground">{item.details || "Workspace operation"} · {item.actor || "System"}</p></div><time className="shrink-0 font-mono text-[9px] text-muted-foreground">{timeLabel(item.createdAt)}</time></div>)}</div></section>
+    </div>
+  </section>;
+}
+
 type BusinessDocument = {
   id: number;
   folderId: number | null;
