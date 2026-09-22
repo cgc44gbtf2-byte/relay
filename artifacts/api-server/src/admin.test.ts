@@ -1832,6 +1832,85 @@ describe("admin access controls", () => {
     assert.equal(result.rows[0]?.role, "admin");
   });
 
+  test("reports channel member counts without loading every membership row", async () => {
+    const ownerSession = await createTestSession("channel_count_owner");
+    const memberSession = await createTestSession("channel_count_member");
+    const channelIds: number[] = [];
+
+    try {
+      const memberProfile = await apiRequest(memberSession, "/me");
+      assert.equal(memberProfile.status, 200, JSON.stringify(memberProfile));
+
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `counted-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Member count aggregation",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const countedChannelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof countedChannelId, "number");
+      channelIds.push(countedChannelId as number);
+
+      const zeroMemberChannel = await pool.query<{ id: number }>(
+        `INSERT INTO irc_channels (name, topic, owner_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [
+          `empty-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          "Zero member count aggregation",
+          ownerSession.userId,
+        ],
+      );
+      const zeroMemberChannelId = zeroMemberChannel.rows[0]?.id;
+      assert.equal(typeof zeroMemberChannelId, "number");
+      channelIds.push(zeroMemberChannelId);
+
+      const initialList = await apiRequest(ownerSession, "/channels");
+      assert.equal(initialList.status, 200, JSON.stringify(initialList));
+      assert.ok(Array.isArray(initialList.body));
+      const initialCounted = initialList.body.find(
+        (channel): channel is { id: number; memberCount: number } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { id?: unknown }).id === countedChannelId,
+      );
+      const initialEmpty = initialList.body.find(
+        (channel): channel is { id: number; memberCount: number } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { id?: unknown }).id === zeroMemberChannelId,
+      );
+      assert.equal(initialCounted?.memberCount, 1);
+      assert.equal(initialEmpty?.memberCount, 0);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [countedChannelId, memberSession.userId],
+      );
+
+      const updatedList = await apiRequest(ownerSession, "/channels");
+      assert.equal(updatedList.status, 200, JSON.stringify(updatedList));
+      assert.ok(Array.isArray(updatedList.body));
+      const updatedCounted = updatedList.body.find(
+        (channel): channel is { id: number; memberCount: number } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { id?: unknown }).id === countedChannelId,
+      );
+      assert.equal(updatedCounted?.memberCount, 2);
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        memberSession.userId,
+      ]);
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");
