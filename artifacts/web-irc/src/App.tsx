@@ -43,7 +43,7 @@ import {
 } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
-import { Route, Router as WouterRouter, Switch, Redirect, useLocation } from "wouter";
+import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
 
@@ -364,6 +364,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
 function ChatApp() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const [, setLocation] = useLocation();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -647,10 +648,17 @@ function ChatApp() {
   };
   const markRead = async (notice: Notification) => {
     if (!notice.readAt) {
-      await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
-      setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
+      try {
+        await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
+        setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
+      } catch {
+        // Opening the notification should still work if marking it read fails.
+      }
     }
-    if (notice.actionUrl) window.location.href = `${basePath}${notice.actionUrl}`;
+    setPanel(null);
+    if (notice.actionUrl?.startsWith("/")) {
+      setLocation(notice.actionUrl);
+    }
   };
   const editTopic = async () => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
@@ -2447,6 +2455,9 @@ function OnboardingPage() {
 }
 
 function CommunityConsole() {
+  const [, routeParams] = useRoute<{ id?: string }>("/communities/:id");
+  const parsedCommunityId = routeParams?.id ? Number(routeParams.id) : NaN;
+  const requestedCommunityId = Number.isSafeInteger(parsedCommunityId) && parsedCommunityId > 0 ? parsedCommunityId : null;
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [communities, setCommunities] = useState<CommunitySummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -2491,7 +2502,7 @@ function CommunityConsole() {
     ]);
     setPermissions(nextPermissions);
     setCommunities(nextCommunities);
-    setSelectedId((current) => current ?? nextCommunities[0]?.id ?? null);
+    setSelectedId((current) => current ?? requestedCommunityId ?? nextCommunities[0]?.id ?? null);
   };
   const loadDetail = async (id: number) => {
     const next = await api<CommunityDetail>(`/communities/${id}?view=summary`);
@@ -2509,7 +2520,7 @@ function CommunityConsole() {
   };
   useEffect(() => {
     loadCommunities().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load communities")).finally(() => setLoading(false));
-  }, []);
+  }, [requestedCommunityId]);
   useEffect(() => {
     if (selectedId === null) {
       setDetail(null);
@@ -2695,7 +2706,7 @@ function CommunityConsole() {
 }
 
 function AuthRoutes() {
-  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
+  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities/:id"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
 }
 
 function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
