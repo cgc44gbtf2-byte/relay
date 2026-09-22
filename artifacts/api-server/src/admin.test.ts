@@ -1082,6 +1082,36 @@ describe("admin access controls", () => {
     }
   });
 
+  test("reports exact user statistics from the admin overview", async () => {
+    const expected = (
+      await pool.query<{
+        users: number;
+        online: number;
+        admins: number;
+      }>(
+        `SELECT
+           count(*)::int AS users,
+           count(*) FILTER (WHERE status = 'online')::int AS online,
+           count(*) FILTER (WHERE role = 'admin')::int AS admins
+         FROM irc_users`,
+      )
+    ).rows[0];
+
+    const response = await apiRequest(adminSession, "/admin/overview");
+    assert.equal(response.status, 200, JSON.stringify(response));
+    assert.ok(response.body && typeof response.body === "object");
+    const stats = (response.body as { stats?: unknown }).stats;
+    assert.ok(stats && typeof stats === "object");
+    assert.deepEqual(
+      {
+        users: (stats as { users?: unknown }).users,
+        online: (stats as { online?: unknown }).online,
+        admins: (stats as { admins?: unknown }).admins,
+      },
+      expected,
+    );
+  });
+
   test("keeps the original actor identity and label after the admin is renamed", async () => {
     const beforeRename = await apiRequest(adminSession, "/me");
     assert.equal(beforeRename.status, 200);

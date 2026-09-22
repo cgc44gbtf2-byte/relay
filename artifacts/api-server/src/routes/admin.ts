@@ -151,21 +151,23 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   const activityActor = typeof req.query.activityActor === "string" ? req.query.activityActor.trim() : "";
   const activityAction = typeof req.query.activityAction === "string" ? req.query.activityAction.trim() : "";
   const [
-    [userCount],
+    [userStats],
     [channelCount],
     [messageCount],
-    [onlineCount],
-    [adminCount],
     users,
     channels,
     recentMessages,
     activity,
   ] = await Promise.all([
-    db.select({ value: count() }).from(usersTable),
+    db
+      .select({
+        users: count(),
+        online: sql<number>`count(*) filter (where ${usersTable.status} = ${"online"})`,
+        admins: sql<number>`count(*) filter (where ${usersTable.role} = ${"admin"})`,
+      })
+      .from(usersTable),
     db.select({ value: count() }).from(channelsTable),
     db.select({ value: count() }).from(messagesTable),
-    db.select({ value: count() }).from(usersTable).where(eq(usersTable.status, "online")),
-    db.select({ value: count() }).from(usersTable).where(eq(usersTable.role, "admin")),
     db
       .select({
         id: usersTable.clerkId,
@@ -230,11 +232,11 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   if (hasMoreActivity) activity.pop();
   res.json({
     stats: {
-      users: Number(userCount?.value ?? 0),
+      users: Number(userStats?.users ?? 0),
       channels: Number(channelCount?.value ?? 0),
       messages: Number(messageCount?.value ?? 0),
-      online: Number(onlineCount?.value ?? 0),
-      admins: Number(adminCount?.value ?? 0),
+      online: Number(userStats?.online ?? 0),
+      admins: Number(userStats?.admins ?? 0),
     },
     users,
     channels,
