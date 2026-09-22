@@ -1,0 +1,302 @@
+Build a role-based permission system for my web-based IRC platform.
+
+The platform must have exactly four primary permission levels:
+
+1. ADMIN / DEVELOPER — Highest Permission
+2. MODERATOR
+3. COMMUNITY ADMIN
+4. MEMBER
+
+The permission system must be hierarchical but also scope-based. Higher roles should inherit the capabilities of lower roles, while Community Admin permissions are restricted to the communities, categories, and channels they are assigned to.
+
+PERMISSION LEVEL 1 — ADMIN / DEVELOPER
+
+This is the highest-level platform role.
+
+Admins/Developers can:
+
+* Access the entire platform
+* Manage any user
+* Modify, suspend, or delete users
+* Assign, remove, or change user roles
+* Create, modify, and delete any channel
+* Create, modify, and delete categories and communities
+* Access every community
+* Modify any community
+* Manage moderators and Community Admins
+* Manage platform-wide settings
+* Manage permissions
+* View system and moderation logs
+* Manage platform configuration
+* Push and manage application updates
+* Access developer/admin tools
+* Override lower-level permissions when necessary
+
+Admins/Developers have unrestricted access to the platform.
+
+PERMISSION LEVEL 2 — MODERATOR
+
+Moderators are responsible for platform and community moderation but do not have developer or platform configuration access.
+
+Moderators can:
+
+* View users
+* Moderate channels
+* Delete messages
+* Mute users
+* Kick users
+* Ban users where permitted
+* Unban users where permitted
+* Handle user reports
+* Review moderation logs
+* Enforce platform rules
+* Lock or restrict channels
+* Manage disruptive behavior
+
+Moderators cannot:
+
+* Change platform developer settings
+* Push application updates
+* Modify core platform configuration
+* Change Admin/Developer accounts
+* Access developer-only tools
+
+Moderator scope should be configurable so an Admin/Developer can make a moderator platform-wide or restrict them to specific communities.
+
+PERMISSION LEVEL 3 — COMMUNITY ADMIN
+
+A Community Admin manages their own assigned community, categories, and channels.
+
+A community could contain:
+
+* Multiple categories
+* Multiple channels
+* Community members
+* Community-specific roles
+* Community-specific rules
+* Community-specific settings
+
+Community Admins can:
+
+* Create channels inside their community
+* Edit channels inside their community
+* Delete channels inside their community
+* Manage channel topics
+* Manage channel descriptions
+* Manage community settings
+* Create community-specific roles
+* Manage community members
+* Mute community members
+* Kick community members
+* Ban community members from their community
+* Manage community rules
+* Create community announcements
+* Manage community events
+* Manage community-specific content and features where permitted
+
+Community Admins cannot:
+
+* Modify other communities
+* Modify platform-wide settings
+* Modify Admin/Developer accounts
+* Modify platform Developers
+* Change global permissions
+* Push application updates
+* Access developer tools
+* Manage communities they are not assigned to
+
+COMMUNITY SCOPE
+
+Community Admin permissions must be tied to specific community IDs.
+
+Example:
+
+User:
+John
+
+Role:
+Community Admin
+
+Assigned Communities:
+
+* Community A
+* Community B
+
+John can manage those communities but cannot manage:
+
+* Community C
+* Other users’ private communities
+* Platform settings
+
+MEMBER
+
+Members are standard users.
+
+Members can:
+
+* Join available channels
+* Leave channels
+* Send messages
+* Receive messages
+* Send direct messages
+* Change their nickname where allowed
+* Manage their own profile
+* Block users
+* Report users
+* View available communities
+* Participate in community-specific systems
+* Use commands available to normal members
+
+Members cannot:
+
+* Moderate other users
+* Manage channels unless specifically granted permission
+* Manage communities
+* Change roles
+* Access administrative settings
+
+PERMISSION ARCHITECTURE
+
+Do not rely solely on hard-coded role checks.
+
+Create a permission system that supports:
+
+* Role
+* Permission
+* Scope
+* Community ID
+* Category ID
+* Channel ID
+* User ID
+
+The system should support permission checks such as:
+
+canUserManageUser()
+canUserManageChannel()
+canUserManageCommunity()
+canUserDeleteMessage()
+canUserBanUser()
+canUserCreateChannel()
+canUserModifySettings()
+
+Permissions should be evaluated against both the user’s role and their scope.
+
+Example:
+
+ADMIN / DEVELOPER
+Scope: Entire Platform
+
+MODERATOR
+Scope: Platform or assigned communities
+
+COMMUNITY ADMIN
+Scope: Assigned communities/categories/channels
+
+MEMBER
+Scope: Own account and normal platform participation
+
+DATABASE STRUCTURE
+
+Create appropriate database tables/models for:
+
+* Users
+* Roles
+* Permissions
+* User Roles
+* Communities
+* Community Members
+* Community Admin Assignments
+* Categories
+* Channels
+* Channel Members
+* Moderation Actions
+* Audit Logs
+
+Every important administrative or moderation action should create an audit-log entry.
+
+Example:
+
+Admin John changed User Mike’s role from Member to Moderator.
+
+Audit Log:
+
+* Actor: John
+* Target: Mike
+* Action: ROLE_CHANGED
+* Previous Role: Member
+* New Role: Moderator
+* Timestamp
+* IP/session information if already supported by the application
+
+SECURITY REQUIREMENTS
+
+Never rely on frontend UI restrictions alone.
+
+Every protected action must be validated server-side.
+
+A user should never be able to gain additional permissions simply by modifying frontend requests, URLs, IDs, or API payloads.
+
+Prevent Community Admins from accessing resources outside their assigned scope.
+
+Prevent Moderators from accessing developer-only functionality.
+
+Prevent Members from calling administrative endpoints directly.
+
+ADMIN UI
+
+Create an administrative interface that clearly displays:
+
+User
+Role
+Permissions
+Scope
+Assigned Communities
+Assigned Categories
+Assigned Channels
+
+Admins/Developers should be able to:
+
+* Change roles
+* Assign communities
+* Remove community assignments
+* Grant/revoke permissions where supported
+* View audit logs
+* Manage users
+* Manage communities
+* Manage channels
+
+COMMUNITY ADMIN UI
+
+Community Admins should only see management tools for communities they control.
+
+For example:
+
+My Communities
+
+[Community Name]
+
+Channels
+Members
+Roles
+Rules
+Events
+Content
+Settings
+
+They should not see or access management controls for unrelated communities.
+
+IMPORTANT
+
+Keep the permission system modular because the platform will eventually support specialized communities such as:
+
+* Roleplay
+* Gaming
+* Anime
+* Developer communities
+* Private communities
+* Business communities
+* General interest communities
+
+The IRC chat system should remain separate from the permission and community systems so additional features can be added later without rewriting the core authentication and authorization system.
+
+Implement this cleanly using the existing Replit project’s technology stack and database. Do not replace existing functionality unnecessarily. Inspect the existing project structure first, then integrate the permission system into the current architecture.

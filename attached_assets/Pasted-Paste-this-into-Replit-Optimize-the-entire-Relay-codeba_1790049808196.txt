@@ -1,0 +1,375 @@
+Paste this into Replit:
+
+Optimize the entire Relay codebase before Release 2.
+IMPORTANT:
+- Do NOT add new user-facing features.
+- Do NOT redesign the UI.
+- Do NOT change existing business behavior unless required to fix a bug, security issue, or clear performance problem.
+- Preserve all existing API contracts and database behavior.
+- Preserve existing authentication, authorization, workspace isolation, and permission rules.
+- Make incremental changes.
+- Test every meaningful change.
+- Do not optimize blindly. Inspect the existing implementation first and optimize based on actual code and query patterns.
+- Do not remove functionality simply because it appears unused without verifying its purpose.
+Relay is a business communication and operations platform using:
+- React
+- TypeScript
+- Vite
+- Tailwind
+- Node.js
+- Express
+- WebSockets
+- Clerk
+- PostgreSQL
+- Drizzle ORM
+- Zod
+- Replit App Storage
+- pnpm monorepo
+OBJECTIVE:
+Perform a complete Release 1 optimization and hardening pass across the application.
+The goal is:
+SAME RELAY
++ faster
++ lower database load
++ smaller API responses
++ lower memory usage
++ fewer unnecessary frontend renders
++ cleaner code
++ stronger security
++ more reliable WebSockets
++ better error handling
++ better scalability
+= Release 1 production-ready foundation for Release 2.
+PHASE 1 — CODEBASE AUDIT
+First inspect the entire repository and identify:
+- Duplicate logic
+- Dead code
+- Unused imports
+- Unused dependencies
+- Repeated database queries
+- Repeated API requests
+- N+1 queries
+- Unbounded database queries
+- Large API payloads
+- Excessive WebSocket broadcasts
+- Unnecessary React renders
+- Large components
+- Repeated permission checks
+- Repeated authentication lookups
+- Memory/resource leaks
+- Weak error handling
+- Missing validation
+- Security-sensitive endpoints
+- Missing indexes
+- Inefficient joins
+- Missing pagination
+- Expensive admin queries
+- Expensive workspace queries
+- Inefficient message/channel queries
+- File/storage inefficiencies
+Create a prioritized optimization list internally before making changes.
+Prioritize:
+P0 = security, data isolation, correctness, crashes
+P1 = major performance/scalability problems
+P2 = meaningful code/resource improvements
+P3 = cleanup/refactoring with low immediate impact
+PHASE 2 — DATABASE OPTIMIZATION
+Audit every major database query.
+Look specifically for:
+- Missing indexes
+- Composite indexes
+- Foreign-key lookup performance
+- Workspace-scoped queries
+- Channel-scoped queries
+- User-scoped queries
+- Message queries
+- Notification queries
+- Task queries
+- Announcement queries
+- Document queries
+- Audit/activity queries
+- Employee queries
+- Department queries
+- Location queries
+- Team queries
+- Admin queries
+Check for N+1 patterns.
+Replace unnecessary repeated queries with efficient joins or batched queries where appropriate.
+Find queries returning more columns or rows than necessary.
+Add pagination anywhere a collection can grow indefinitely.
+Pay particular attention to:
+- Messages
+- Members
+- Employees
+- Notifications
+- Audit logs
+- Activity history
+- Tasks
+- Documents
+- Announcements
+- Workspace data
+- Admin data
+Do not blindly add indexes. Verify that each index supports an actual query pattern and avoid unnecessary duplicate indexes.
+Use EXPLAIN/EXPLAIN ANALYZE where appropriate in development to identify expensive queries.
+Verify migrations after database changes.
+PHASE 3 — API OPTIMIZATION
+Audit all Express routes.
+Look for:
+- Duplicate database calls
+- Duplicate authentication lookups
+- Duplicate permission checks
+- Excessive data returned
+- Unbounded collections
+- Missing pagination
+- Missing filtering
+- Unnecessary nested data
+- Repeated serialization
+- Expensive synchronous operations
+- Inefficient error handling
+Optimize workspace-detail endpoints especially.
+Workspace responses should only return the data required by that endpoint.
+Do not load entire collections when only counts, summaries, or limited records are required.
+Use pagination for potentially large collections.
+Make sure API responses remain backward compatible.
+Do not silently change response structures used by the frontend.
+PHASE 4 — AUTHORIZATION AND SECURITY
+Audit every protected endpoint.
+Verify:
+- Clerk authentication
+- Server-side authorization
+- Workspace isolation
+- Channel isolation
+- Private-channel access
+- Invite-only access
+- Role permissions
+- Custom permissions
+- Admin permissions
+- Moderator permissions
+- Suspended-user restrictions
+- WebSocket authorization
+- File-access authorization
+Look specifically for IDOR-style vulnerabilities where a user could access another workspace's resource by changing an ID.
+Every resource lookup involving a workspace should enforce workspace ownership/access at the server level.
+Do not rely on frontend permission checks for security.
+Audit all Zod validation.
+Verify:
+- Input length limits
+- Required fields
+- Enum validation
+- File metadata validation
+- IDs
+- Pagination parameters
+- Search parameters
+- User-generated content
+Check for excessive request sizes and abuse-prone endpoints.
+Add rate limiting where appropriate without breaking normal usage.
+PHASE 5 — WEBSOCKET OPTIMIZATION
+Audit the WebSocket implementation.
+Look for:
+- Excessive broadcasts
+- Duplicate events
+- Broadcasting events to users who do not need them
+- Duplicate connections
+- Stale connections
+- Memory leaks
+- Missing cleanup
+- Unnecessary presence updates
+- Unnecessary typing events
+- Excessive reconnection traffic
+- Missing authentication checks
+- Incorrect workspace/channel scoping
+Ensure events are only sent to the appropriate:
+- Workspace
+- Channel
+- User
+- Conversation
+Optimize typing indicators and presence updates so they do not generate unnecessary traffic.
+Ensure disconnected clients are fully cleaned up.
+Verify WebSocket authentication remains server-side.
+PHASE 6 — FRONTEND OPTIMIZATION
+Audit React components.
+Look for:
+- Unnecessary renders
+- Repeated API calls
+- Duplicate state
+- Excessive context updates
+- Large component trees
+- Large lists
+- Expensive derived calculations
+- Unnecessary effects
+- Missing cleanup
+- Repeated WebSocket subscriptions
+- Duplicate event listeners
+Pay special attention to:
+- Message lists
+- Channel lists
+- Member lists
+- Employee directory
+- Notifications
+- Workspace dashboard
+- Admin console
+- Audit/activity tables
+Use pagination or virtualization where appropriate.
+Do not introduce complexity unless it provides a measurable benefit.
+Do not overuse React.memo, useMemo, or useCallback. Only use them where they address an actual render/performance problem.
+PHASE 7 — FILE STORAGE
+Audit file uploads and attachments.
+Verify:
+- File size limits
+- File type validation
+- Permission checks
+- Signed URL handling
+- Workspace isolation
+- Channel/message access
+- Attachment metadata
+- Unused attachment handling
+Avoid loading file contents unnecessarily.
+Do not expose private object-storage URLs.
+Verify users cannot access another workspace's files by manipulating IDs or URLs.
+PHASE 8 — NOTIFICATIONS
+Audit notification generation and retrieval.
+Look for:
+- Duplicate notifications
+- Excessive notification creation
+- Unbounded notification queries
+- Missing pagination
+- Repeated database writes
+- Notifications generated for irrelevant users
+Ensure notification queries are indexed and paginated.
+PHASE 9 — AUDIT / ACTIVITY SYSTEM
+Optimize the audit system.
+Audit records should remain reliable and immutable where appropriate.
+Optimize:
+- Inserts
+- Filtering
+- Pagination
+- User filtering
+- Workspace filtering
+- Department filtering
+- Location filtering
+- Date-range filtering
+- Resource filtering
+Make sure audit history cannot be modified by ordinary users.
+Avoid loading the entire audit history into memory.
+PHASE 10 — ERROR HANDLING
+Standardize backend error handling.
+Look for:
+- Unhandled promises
+- Missing try/catch where necessary
+- Leaked database errors
+- Sensitive error messages
+- Inconsistent status codes
+- Frontend errors that silently fail
+- WebSocket errors that are not handled
+Do not expose:
+- Database internals
+- SQL errors
+- Secrets
+- Authentication internals
+- Stack traces
+- Sensitive implementation details
+Use appropriate production-safe error responses.
+PHASE 11 — RESOURCE AND MEMORY AUDIT
+Look for:
+- Event listeners that are never removed
+- Timers that are never cleared
+- WebSocket connections that are never cleaned up
+- Database connections that are not released
+- Growing in-memory collections
+- Unbounded caches
+- Large objects retained unnecessarily
+- Background processes that continue after shutdown
+Verify graceful server shutdown.
+PHASE 12 — TYPESCRIPT AND CODE QUALITY
+Improve code quality without unnecessary rewrites.
+Find:
+- any
+- unsafe type assertions
+- duplicated types
+- inconsistent interfaces
+- unreachable code
+- dead code
+- duplicated utilities
+- duplicated permission logic
+- duplicated validation
+- inconsistent naming
+Prefer shared utilities where the same business logic is currently duplicated.
+Do not perform a massive architectural rewrite.
+PHASE 13 — BUILD AND DEPLOYMENT
+Verify:
+- TypeScript typecheck
+- API build
+- Web build
+- Production build
+- Database migrations
+- Environment variables
+- Replit workflows
+- API startup
+- WebSocket startup
+- Graceful shutdown
+- Production configuration
+Remove unnecessary build dependencies only after verifying they are not required.
+PHASE 14 — TESTING
+After optimization, run:
+- Typecheck
+- API tests
+- Frontend tests if available
+- Database checks
+- Authentication checks
+- Authorization checks
+- Workspace isolation tests
+- Channel permission tests
+- WebSocket tests
+- File-access tests
+- Admin permission tests
+- Build validation
+Specifically test:
+1. User cannot access another workspace's data.
+2. User cannot access private channels without permission.
+3. Suspended users cannot perform protected actions.
+4. Workspace admins cannot perform platform-admin actions.
+5. Members cannot perform moderator/admin actions.
+6. WebSocket events remain properly scoped.
+7. Private files remain private.
+8. Audit records remain protected.
+9. Pagination works correctly.
+10. Existing frontend functionality still works.
+PHASE 15 — PERFORMANCE REGRESSION CHECK
+Before finishing, identify the most expensive remaining:
+- Database queries
+- API endpoints
+- WebSocket operations
+- Frontend components
+Compare the optimized implementation against the original implementation where measurable.
+Do not claim performance improvements without evidence.
+FINAL VERIFICATION
+Run the complete validation suite:
+- Database schema/migrations
+- TypeScript typecheck
+- API build
+- Web build
+- Tests
+- Security checks
+- Workspace isolation checks
+- Permission checks
+- WebSocket checks
+- File-access checks
+- Production startup
+- Replit workflows
+If a change introduces a regression, fix it before continuing.
+IMPORTANT RELEASE RULE:
+Do not begin Release 2 feature development during this optimization pass.
+Release 1 should finish with a stable technical foundation.
+At the end, provide a concise report containing:
+1. Optimizations completed
+2. Security issues fixed
+3. Database improvements
+4. API improvements
+5. WebSocket improvements
+6. Frontend improvements
+7. Code cleanup
+8. Tests performed
+9. Build/deployment verification
+10. Remaining technical debt
+11. Any optimization that was intentionally NOT performed and why
+Do not modify or remove existing business functionality simply for the sake of code reduction.
