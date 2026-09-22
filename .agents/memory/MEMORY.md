@@ -1,0 +1,9 @@
+- [Drizzle constraint errors](drizzle-constraint-errors.md) — inspect wrapped causes when translating PostgreSQL constraint failures into HTTP responses.
+- [Admin UI maintainability](admin-ui-maintainability.md) — keep large operations surfaces split into focused components so incremental edits stay safe.
+- [API test database](api-test-database.md) — admin integration tests require a dedicated disposable TEST_DATABASE_URL before the runner starts.
+- [Artifact build environment](artifact-build-environment.md) — Vite artifact builds require explicit PORT and BASE_PATH values outside managed workflows.
+- [API cleanup bundling](api-cleanup-bundling.md) — cleanup builds using the pino plugin need an output directory and a separate CLI entry point.
+- [App Storage sidecar](storage-sidecar.md) — use the local signer with normalized object paths when root-level SDK installation is blocked.
+- [Workspace type declarations](workspace-type-declarations.md) — rebuild referenced library declarations after shared schema changes before checking dependent packages.
+- [Business workspace isolation](business-workspace-isolation.md) — legacy IRC endpoints default global; every business-facing read and interaction needs an explicit workspace check.
+- [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.

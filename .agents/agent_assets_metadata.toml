@@ -1,0 +1,30 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "AzAZ2E3iTva7n_1BTlUNA"
+uri = "file://screenshots/landing-features-desktop.jpg"
+type = "image"
+title = "Landing page features — desktop"
+description = "Desktop snapshot of the Relay landing page with separate Business and Developer feature sections."
+logical_id = "8fcdcec5-9944-4221-8eab-7fab2ebdf7ed"
+content_hash = "sha256:9cc4c237f21815105b96938d7dbe4658038578203b60d09dfbd70ce98e351aed"
+size = 130990
+mtime_ms = 1790041251049
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/8fcdcec5-9944-4221-8eab-7fab2ebdf7ed/14f17c93-ecb3-4bdc-90dd-fa5118dbcbe9"
+storage_version_token = "1790041257651594"
+content_type = "image/jpeg"
+
+[[outputs]]
+id = "QV_wBKvPUdjj20ExF8_2o"
+uri = "file://screenshots/landing-features-mobile.jpg"
+type = "image"
+title = "Landing page features — mobile"
+description = "Mobile snapshot of the Relay landing page with responsive Business and Developer feature sections."
+logical_id = "15c819c6-6dbb-4cd8-a2bd-92162dd7fb78"
+content_hash = "sha256:5a060e7275aa956acd0069444af6eaf915f11ec8886c14013eacc0846036a807"
+size = 54840
+mtime_ms = 1790041253154
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/15c819c6-6dbb-4cd8-a2bd-92162dd7fb78/258166e7-8054-45c4-a1a3-5e852e2d1109"
+storage_version_token = "1790041258259310"
+content_type = "image/jpeg"
