@@ -215,52 +215,82 @@ async function ensureTaskDeadlineNotifications(userId: string): Promise<void> {
   }
 }
 
-async function messageView(message: typeof messagesTable.$inferSelect, viewerId?: string) {
-  const attachments = await db
-    .select({
+async function messageViews(messages: typeof messagesTable.$inferSelect[], viewerId?: string) {
+  if (messages.length === 0) return [];
+  const messageIds = messages.map((message) => message.id);
+  const senderIds = [...new Set(messages.map((message) => message.senderId))];
+  const [senders, attachments, reactions, reactedRows] = await Promise.all([
+    db.select({
+      id: usersTable.clerkId,
+      username: usersTable.username,
+      displayName: usersTable.displayName,
+      avatarUrl: usersTable.avatarUrl,
+      status: usersTable.status,
+    }).from(usersTable).where(inArray(usersTable.clerkId, senderIds)),
+    db.select({
+      messageId: messageAttachmentsTable.messageId,
       id: messageAttachmentsTable.id,
       fileName: messageAttachmentsTable.fileName,
       contentType: messageAttachmentsTable.contentType,
       fileSize: messageAttachmentsTable.fileSize,
-    })
-    .from(messageAttachmentsTable)
-    .where(eq(messageAttachmentsTable.messageId, message.id));
-  const reactions = await db
-    .select({
+    }).from(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, messageIds)),
+    db.select({
+      messageId: messageReactionsTable.messageId,
       emoji: messageReactionsTable.emoji,
       count: sql<number>`count(*)`,
-    })
-    .from(messageReactionsTable)
-    .where(eq(messageReactionsTable.messageId, message.id))
-    .groupBy(messageReactionsTable.emoji);
-  const reacted = viewerId
-    ? await db.query.messageReactionsTable.findFirst({
-      where: and(
-        eq(messageReactionsTable.messageId, message.id),
+    }).from(messageReactionsTable)
+      .where(inArray(messageReactionsTable.messageId, messageIds))
+      .groupBy(messageReactionsTable.messageId, messageReactionsTable.emoji),
+    viewerId
+      ? db.select({
+        messageId: messageReactionsTable.messageId,
+        emoji: messageReactionsTable.emoji,
+      }).from(messageReactionsTable).where(and(
+        inArray(messageReactionsTable.messageId, messageIds),
         eq(messageReactionsTable.userId, viewerId),
-      ),
-    })
-    : null;
-  return {
+      ))
+      : Promise.resolve([]),
+  ]);
+  const sendersById = new Map(senders.map((sender) => [sender.id, sender]));
+  const attachmentsByMessage = new Map<string, typeof attachments[number][]>();
+  for (const attachment of attachments) {
+    const list = attachmentsByMessage.get(attachment.messageId) ?? [];
+    list.push(attachment);
+    attachmentsByMessage.set(attachment.messageId, list);
+  }
+  const reactionsByMessage = new Map<string, typeof reactions[number][]>();
+  for (const reaction of reactions) {
+    const list = reactionsByMessage.get(reaction.messageId) ?? [];
+    list.push(reaction);
+    reactionsByMessage.set(reaction.messageId, list);
+  }
+  const reactedByMessage = new Set(reactedRows.map((reaction) => `${reaction.messageId}:${reaction.emoji}`));
+  return messages.map((message) => ({
     id: message.id,
     channelId: message.channelId,
     threadKey: message.threadKey,
     body: message.body,
     kind: message.kind,
     createdAt: message.createdAt,
-    sender: await publicUser(message.senderId),
+    sender: sendersById.get(message.senderId) ?? null,
     recipientId: message.recipientId,
     deletedAt: message.deletedAt,
-    reactions: reactions.map((reaction) => ({
+    reactions: (reactionsByMessage.get(message.id) ?? []).map((reaction) => ({
       emoji: reaction.emoji,
       count: Number(reaction.count),
-      reacted: reaction.emoji === reacted?.emoji,
+      reacted: reactedByMessage.has(`${message.id}:${reaction.emoji}`),
     })),
-    attachments: attachments.map((attachment) => ({
+    attachments: (attachmentsByMessage.get(message.id) ?? []).map(({ messageId: _messageId, ...attachment }) => ({
       ...attachment,
       url: `/api/attachments/${attachment.id}`,
     })),
-  };
+  }));
+}
+
+async function messageView(message: typeof messagesTable.$inferSelect, viewerId?: string) {
+  const [view] = await messageViews([message], viewerId);
+  if (!view) throw new Error("Message view could not be created.");
+  return view;
 }
 
 router.get("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -676,7 +706,7 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
     eq(messagesTable.channelId, channel.id),
     query ? ilike(messagesTable.body, `%${query}%`) : undefined,
   )).orderBy(desc(messagesTable.createdAt)).limit(100);
-  res.json({ channel: { ...channel, passwordHash: undefined }, messages: await Promise.all(rows.reverse().map((row) => messageView(row, userId))) });
+  res.json({ channel: { ...channel, passwordHash: undefined }, messages: await messageViews(rows.reverse(), userId) });
 });
 
 router.post("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1005,7 +1035,7 @@ router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest
   }
   const key = threadKey(userId, peerId);
   const rows = await db.select().from(messagesTable).where(eq(messagesTable.threadKey, key)).orderBy(asc(messagesTable.createdAt)).limit(100);
-  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await Promise.all(rows.map((row) => messageView(row, userId))) });
+  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await messageViews(rows, userId) });
 });
 
 router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1061,7 +1091,7 @@ router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, re
     ilike(messagesTable.body, `%${q}%`),
     messageScope,
   )).orderBy(desc(messagesTable.createdAt)).limit(100);
-  res.json(await Promise.all(rows.map((row) => messageView(row, userId))));
+  res.json(await messageViews(rows, userId));
 });
 
 router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

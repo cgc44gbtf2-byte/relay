@@ -432,6 +432,8 @@ export const messagesTable = pgTable("irc_messages", {
 }, (table) => [
   index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt),
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
+  index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
+  index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt),
 ]);
 
 export const messageAttachmentsTable = pgTable("irc_message_attachments", {
@@ -443,7 +445,9 @@ export const messageAttachmentsTable = pgTable("irc_message_attachments", {
   contentType: text("content_type").notNull(),
   fileSize: integer("file_size").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("irc_message_attachments_message_idx").on(table.messageId),
+]);
 
 export const messageReactionsTable = pgTable(
   "irc_message_reactions",
