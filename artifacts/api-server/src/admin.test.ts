@@ -7,6 +7,7 @@ import { WebSocket } from "ws";
 import { pool } from "@workspace/db";
 import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
+import { hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
 type TestSession = {
@@ -1830,6 +1831,107 @@ describe("admin access controls", () => {
       [adminSession.userId],
     );
     assert.equal(result.rows[0]?.role, "admin");
+  });
+
+  test("batches custom-role permission checks without crossing workspace scopes", async () => {
+    const roleUser = await createTestSession("custom_role_batch");
+    const roleSuffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const allowingRole = `custom_allow_${roleSuffix}`;
+    const denyingRole = `custom_deny_${roleSuffix}`;
+    const communityIds: number[] = [];
+
+    try {
+      const profile = await apiRequest(roleUser, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+
+      const catalog = await apiRequest(adminSession, "/permissions/catalog");
+      assert.equal(catalog.status, 200, JSON.stringify(catalog));
+
+      const communities = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, is_private)
+         VALUES
+           ($1, $2, $5, true),
+           ($3, $4, $5, true)
+         RETURNING id`,
+        [
+          `Allowed ${roleSuffix}`,
+          `allowed-${roleSuffix}`,
+          `Denied ${roleSuffix}`,
+          `denied-${roleSuffix}`,
+          adminSession.userId,
+        ],
+      );
+      communityIds.push(...communities.rows.map(({ id }) => id));
+      assert.equal(communityIds.length, 2);
+
+      await pool.query(
+        `INSERT INTO irc_custom_roles
+           (key, label, scope_type, created_by)
+         VALUES
+           ($1, 'Allows business view', 'community', $3),
+           ($2, 'Does not allow business view', 'community', $3)`,
+        [allowingRole, denyingRole, adminSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_role_permissions (role, permission_id)
+         SELECT $1, id
+         FROM irc_permission_definitions
+         WHERE key = 'view_business'`,
+        [allowingRole],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES
+           ($1, $2, 'community', $4, $5),
+           ($1, $3, 'community', $4, $5)`,
+        [
+          roleUser.userId,
+          allowingRole,
+          denyingRole,
+          communityIds[0],
+          adminSession.userId,
+        ],
+      );
+
+      assert.equal(
+        await hasPermission(roleUser.userId, "view_business", {
+          communityId: communityIds[0],
+        }),
+        true,
+      );
+      assert.equal(
+        await hasPermission(roleUser.userId, "view_business", {
+          communityId: communityIds[1],
+        }),
+        false,
+      );
+      assert.equal(
+        await hasPermission(roleUser.userId, "manage_community", {
+          communityId: communityIds[0],
+        }),
+        false,
+      );
+    } finally {
+      await pool.query(
+        "DELETE FROM irc_user_roles WHERE role = ANY($1::text[])",
+        [[allowingRole, denyingRole]],
+      );
+      await pool.query(
+        "DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])",
+        [[allowingRole, denyingRole]],
+      );
+      await pool.query(
+        "DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])",
+        [[allowingRole, denyingRole]],
+      );
+      if (communityIds.length) {
+        await pool.query(
+          "DELETE FROM irc_communities WHERE id = ANY($1::int[])",
+          [communityIds],
+        );
+      }
+    }
   });
 
   test("reports channel member counts without loading every membership row", async () => {
