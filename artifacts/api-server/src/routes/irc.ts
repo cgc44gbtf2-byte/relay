@@ -1286,7 +1286,11 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
 });
 
 router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
-  await db.update(notificationsTable).set({ readAt: new Date() }).where(and(eq(notificationsTable.id, Number(param(req, "id"))), eq(notificationsTable.userId, getUserId(req))));
+  const userId = getUserId(req);
+  const notificationId = Number(param(req, "id"));
+  const readAt = new Date();
+  await db.update(notificationsTable).set({ readAt }).where(and(eq(notificationsTable.id, notificationId), eq(notificationsTable.userId, userId)));
+  wsHub.broadcastUser(userId, { type: "notification_read", notificationId, readAt });
   res.json({ ok: true });
 });
 
