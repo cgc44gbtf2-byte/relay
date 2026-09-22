@@ -150,75 +150,82 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   }
   const activityActor = typeof req.query.activityActor === "string" ? req.query.activityActor.trim() : "";
   const activityAction = typeof req.query.activityAction === "string" ? req.query.activityAction.trim() : "";
-  const [[userCount], [channelCount], [messageCount], [onlineCount]] = await Promise.all([
+  const [
+    [userCount],
+    [channelCount],
+    [messageCount],
+    [onlineCount],
+    [adminCount],
+    users,
+    channels,
+    recentMessages,
+    activity,
+  ] = await Promise.all([
     db.select({ value: count() }).from(usersTable),
     db.select({ value: count() }).from(channelsTable),
     db.select({ value: count() }).from(messagesTable),
     db.select({ value: count() }).from(usersTable).where(eq(usersTable.status, "online")),
+    db.select({ value: count() }).from(usersTable).where(eq(usersTable.role, "admin")),
+    db
+      .select({
+        id: usersTable.clerkId,
+        username: usersTable.username,
+        displayName: usersTable.displayName,
+        role: usersTable.role,
+        status: usersTable.status,
+        createdAt: usersTable.createdAt,
+        lastSeenAt: usersTable.lastSeenAt,
+        accountStatus: usersTable.accountStatus,
+      })
+      .from(usersTable)
+      .orderBy(desc(usersTable.createdAt))
+      .limit(50),
+    db
+      .select({
+        id: channelsTable.id,
+        name: channelsTable.name,
+        topic: channelsTable.topic,
+        ownerId: channelsTable.ownerId,
+        createdAt: channelsTable.createdAt,
+        memberCount: count(channelMembersTable.userId),
+      })
+      .from(channelsTable)
+      .leftJoin(channelMembersTable, eq(channelMembersTable.channelId, channelsTable.id))
+      .groupBy(channelsTable.id)
+      .orderBy(asc(channelsTable.name)),
+    db
+      .select({
+        id: messagesTable.id,
+        body: messagesTable.body,
+        kind: messagesTable.kind,
+        createdAt: messagesTable.createdAt,
+        sender: usersTable.displayName,
+        channelId: messagesTable.channelId,
+      })
+      .from(messagesTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, messagesTable.senderId))
+      .orderBy(desc(messagesTable.createdAt))
+      .limit(12),
+    db
+      .select({
+        id: adminAuditLogsTable.id,
+        actorId: adminAuditLogsTable.actorId,
+        action: adminAuditLogsTable.action,
+        targetId: adminAuditLogsTable.targetId,
+        targetLabel: adminAuditLogsTable.targetLabel,
+        details: adminAuditLogsTable.details,
+        createdAt: adminAuditLogsTable.createdAt,
+        actor: adminAuditLogsTable.actorDisplayName,
+      })
+      .from(adminAuditLogsTable)
+      .where(and(
+        activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
+        activityAction ? ilike(adminAuditLogsTable.action, `%${activityAction}%`) : undefined,
+      ))
+      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+      .limit(activityLimit + 1)
+      .offset(activityOffset),
   ]);
-  const [adminCount] = await db
-    .select({ value: count() })
-    .from(usersTable)
-    .where(eq(usersTable.role, "admin"));
-  const users = await db
-    .select({
-      id: usersTable.clerkId,
-      username: usersTable.username,
-      displayName: usersTable.displayName,
-      role: usersTable.role,
-      status: usersTable.status,
-      createdAt: usersTable.createdAt,
-      lastSeenAt: usersTable.lastSeenAt,
-      accountStatus: usersTable.accountStatus,
-    })
-    .from(usersTable)
-    .orderBy(desc(usersTable.createdAt))
-    .limit(50);
-  const channels = await db
-    .select({
-      id: channelsTable.id,
-      name: channelsTable.name,
-      topic: channelsTable.topic,
-      ownerId: channelsTable.ownerId,
-      createdAt: channelsTable.createdAt,
-      memberCount: count(channelMembersTable.userId),
-    })
-    .from(channelsTable)
-    .leftJoin(channelMembersTable, eq(channelMembersTable.channelId, channelsTable.id))
-    .groupBy(channelsTable.id)
-    .orderBy(asc(channelsTable.name));
-  const recentMessages = await db
-    .select({
-      id: messagesTable.id,
-      body: messagesTable.body,
-      kind: messagesTable.kind,
-      createdAt: messagesTable.createdAt,
-      sender: usersTable.displayName,
-      channelId: messagesTable.channelId,
-    })
-    .from(messagesTable)
-    .innerJoin(usersTable, eq(usersTable.clerkId, messagesTable.senderId))
-    .orderBy(desc(messagesTable.createdAt))
-    .limit(12);
-  const activity = await db
-    .select({
-      id: adminAuditLogsTable.id,
-      actorId: adminAuditLogsTable.actorId,
-      action: adminAuditLogsTable.action,
-      targetId: adminAuditLogsTable.targetId,
-      targetLabel: adminAuditLogsTable.targetLabel,
-      details: adminAuditLogsTable.details,
-      createdAt: adminAuditLogsTable.createdAt,
-      actor: adminAuditLogsTable.actorDisplayName,
-    })
-    .from(adminAuditLogsTable)
-    .where(and(
-      activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
-      activityAction ? ilike(adminAuditLogsTable.action, `%${activityAction}%`) : undefined,
-    ))
-    .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
-    .limit(activityLimit + 1)
-    .offset(activityOffset);
   const hasMoreActivity = activity.length > activityLimit;
   if (hasMoreActivity) activity.pop();
   res.json({
