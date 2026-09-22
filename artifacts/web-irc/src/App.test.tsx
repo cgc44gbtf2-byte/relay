@@ -99,11 +99,21 @@ function installApi({
   fallbackChannels,
   owner = false,
   reconnectedMessages,
+  notifications = [],
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
   owner?: boolean;
   reconnectedMessages?: unknown[];
+  notifications?: Array<{
+    id: number;
+    type: string;
+    category: "general";
+    body: string;
+    createdAt: string;
+    readAt: string | null;
+    actionUrl: string | null;
+  }>;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = room(2, "#fallback-room");
@@ -121,7 +131,8 @@ function installApi({
       communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
     });
     if (url === "/api/categories") return jsonResponse([]);
-    if (url === "/api/notifications") return jsonResponse([]);
+    if (url === "/api/notifications" && method === "GET") return jsonResponse(notifications);
+    if (url.match(/^\/api\/notifications\/\d+\/read$/) && method === "POST") return jsonResponse({ ok: true });
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
@@ -338,5 +349,27 @@ describe("deleted room recovery", () => {
     expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
       { type: "subscribe", channelId: 1 },
     ]));
+  });
+
+  it("keeps notification navigation inside the signed-in workspace", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 7,
+        type: "task_updated",
+        category: "general",
+        body: "Open the workspace task",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: "/communities/1",
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    fireEvent.click(screen.getByRole("button", { name: /Open the workspace task/ }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/communities/1"));
+    expect(screen.queryByText("Open the workspace task")).toBeNull();
   });
 });
