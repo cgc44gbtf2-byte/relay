@@ -1310,6 +1310,19 @@ type CommunitySummary = {
   joined: boolean;
   canManage: boolean;
 };
+type OnboardingCommunity = {
+  id: number;
+  name: string;
+  slug: string;
+  onboardingStep: number;
+  joined: boolean;
+  canManage: boolean;
+};
+type OnboardingState = {
+  nextStep: "create" | "configure" | "invite" | "start";
+  ownerCommunity: OnboardingCommunity | null;
+  communities: OnboardingCommunity[];
+};
 type CommunityDetail = {
   community: CommunitySummary;
   members: Array<{ id: string; username: string; displayName: string; status: string; joinedAt: string }>;
@@ -2235,8 +2248,8 @@ function InvitationAcceptance() {
     setError("");
     try {
       await api(`/communities/${Number(communityId)}/invitations/accept`, { method: "POST", body: JSON.stringify({ token }) });
-      setNotice("Invitation accepted. Your employee profile is ready for onboarding.");
-      window.setTimeout(() => { window.location.assign(`${basePath}/communities`); }, 500);
+      setNotice("Invitation accepted. Your employee profile is ready.");
+      window.setTimeout(() => { window.location.assign(`${basePath}/chat`); }, 500);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not accept invitation");
     } finally {
@@ -2244,6 +2257,167 @@ function InvitationAcceptance() {
     }
   };
   return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-5 py-10 text-foreground"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-7"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><p className="mt-10 font-mono text-[10px] uppercase tracking-[.18em] text-primary">workspace invitation</p><h1 className="mt-2 font-mono text-2xl font-bold">Join a business workspace.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use the workspace number and one-time token while signed in with the verified email address that received the invitation.</p>{error && <p className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}{notice && <p className="mt-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace number</span><input required inputMode="numeric" value={communityId} onChange={(event) => setCommunityId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="42" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">invitation token</span><input required value={token} onChange={(event) => setToken(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="paste the one-time token" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "accepting…" : "accept invitation"}</button></form></div></div>;
+}
+
+function ChatGate() {
+  const [state, setState] = useState<OnboardingState | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api<OnboardingState>("/onboarding").then(setState).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "Could not load your workspace");
+    });
+  }, []);
+  if (error) {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
+  }
+  if (!state) {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">checking your Relay setup…</div>;
+  }
+  if (state.nextStep !== "start") return <Redirect to="/onboarding" />;
+  return <ChatApp />;
+}
+
+function OnboardingPage() {
+  const [state, setState] = useState<OnboardingState | null>(null);
+  const [community, setCommunity] = useState<CommunitySummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [rules, setRules] = useState("");
+  const [services, setServices] = useState("");
+  const [serviceArea, setServiceArea] = useState("");
+  const [businessHours, setBusinessHours] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [inviteEmails, setInviteEmails] = useState("");
+  const [inviteRole, setInviteRole] = useState("employee");
+  const [inviteTokens, setInviteTokens] = useState<Array<{ email: string; token: string }>>([]);
+
+  const refresh = async () => {
+    const next = await api<OnboardingState>("/onboarding");
+    setState(next);
+    if (!next.ownerCommunity) {
+      setCommunity(null);
+      return;
+    }
+    const detail = await api<CommunityDetail>(`/communities/${next.ownerCommunity.id}?view=summary`);
+    setCommunity(detail.community);
+    setName(detail.community.name);
+    setDescription(detail.community.description);
+    setRules(detail.community.rules);
+    setServices(detail.community.services);
+    setServiceArea(detail.community.serviceArea);
+    setBusinessHours(detail.community.businessHours);
+    setContactEmail(detail.community.contactEmail);
+    setContactPhone(detail.community.contactPhone);
+  };
+
+  useEffect(() => {
+    refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load onboarding")).finally(() => setLoading(false));
+  }, []);
+
+  const createCommunity = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    setError("");
+    try {
+      await api<CommunitySummary>("/communities", {
+        method: "POST",
+        body: JSON.stringify({ name, description, rules, services, serviceArea, businessHours, contactEmail, contactPhone, isPrivate: true, onboarding: true }),
+      });
+      setNotice("Your workspace is ready. Add the details your team needs.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create your workspace");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const configureCommunity = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!community) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/communities/${community.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, description, rules, services, serviceArea, businessHours, contactEmail, contactPhone }),
+      });
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 2 }) });
+      setNotice("Workspace details saved. Invite your first people.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save workspace details");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const finishOnboarding = async () => {
+    if (!community) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
+      window.location.assign(`${basePath}/chat`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not finish onboarding");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const invitePeople = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!community) return;
+    const emails = inviteEmails.split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter(Boolean);
+    if (emails.length === 0) {
+      await finishOnboarding();
+      return;
+    }
+    setWorking(true);
+    setError("");
+    try {
+      const created: Array<{ email: string; token: string }> = [];
+      for (const email of emails) {
+        const invitation = await api<{ invitationToken: string }>(`/communities/${community.id}/invitations`, {
+          method: "POST",
+          body: JSON.stringify({ email, role: inviteRole }),
+        });
+        created.push({ email, token: invitation.invitationToken });
+      }
+      setInviteTokens(created);
+      setInviteEmails("");
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
+      setNotice("Invitations created. Share each one-time token with its recipient.");
+      setState((current) => current ? { ...current, nextStep: "start" } : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create every invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">preparing your Relay setup…</div>;
+  if (state?.nextStep === "start") {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-8"><CheckCircle2 className="h-8 w-8 text-chart-4" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">setup complete</p><h1 className="mt-2 font-mono text-3xl font-bold">Your Relay is ready.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Your workspace has starter rooms and your first invitations are ready to share.</p>{inviteTokens.length > 0 && <div className="mt-6 space-y-2">{inviteTokens.map((item) => <div key={`${item.email}-${item.token}`} className="rounded-lg border border-border bg-background p-3 font-mono text-xs"><p className="text-muted-foreground">{item.email}</p><p className="mt-1 break-all text-primary">{item.token}</p></div>)}</div>}<button onClick={() => window.location.assign(`${basePath}/chat`)} className="mt-7 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground">start using Relay</button></div></div>;
+  }
+  const step = state?.nextStep ?? "create";
+  return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10">
+    <main className="mx-auto max-w-3xl">
+      <div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm font-bold">relay / workspace setup</p><p className="mt-1 font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">save your progress and return anytime</p></div><a href={`${basePath}/`} className="font-mono text-[10px] text-muted-foreground hover:text-primary">relay home</a></div>
+      <div className="mt-10 grid grid-cols-3 gap-2">{[["create", "create"], ["configure", "configure"], ["invite", "invite"]].map(([key, label], index) => <div key={key} className={`rounded-lg border p-3 ${step === key ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}><p className="font-mono text-[9px] uppercase">0{index + 1}</p><p className="mt-1 font-mono text-xs font-bold">{label}</p></div>)}</div>
+      {error && <div className="mt-6 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}</div>}
+      {notice && <div className="mt-6 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}</div>}
+      {!community && <form onSubmit={createCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 01 / create</p><h1 className="mt-2 font-mono text-3xl font-bold">Create your community.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Start with a private workspace. Relay will create the first rooms and make you the owner.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">community name</span><input required autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Northstar Services" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="mt-4 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">short description</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="A home for our team and daily work" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating…" : "create workspace"}</button></form>}
+      {community && step === "configure" && <form onSubmit={configureCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 02 / configure</p><h1 className="mt-2 font-mono text-3xl font-bold">Make it useful on day one.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Add the context people need before they join. You can change any of this later.</p><div className="mt-7 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace name</span><input required value={name} onChange={(event) => setName(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services or focus</span><input value={services} onChange={(event) => setServices(event.target.value)} placeholder="Operations, design, support" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={serviceArea} onChange={(event) => setServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={businessHours} onChange={(event) => setBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">rules and expectations</span><textarea value={rules} onChange={(event) => setRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "saving…" : "save and invite people"}</button></form>}
+      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 03 / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter one or more verified email addresses. Relay creates a one-time token for each person to use after signing in.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><label className="mt-4 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">role</span><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs"><option value="employee">employee</option><option value="member">member</option><option value="contractor">contractor</option></select></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create invitations" : "skip and start using Relay"}</button></form>}
+    </main>
+  </div>;
 }
 
 function CommunityConsole() {
@@ -2480,7 +2654,7 @@ function CommunityConsole() {
 }
 
 function AuthRoutes() {
-  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
+  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
 }
 
 function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }

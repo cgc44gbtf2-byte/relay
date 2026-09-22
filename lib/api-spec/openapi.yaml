@@ -120,6 +120,60 @@ paths:
             text/event-stream:
               schema:
                 type: string
+  /onboarding:
+    get:
+      operationId: getOnboardingState
+      tags: [onboarding]
+      summary: Get the authenticated user's onboarding state
+      responses:
+        "200":
+          description: Onboarding state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingState"
+        "401":
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /onboarding/{communityId}/progress:
+    post:
+      operationId: advanceOnboarding
+      tags: [onboarding]
+      summary: Advance onboarding for an owned community
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnboardingProgressInput"
+      responses:
+        "200":
+          description: Updated onboarding state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnboardingProgress"
+        "403":
+          description: The user cannot manage this community
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Community not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -207,4 +261,51 @@ components:
           minLength: 1
           maxLength: 500
       required: [channel, nick, text]
+    OnboardingCommunity:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        slug:
+          type: string
+        onboardingStep:
+          type: integer
+        joined:
+          type: boolean
+        canManage:
+          type: boolean
+      required: [id, name, slug, onboardingStep, joined, canManage]
+    OnboardingState:
+      type: object
+      properties:
+        nextStep:
+          type: string
+          enum: [create, configure, invite, start]
+        ownerCommunity:
+          oneOf:
+            - $ref: "#/components/schemas/OnboardingCommunity"
+            - type: "null"
+        communities:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnboardingCommunity"
+      required: [nextStep, ownerCommunity, communities]
+    OnboardingProgressInput:
+      type: object
+      properties:
+        step:
+          type: integer
+          enum: [2, 9]
+      required: [step]
+    OnboardingProgress:
+      type: object
+      properties:
+        community:
+          $ref: "#/components/schemas/OnboardingCommunity"
+        nextStep:
+          type: string
+          enum: [create, configure, invite, start]
+      required: [community, nextStep]
 

@@ -115,6 +115,11 @@ function installApi({
     const method = init?.method ?? "GET";
 
     if (url === "/api/me") return jsonResponse(profile);
+    if (url === "/api/onboarding") return jsonResponse({
+      nextStep: "start",
+      ownerCommunity: { id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner },
+      communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
+    });
     if (url === "/api/categories") return jsonResponse([]);
     if (url === "/api/notifications") return jsonResponse([]);
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });

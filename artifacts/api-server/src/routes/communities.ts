@@ -69,6 +69,23 @@ const workspaceRoleRank: Record<string, number> = {
 };
 const invitationRoles = ["member", "employee", "contractor"] as const;
 
+function onboardingCommunity(community: typeof communitiesTable.$inferSelect, joined = true, canManage = false) {
+  return {
+    id: community.id,
+    name: community.name,
+    slug: community.slug,
+    onboardingStep: community.onboardingStep,
+    joined,
+    canManage,
+  };
+}
+
+function onboardingNextStep(ownerCommunity: ReturnType<typeof onboardingCommunity> | null, hasMembership: boolean) {
+  if (!ownerCommunity) return hasMembership ? "start" : "create";
+  if (ownerCommunity.onboardingStep >= 9) return "start";
+  return ownerCommunity.onboardingStep >= 2 ? "invite" : "configure";
+}
+
 async function requireWorkspaceManager(userId: string, communityId: number): Promise<boolean> {
   return communityPermission(userId, communityId, "manage_community");
 }
@@ -256,6 +273,63 @@ router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest
   });
 });
 
+router.get("/onboarding", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  await ensureProfile(userId);
+  const [ownedCommunities, memberships] = await Promise.all([
+    db.select().from(communitiesTable)
+      .where(eq(communitiesTable.ownerId, userId))
+      .orderBy(desc(communitiesTable.createdAt)),
+    db.select({
+      community: communitiesTable,
+    }).from(communityMembersTable)
+      .innerJoin(communitiesTable, eq(communitiesTable.id, communityMembersTable.communityId))
+      .where(eq(communityMembersTable.userId, userId))
+      .orderBy(desc(communitiesTable.createdAt)),
+  ]);
+  const ownerCommunity = ownedCommunities[0] ? onboardingCommunity(ownedCommunities[0], true, true) : null;
+  const communities = memberships.map(({ community }) => onboardingCommunity(
+    community,
+    true,
+    community.ownerId === userId,
+  ));
+  res.json({
+    nextStep: onboardingNextStep(ownerCommunity, communities.length > 0),
+    ownerCommunity,
+    communities,
+  });
+});
+
+router.post("/onboarding/:communityId/progress", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const requestedStep = Number(req.body?.step);
+  if (!Number.isInteger(communityId) || ![2, 9].includes(requestedStep)) {
+    res.status(400).json({ error: "Onboarding step must be 2 or 9." });
+    return;
+  }
+  const [community] = await db.select().from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community) {
+    res.status(404).json({ error: "Community not found." });
+    return;
+  }
+  if (community.ownerId !== userId) {
+    res.status(403).json({ error: "Only the community owner can advance onboarding." });
+    return;
+  }
+  const [updated] = community.onboardingStep >= requestedStep
+    ? [community]
+    : await db.update(communitiesTable)
+      .set({ onboardingStep: requestedStep })
+      .where(eq(communitiesTable.id, communityId))
+      .returning();
+  const summary = onboardingCommunity(updated, true, true);
+  res.json({
+    community: summary,
+    nextStep: onboardingNextStep(summary, true),
+  });
+});
+
 router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   await ensureProfile(userId);
@@ -315,6 +389,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         businessHours,
         contactEmail,
         contactPhone,
+        onboardingStep: req.body?.onboarding === true ? 1 : 9,
         isPrivate,
         ownerId: userId,
       }).returning();
@@ -365,6 +440,14 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
     await writeCommunityAudit(userId, "created_community", community.id, `Created ${community.name}`);
     res.status(201).json({ ...community, joined: true, canManage: true, defaultChannelsCreated: 6 });
   } catch {
+    const [existing] = await db.select().from(communitiesTable).where(and(
+      eq(communitiesTable.ownerId, userId),
+      eq(communitiesTable.slug, slug),
+    ));
+    if (existing) {
+      res.status(200).json({ ...existing, joined: true, canManage: true, defaultChannelsCreated: 0 });
+      return;
+    }
     res.status(409).json({ error: "That community slug is already in use." });
   }
 });
@@ -1386,14 +1469,28 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     return;
   }
   const rawToken = randomUUID();
-  const [invitation] = await db.insert(workspaceInvitationsTable).values({
-    communityId,
-    email,
-    role,
-    invitedBy: userId,
-    tokenHash: createHash("sha256").update(rawToken).digest("hex"),
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-  }).returning();
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const [existingPending] = await db.select().from(workspaceInvitationsTable).where(and(
+    eq(workspaceInvitationsTable.communityId, communityId),
+    eq(workspaceInvitationsTable.email, email),
+    eq(workspaceInvitationsTable.status, "pending"),
+  ));
+  const [invitation] = existingPending
+    ? await db.update(workspaceInvitationsTable).set({
+      role,
+      invitedBy: userId,
+      tokenHash,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      revokedAt: null,
+    }).where(eq(workspaceInvitationsTable.id, existingPending.id)).returning()
+    : await db.insert(workspaceInvitationsTable).values({
+      communityId,
+      email,
+      role,
+      invitedBy: userId,
+      tokenHash,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    }).returning();
   await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
   res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken });
 });
@@ -1927,7 +2024,6 @@ router.patch("/communities/:communityId", requireAuth, async (req: Authenticated
     ...(businessHours === undefined ? {} : { businessHours }),
     ...(contactEmail === undefined ? {} : { contactEmail }),
     ...(contactPhone === undefined ? {} : { contactPhone }),
-    onboardingStep: 9,
   }).where(eq(communitiesTable.id, communityId)).returning();
   if (!updated) {
     res.status(404).json({ error: "Community not found." });

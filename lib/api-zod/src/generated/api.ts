@@ -119,3 +119,51 @@ export const StreamIrcEventsQueryParams = zod.object({
 export const StreamIrcEventsResponse = zod.unknown()
 
 
+/**
+ * @summary Get the authenticated user's onboarding state
+ */
+export const GetOnboardingStateResponse = zod.object({
+  "nextStep": zod.enum(['create', 'configure', 'invite', 'start']),
+  "ownerCommunity": zod.union([zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "slug": zod.string(),
+  "onboardingStep": zod.number().int(),
+  "joined": zod.boolean(),
+  "canManage": zod.boolean()
+}),zod.null()]),
+  "communities": zod.array(zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "slug": zod.string(),
+  "onboardingStep": zod.number().int(),
+  "joined": zod.boolean(),
+  "canManage": zod.boolean()
+}))
+})
+
+
+/**
+ * @summary Advance onboarding for an owned community
+ */
+export const AdvanceOnboardingParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const AdvanceOnboardingBody = zod.object({
+  "step": zod.union([zod.literal(2),zod.literal(9)])
+})
+
+export const AdvanceOnboardingResponse = zod.object({
+  "community": zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "slug": zod.string(),
+  "onboardingStep": zod.number().int(),
+  "joined": zod.boolean(),
+  "canManage": zod.boolean()
+}),
+  "nextStep": zod.enum(['create', 'configure', 'invite', 'start'])
+})
+
+
