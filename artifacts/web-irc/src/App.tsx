@@ -478,22 +478,34 @@ function ChatApp() {
   useEffect(() => {
     let cancelled = false;
     let socket: WebSocket | null = null;
-    api<{ ticket: string }>("/ws-ticket").then(({ ticket }) => {
-      if (cancelled) return;
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
-      socket = connectedSocket;
-      connectedSocket.onopen = () => {
-        setConnection("live");
-        setWs(connectedSocket);
-        if (currentChannelId && !activeDm) {
-          connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
-        }
-        if (currentChannelId || activeDm) void room.refreshMessages();
-      };
-      connectedSocket.onclose = () => setConnection("offline");
-      connectedSocket.onerror = () => setConnection("offline");
-      connectedSocket.onmessage = (event) => {
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    const connect = async () => {
+      try {
+        const { ticket } = await api<{ ticket: string }>("/ws-ticket");
+        if (cancelled) return;
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+        socket = connectedSocket;
+        connectedSocket.onopen = () => {
+          reconnectAttempt = 0;
+          setConnection("live");
+          setWs(connectedSocket);
+          if (currentChannelId && !activeDm) {
+            connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
+          }
+          if (currentChannelId || activeDm) void room.refreshMessages();
+        };
+        connectedSocket.onclose = () => {
+          if (cancelled) return;
+          setConnection("offline");
+          setWs((current) => current === connectedSocket ? null : current);
+          const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
+          reconnectAttempt += 1;
+          reconnectTimer = window.setTimeout(() => void connect(), delay);
+        };
+        connectedSocket.onerror = () => setConnection("offline");
+        connectedSocket.onmessage = (event) => {
         try {
            if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
@@ -530,10 +542,19 @@ function ChatApp() {
              room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelIdRef.current }]);
           }
         } catch { /* ignore malformed frames */ }
-      };
-    }).catch(() => setConnection("offline"));
+        };
+      } catch {
+        if (cancelled) return;
+        setConnection("offline");
+        const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(() => void connect(), delay);
+      }
+    };
+    void connect();
     return () => {
       cancelled = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
         if (socket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
           socket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
