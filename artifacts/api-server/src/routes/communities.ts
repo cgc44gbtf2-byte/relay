@@ -858,6 +858,10 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
   const status = typeof req.body?.status === "string" ? req.body.status : undefined;
   const priority = typeof req.body?.priority === "string" ? req.body.priority : undefined;
   const dueDate = req.body?.dueDate === null ? null : req.body?.dueDate ? new Date(req.body.dueDate) : undefined;
+  const hasAssignedTo = typeof req.body?.assignedTo === "string" || req.body?.assignedTo === null;
+  const assignedTo = hasAssignedTo && typeof req.body?.assignedTo === "string" && req.body.assignedTo
+    ? req.body.assignedTo
+    : hasAssignedTo ? null : undefined;
   if (status !== undefined && !allowedStatuses.includes(status)) {
     res.status(400).json({ error: "Invalid task status." });
     return;
@@ -870,21 +874,61 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
     res.status(400).json({ error: "Invalid due date." });
     return;
   }
+  if (assignedTo) {
+    const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, assignedTo)));
+    if (!member) {
+      res.status(400).json({ error: "The assignee must be a member of this workspace." });
+      return;
+    }
+  }
   const [updated] = await db.update(workspaceTasksTable).set({
     ...(typeof req.body?.title === "string" ? { title: req.body.title.trim().slice(0, 160) } : {}),
     ...(typeof req.body?.description === "string" ? { description: req.body.description.trim().slice(0, 10000) } : {}),
-    ...(typeof req.body?.assignedTo === "string" || req.body?.assignedTo === null ? { assignedTo: req.body.assignedTo || null } : {}),
+    ...(assignedTo === undefined ? {} : { assignedTo }),
     ...(status === undefined ? {} : { status, completedAt: status === "completed" ? new Date() : null }),
     ...(priority === undefined ? {} : { priority }),
     ...(dueDate === undefined ? {} : { dueDate }),
     updatedAt: new Date(),
   }).where(eq(workspaceTasksTable.id, taskId)).returning();
-  if (updated.assignedTo && updated.assignedTo !== current.assignedTo) {
+  const assignmentChanged = updated.assignedTo !== current.assignedTo;
+  const changedFields: string[] = [];
+  if (updated.title !== current.title) changedFields.push("title");
+  if (updated.description !== current.description) changedFields.push("description");
+  if (updated.status !== current.status) changedFields.push(`status → ${updated.status}`);
+  if (updated.priority !== current.priority) changedFields.push(`priority → ${updated.priority}`);
+  const currentDueDate = current.dueDate?.getTime() ?? null;
+  const updatedDueDate = updated.dueDate?.getTime() ?? null;
+  if (updatedDueDate !== currentDueDate) changedFields.push(updated.dueDate ? "due date" : "due date cleared");
+  if (updated.assignedTo && assignmentChanged) {
     await createNotification({
       userId: updated.assignedTo,
       type: "task_assigned",
       category: "task_assigned",
       body: `You were assigned the task “${updated.title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: updated.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  }
+  if (current.assignedTo && assignmentChanged) {
+    await createNotification({
+      userId: current.assignedTo,
+      type: "task_updated",
+      category: "task_updated",
+      body: `You are no longer assigned the task “${updated.title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: updated.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  } else if (updated.assignedTo && changedFields.length > 0) {
+    await createNotification({
+      userId: updated.assignedTo,
+      type: "task_updated",
+      category: "task_updated",
+      body: `Task “${updated.title}” updated: ${changedFields.join(", ")}.`,
       communityId,
       entityType: "workspace_task",
       entityId: updated.id,

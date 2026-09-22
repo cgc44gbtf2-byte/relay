@@ -5,6 +5,7 @@ export type NotificationCategory =
   | "direct_message"
   | "mention"
   | "task_assigned"
+  | "task_updated"
   | "task_deadline"
   | "announcement"
   | "document_acknowledgement"
@@ -17,6 +18,7 @@ const categoryByType: Record<string, NotificationCategory> = {
   direct_message: "direct_message",
   mention: "mention",
   task_assigned: "task_assigned",
+  task_updated: "task_updated",
   task_deadline: "task_deadline",
   community_announcement: "announcement",
   server_announcement: "announcement",

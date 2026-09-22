@@ -2713,6 +2713,122 @@ describe("admin access controls", () => {
     }
   });
 
+  test("notifies employees when workspace tasks are assigned or changed", async () => {
+    const ownerSession = await createTestSession("task_notification_owner");
+    const workerSession = await createTestSession("task_notification_worker");
+    const replacementSession = await createTestSession("task_notification_replacement");
+    const outsiderSession = await createTestSession("task_notification_outsider");
+    let communityId: number | null = null;
+
+    try {
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Task notifications ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, workerSession.userId, replacementSession.userId],
+      );
+
+      const created = await apiRequest(ownerSession, `/communities/${communityId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Prepare onboarding",
+          assignedTo: workerSession.userId,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const taskId = (created.body as { id?: unknown }).id as number;
+      assert.equal(typeof taskId, "number");
+
+      const initialNotifications = await pool.query<{
+        type: string;
+        category: string;
+        body: string;
+      }>(
+        `SELECT type, category, body
+         FROM irc_notifications
+         WHERE user_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
+         ORDER BY id`,
+        [workerSession.userId, String(taskId)],
+      );
+      assert.deepEqual(initialNotifications.rows, [{
+        type: "task_assigned",
+        category: "task_assigned",
+        body: "You were assigned the task “Prepare onboarding”.",
+      }]);
+
+      const changed = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "in_progress", priority: "urgent" }),
+      });
+      assert.equal(changed.status, 200, JSON.stringify(changed));
+      const updateNotification = await pool.query<{ type: string; category: string; body: string }>(
+        `SELECT type, category, body
+         FROM irc_notifications
+         WHERE user_id = $1 AND type = 'task_updated' AND entity_id = $2
+         ORDER BY id`,
+        [workerSession.userId, String(taskId)],
+      );
+      assert.deepEqual(updateNotification.rows, [{
+        type: "task_updated",
+        category: "task_updated",
+        body: "Task “Prepare onboarding” updated: status → in_progress, priority → urgent.",
+      }]);
+
+      const reassigned = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignedTo: replacementSession.userId }),
+      });
+      assert.equal(reassigned.status, 200, JSON.stringify(reassigned));
+      const reassignmentNotifications = await pool.query<{ user_id: string; type: string; body: string }>(
+        `SELECT user_id, type, body
+         FROM irc_notifications
+         WHERE entity_type = 'workspace_task' AND entity_id = $1
+           AND user_id = ANY($2::text[])
+         ORDER BY id`,
+        [String(taskId), [workerSession.userId, replacementSession.userId]],
+      );
+      assert.deepEqual(reassignmentNotifications.rows.slice(-2), [
+        {
+          user_id: workerSession.userId,
+          type: "task_updated",
+          body: "You are no longer assigned the task “Prepare onboarding”.",
+        },
+        {
+          user_id: replacementSession.userId,
+          type: "task_assigned",
+          body: "You were assigned the task “Prepare onboarding”.",
+        },
+      ]);
+
+      const crossWorkspaceAssignment = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignedTo: outsiderSession.userId }),
+      });
+      assert.equal(crossWorkspaceAssignment.status, 400, JSON.stringify(crossWorkspaceAssignment));
+    } finally {
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("lets organization managers assign employees without crossing workspace boundaries", async () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");
