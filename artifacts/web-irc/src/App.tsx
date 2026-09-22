@@ -739,6 +739,17 @@ type AdminScopeOptions = {
   categories: Array<{ id: number; name: string; communityId: number | null }>;
   channels: Array<{ id: number; name: string; communityId: number | null; categoryId: number | null }>;
 };
+type CustomRole = {
+  key: string;
+  label: string;
+  description: string;
+  scopeType: "community" | "category" | "channel";
+  permissions: string[];
+};
+type CustomRoleCatalog = {
+  roles: CustomRole[];
+  permissions: Array<{ key: string }>;
+};
 
 function EmptyAdminState({ label }: { label: string }) {
   return <div className="flex items-center gap-3 px-5 py-8 font-mono text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-primary/70" />{label}</div>;
@@ -866,6 +877,9 @@ function AdminRoleAssignmentsPanel({
   working,
   onGrant,
   onRevoke,
+  customRoles,
+  permissions,
+  onCreateCustomRole,
 }: {
   assignments: AdminAssignment[];
   users: ConsoleOverview["users"];
@@ -873,11 +887,18 @@ function AdminRoleAssignmentsPanel({
   working: boolean;
   onGrant: (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => void;
   onRevoke: (assignment: AdminAssignment) => void;
+  customRoles: CustomRole[];
+  permissions: Array<{ key: string }>;
+  onCreateCustomRole: (value: { label: string; description: string; scopeType: string; permissions: string[] }) => void;
 }) {
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState("platform_moderator");
   const [scopeType, setScopeType] = useState("platform");
   const [scopeId, setScopeId] = useState("");
+  const [customLabel, setCustomLabel] = useState("");
+  const [customDescription, setCustomDescription] = useState("");
+  const [customScope, setCustomScope] = useState("community");
+  const [customPermissions, setCustomPermissions] = useState<string[]>([]);
   useEffect(() => {
     if (!userId && users[0]) setUserId(users[0].id);
   }, [userId, users]);
@@ -933,6 +954,7 @@ function AdminRoleAssignmentsPanel({
               <option value="department_admin">community / department admin</option>
               <option value="manager">manager</option>
               <option value="moderator">moderator</option>
+              {customRoles.map((customRole) => <option key={customRole.key} value={customRole.key}>{customRole.label} (custom)</option>)}
             </select>
           </label>
           <label className="font-mono text-[10px] text-muted-foreground">scope
@@ -956,6 +978,30 @@ function AdminRoleAssignmentsPanel({
       </section>
       <section className="rounded-lg border border-border bg-card">
         <div className="border-b border-border px-5 py-4">
+          <h2 className="font-mono text-sm font-bold">create custom role</h2>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">Build a reusable role from the permissions your organization needs.</p>
+        </div>
+        <form onSubmit={(event) => { event.preventDefault(); onCreateCustomRole({ label: customLabel, description: customDescription, scopeType: customScope, permissions: customPermissions }); setCustomLabel(""); setCustomDescription(""); setCustomPermissions([]); }} className="space-y-4 p-5">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <input required value={customLabel} onChange={(event) => setCustomLabel(event.target.value)} placeholder="Store Manager" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px]" />
+            <input value={customDescription} onChange={(event) => setCustomDescription(event.target.value)} placeholder="Manages store operations" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px]" />
+            <select value={customScope} onChange={(event) => setCustomScope(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[11px]">
+              <option value="community">workspace role</option>
+              <option value="category">department role</option>
+              <option value="channel">channel role</option>
+            </select>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {permissions.map((permission) => <label key={permission.key} className="flex items-center gap-2 rounded border border-border/70 px-2.5 py-2 font-mono text-[10px] text-muted-foreground">
+              <input type="checkbox" checked={customPermissions.includes(permission.key)} onChange={(event) => setCustomPermissions((current) => event.target.checked ? [...current, permission.key] : current.filter((item) => item !== permission.key))} />
+              {permission.key.replaceAll("_", " ")}
+            </label>)}
+          </div>
+          <button disabled={working || !customLabel || customPermissions.length === 0} className="rounded-md bg-primary px-4 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save custom role</button>
+        </form>
+      </section>
+      <section className="rounded-lg border border-border bg-card">
+        <div className="border-b border-border px-5 py-4">
           <h2 className="font-mono text-sm font-bold">active scoped assignments</h2>
           <p className="mt-1 font-mono text-[10px] text-muted-foreground">{assignments.length} assignments</p>
         </div>
@@ -969,6 +1015,10 @@ function AdminRoleAssignmentsPanel({
           {assignments.length === 0 && <EmptyAdminState label="No scoped roles have been assigned." />}
         </div>
       </section>
+      {customRoles.length > 0 && <section className="rounded-lg border border-border bg-card">
+        <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">custom role catalog</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{customRoles.length} reusable roles</p></div>
+        <div className="divide-y divide-border">{customRoles.map((customRole) => <div key={customRole.key} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold">{customRole.label}</p><p className="mt-1 text-xs text-muted-foreground">{customRole.description || "No description."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{customRole.scopeType}</span></div><div className="mt-3 flex flex-wrap gap-1.5">{customRole.permissions.map((permission) => <span key={permission} className="rounded bg-muted px-2 py-1 font-mono text-[9px] text-muted-foreground">{permission.replaceAll("_", " ")}</span>)}</div></div>)}</div>
+      </section>}
     </div>
   );
 }
@@ -984,6 +1034,8 @@ function AdminConsole() {
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
   const [roleAssignments, setRoleAssignments] = useState<AdminAssignment[]>([]);
   const [scopeOptions, setScopeOptions] = useState<AdminScopeOptions>({ communities: [], categories: [], channels: [] });
+  const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
+  const [customRolePermissions, setCustomRolePermissions] = useState<Array<{ key: string }>>([]);
   const [health, setHealth] = useState<ConsoleHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
@@ -1031,12 +1083,15 @@ function AdminConsole() {
   };
   const loadRoleData = async () => {
     try {
-      const [assignments, options] = await Promise.all([
+      const [assignments, options, catalog] = await Promise.all([
         api<AdminAssignment[]>("/admin/role-assignments"),
         api<AdminScopeOptions>("/admin/scope-options"),
+        api<CustomRoleCatalog>("/admin/custom-roles"),
       ]);
       setRoleAssignments(assignments);
       setScopeOptions(options);
+      setCustomRoles(catalog.roles);
+      setCustomRolePermissions(catalog.permissions);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load scoped roles");
     }
@@ -1063,6 +1118,7 @@ function AdminConsole() {
   const updateRole = async () => { if (!pendingRole) return; setWorking(true); try { await api(`/admin/users/${pendingRole.id}/role`, { method: "PATCH", body: JSON.stringify({ role: pendingRole.role }) }); setNotice(`Role updated for ${pendingRole.label}.`); setPendingRole(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update role"); } finally { setWorking(false); } };
   const updateAccountStatus = async () => { if (!pendingAccountStatus) return; setWorking(true); try { await api(`/admin/users/${pendingAccountStatus.id}/account-status`, { method: "PATCH", body: JSON.stringify({ accountStatus: pendingAccountStatus.accountStatus }) }); setNotice(`${pendingAccountStatus.label} is now ${pendingAccountStatus.accountStatus}.`); setPendingAccountStatus(null); setDirectoryLoaded(false); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update account status"); } finally { setWorking(false); } };
   const grantRole = async (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => { setWorking(true); try { await api("/admin/role-assignments", { method: "POST", body: JSON.stringify(value) }); setNotice("Scoped role granted."); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not grant scoped role"); } finally { setWorking(false); } };
+  const createCustomRole = async (value: { label: string; description: string; scopeType: string; permissions: string[] }) => { setWorking(true); try { await api("/admin/custom-roles", { method: "POST", body: JSON.stringify(value) }); setNotice(`${value.label} custom role created.`); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create custom role"); } finally { setWorking(false); } };
   const revokeRole = async () => { if (!pendingRevoke) return; setWorking(true); try { await api(`/admin/role-assignments/${pendingRevoke.id}`, { method: "DELETE" }); setNotice(`Revoked ${pendingRevoke.role} from ${pendingRevoke.displayName}.`); setPendingRevoke(null); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke scoped role"); } finally { setWorking(false); } };
   const sendAnnouncement = async (event: FormEvent) => { event.preventDefault(); const body = announcementDraft.trim(); if (!body) return; setWorking(true); try { await api("/admin/announcements", { method: "POST", body: JSON.stringify({ body }) }); setAnnouncementDraft(""); setAnnouncementOpen(false); setNotice("Announcement sent to all users."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send announcement"); } finally { setWorking(false); } };
   const saveTopic = async (id: number) => { setWorking(true); try { await api(`/admin/channels/${id}`, { method: "PATCH", body: JSON.stringify({ topic: topicDraft }) }); setEditingChannel(null); setNotice("Channel topic saved."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save channel topic"); } finally { setWorking(false); } };
@@ -1110,7 +1166,7 @@ function AdminConsole() {
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{stats.map(([label, value, Icon]) => <div key={label} className="rounded-lg border border-border bg-card p-4"><div className="flex items-center justify-between"><Icon className="h-4 w-4 text-primary" /><span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">live</span></div><p className="mt-5 font-mono text-3xl font-bold">{value}</p><p className="mt-1 font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">{label}</p></div>)}</div>
               <div className="grid gap-5 xl:grid-cols-[1.12fr_.88fr]"><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">recent activity</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">The last operational changes</p></div><button onClick={() => setSection("activity")} className="font-mono text-[10px] text-primary hover:underline">view all</button></div><div className="divide-y divide-border">{overview.activity.slice(0, 6).map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} />)}{overview.activity.length === 0 && <EmptyAdminState label="No activity recorded yet." />}</div></section><div className="space-y-5"><AdminHealthCard health={health} onOpen={() => setSection("system")} /><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">recent messages</h2></div><div className="divide-y divide-border">{overview.recentMessages.slice(0, 5).map((message) => <div key={message.id} className="px-5 py-3"><div className="flex justify-between gap-3 font-mono text-[10px]"><span className="truncate text-secondary-foreground">{message.sender}</span><span className="shrink-0 text-muted-foreground">{timeLabel(message.createdAt)}</span></div><p className="mt-1 truncate text-xs">{message.body}</p></div>)}{overview.recentMessages.length === 0 && <EmptyAdminState label="No messages have been sent yet." />}</div></section></div></div>
             </div>
-            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} /> : section === "activity" ? (
+            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} customRoles={customRoles} permissions={customRolePermissions} onCreateCustomRole={createCustomRole} /> : section === "activity" ? (
              <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><Activity className="h-4 w-4 text-primary" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} placeholder="filter by actor" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-actor" /><input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} placeholder="filter by action" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-action" /></div></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>

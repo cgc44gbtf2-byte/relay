@@ -18,7 +18,7 @@ import {
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { channelNotFoundError } from "./errors";
-import { PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
+import { ensurePermissionCatalog, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -454,6 +454,7 @@ router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest,
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  await ensurePermissionCatalog();
   const [roles, links] = await Promise.all([
     db.select().from(customRolesTable).where(eq(customRolesTable.isActive, true)).orderBy(asc(customRolesTable.label)),
     db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
@@ -472,6 +473,7 @@ router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  await ensurePermissionCatalog();
   const label = typeof req.body?.label === "string" ? req.body.label.trim().slice(0, 60) : "";
   const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 240) : "";
   const scopeType = req.body?.scopeType;
