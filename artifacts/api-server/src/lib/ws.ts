@@ -14,6 +14,7 @@ type Client = {
   typingWindowStartedAt: number;
   typingFrameCount: number;
   lastTypingAt: number;
+  sessionCheck: ReturnType<typeof setInterval>;
 };
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
 
@@ -101,7 +102,7 @@ class Hub {
     }
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-      const client: Client = {
+      const client = {
         socket: ws,
         userId: ticket.userId,
         channelIds: new Set(),
@@ -109,7 +110,14 @@ class Hub {
         typingWindowStartedAt: Date.now(),
         typingFrameCount: 0,
         lastTypingAt: 0,
-      };
+        sessionCheck: setInterval(() => {
+          void clerkClient.sessions.getSession(ticket.sessionId)
+            .then((session) => {
+              if (session.userId !== ticket.userId || session.status !== "active") ws.close(1008, "Session is no longer active.");
+            })
+            .catch(() => ws.close(1008, "Session could not be revalidated."));
+        }, 60_000),
+      } satisfies Client;
       this.clients.add(client);
       void db
         .update(usersTable)
@@ -179,6 +187,7 @@ class Hub {
         }
       });
       ws.on("close", () => {
+        clearInterval(client.sessionCheck);
         this.clients.delete(client);
         for (const channelId of client.channelIds) {
           this.removeChannelSubscription(client, channelId);
