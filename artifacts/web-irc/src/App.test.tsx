@@ -387,6 +387,34 @@ describe("deleted room recovery", () => {
     expect(screen.queryByText("Open the workspace task")).toBeNull();
   });
 
+  it("applies notification read updates received from another session", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 8,
+        type: "task_updated",
+        category: "general",
+        body: "Read this from another session",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: null,
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText(/Read this from another session/)).toBeTruthy();
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({
+        type: "notification_read",
+        notificationId: 8,
+        readAt: "2026-09-21T12:01:00.000Z",
+      }),
+    } as MessageEvent);
+
+    await waitFor(() => expect(screen.getByText(/· read$/)).toBeTruthy());
+  });
+
   it("cleans up the placeholder message when an attachment upload fails", async () => {
     await renderChat({
       missingRequest: "event",
