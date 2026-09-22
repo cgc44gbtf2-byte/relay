@@ -446,6 +446,7 @@ export const messagesTable = pgTable("irc_messages", {
   senderId: text("sender_id").notNull().references(() => usersTable.clerkId),
   recipientId: text("recipient_id").references(() => usersTable.clerkId),
   threadKey: text("thread_key"),
+  replyToId: uuid("reply_to_id"),
   body: text("body").notNull(),
   kind: text("kind").notNull().default("message"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),

@@ -253,6 +253,7 @@ async function messageViews(messages: typeof messagesTable.$inferSelect[], viewe
     body: message.body,
     kind: message.kind,
     createdAt: message.createdAt,
+    replyToId: message.replyToId,
     sender: sendersById.get(message.senderId) ?? null,
     recipientId: message.recipientId,
     deletedAt: message.deletedAt,
@@ -778,7 +779,18 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
     res.status(400).json({ error: "Messages must be 1–500 characters." });
     return;
   }
-  const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, body }).returning();
+  const replyToId = typeof req.body.replyToId === "string" && req.body.replyToId.trim() ? req.body.replyToId.trim() : null;
+  if (replyToId) {
+    const [parent] = await db.select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.id, replyToId), eq(messagesTable.channelId, channel.id)))
+      .limit(1);
+    if (!parent) {
+      res.status(400).json({ error: "The message you are replying to is not in this channel." });
+      return;
+    }
+  }
+  const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, replyToId, body }).returning();
   await notifyMentionedUsers(body, userId, channel.id);
   const view = await messageView(message);
   wsHub.broadcastChannel(channel.id, { type: "message", message: view });
@@ -1105,7 +1117,21 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
     res.status(403).json({ error: "Direct messages are unavailable for this user." });
     return;
   }
-  const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), body }).returning();
+  const replyToId = typeof req.body.replyToId === "string" && req.body.replyToId.trim() ? req.body.replyToId.trim() : null;
+  if (replyToId) {
+    const [parent] = await db.select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(and(
+        eq(messagesTable.id, replyToId),
+        eq(messagesTable.threadKey, threadKey(senderId, recipientId)),
+      ))
+      .limit(1);
+    if (!parent) {
+      res.status(400).json({ error: "The message you are replying to is not in this conversation." });
+      return;
+    }
+  }
+  const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), replyToId, body }).returning();
   await createNotification({
     userId: recipientId,
     type: "direct_message",
