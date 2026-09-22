@@ -141,6 +141,39 @@ const defaultAppConfig: AppConfig = {
   networkStatusLabel: "live and open",
 };
 
+const landingFeatureGroups: Array<{
+  label: string;
+  title: string;
+  description: string;
+  icon: LucideIcon;
+  features: Array<{ title: string; description: string; icon: LucideIcon }>;
+}> = [
+  {
+    label: "business features",
+    title: "Keep the whole operation in the room.",
+    description: "Give managers one workspace for people, work, communication, and the records that keep a business moving.",
+    icon: LayoutDashboard,
+    features: [
+      { title: "Workspace operations", description: "Organize employees by departments, locations, teams, and roles.", icon: Users },
+      { title: "Work that stays visible", description: "Assign tasks, publish announcements, share documents, and manage policies.", icon: CheckCircle2 },
+      { title: "Permission with context", description: "Control access with workspace roles, private channels, and scoped permissions.", icon: Shield },
+      { title: "Audit-ready activity", description: "Review named actors, actions, resources, and date-filtered business history.", icon: Activity },
+    ],
+  },
+  {
+    label: "developer features",
+    title: "Build on a live communication layer.",
+    description: "Use the same platform primitives for fast product work, reliable operations, and controlled releases.",
+    icon: Radio,
+    features: [
+      { title: "Real-time by default", description: "Channels, direct messages, presence, typing, reactions, and file sharing update live.", icon: Radio },
+      { title: "Workspace-scoped APIs", description: "Work with authenticated routes and business data that stays isolated by workspace.", icon: Database },
+      { title: "Operational control", description: "Manage permissions, moderation, health checks, and platform activity from one console.", icon: Settings },
+      { title: "Release visibility", description: "Track developer releases, review status, publish updates, and keep change history clear.", icon: Zap },
+    ],
+  },
+];
+
 class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
@@ -211,22 +244,57 @@ function Landing() {
           <a className="rounded-lg bg-primary px-4 py-2 font-mono text-xs font-bold text-primary-foreground hover:brightness-105" href={`${basePath}/sign-up`}>create account</a>
         </div>
       </header>
-      <main className="mx-auto grid max-w-6xl gap-12 px-6 pb-20 pt-16 lg:grid-cols-[1.1fr_.9fr] lg:items-center">
-        <div>
-          <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.2em] text-primary">{config.landingEyebrow}</p>
-          <h1 className="max-w-3xl font-mono text-4xl font-bold leading-[1.1] sm:text-6xl">{titleLines.map((line, index) => <span key={`${line}-${index}`} className={index === titleLines.length - 1 ? "block text-secondary-foreground" : "block"}>{line}</span>)}</h1>
-          <p className="mt-6 max-w-xl text-base leading-7 text-muted-foreground">{config.landingDescription}</p>
-          <div className="mt-8 flex flex-wrap gap-3"><a className="rounded-lg bg-primary px-5 py-3 font-mono text-sm font-bold text-primary-foreground" href={`${basePath}/sign-up`}>join the network <Zap className="ml-2 inline h-4 w-4" /></a><span className="flex items-center gap-2 rounded-lg border border-border px-4 py-3 font-mono text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-chart-4" /> {config.networkStatusLabel}</span></div>
-        </div>
-        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3 font-mono text-xs"><span className="text-muted-foreground"># lobby</span><span className="text-chart-4">● 4 voices</span></div>
-          <div className="space-y-5 p-5">
-            <PreviewMessage name="mira" text="Welcome to the lobby. The room is open." color="#f5b544" />
-            <PreviewMessage name="orion" text="Anyone else catching up on the old net tonight?" color="#55c2a0" />
-            <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground"><span className="h-px w-8 bg-accent" /> You are connected to the local relay.</div>
+      <main className="mx-auto max-w-6xl px-6 pb-20 pt-16">
+        <div className="grid gap-12 lg:grid-cols-[1.1fr_.9fr] lg:items-center">
+          <div>
+            <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.2em] text-primary">{config.landingEyebrow}</p>
+            <h1 className="max-w-3xl font-mono text-4xl font-bold leading-[1.1] sm:text-6xl">{titleLines.map((line, index) => <span key={`${line}-${index}`} className={index === titleLines.length - 1 ? "block text-secondary-foreground" : "block"}>{line}</span>)}</h1>
+            <p className="mt-6 max-w-xl text-base leading-7 text-muted-foreground">{config.landingDescription}</p>
+            <div className="mt-8 flex flex-wrap gap-3"><a className="rounded-lg bg-primary px-5 py-3 font-mono text-sm font-bold text-primary-foreground" href={`${basePath}/sign-up`}>join the network <Zap className="ml-2 inline h-4 w-4" /></a><span className="flex items-center gap-2 rounded-lg border border-border px-4 py-3 font-mono text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-chart-4" /> {config.networkStatusLabel}</span></div>
           </div>
-          <div className="border-t border-border p-4"><div className="rounded-lg border border-input bg-background px-3 py-3 font-mono text-xs text-muted-foreground">message #lobby <span className="float-right rounded bg-primary px-2 py-1 text-primary-foreground">send</span></div></div>
+          <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3 font-mono text-xs"><span className="text-muted-foreground"># lobby</span><span className="text-chart-4">● 4 voices</span></div>
+            <div className="space-y-5 p-5">
+              <PreviewMessage name="mira" text="Welcome to the lobby. The room is open." color="#f5b544" />
+              <PreviewMessage name="orion" text="Anyone else catching up on the old net tonight?" color="#55c2a0" />
+              <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground"><span className="h-px w-8 bg-accent" /> You are connected to the local relay.</div>
+            </div>
+            <div className="border-t border-border p-4"><div className="rounded-lg border border-input bg-background px-3 py-3 font-mono text-xs text-muted-foreground">message #lobby <span className="float-right rounded bg-primary px-2 py-1 text-primary-foreground">send</span></div></div>
+          </div>
         </div>
+        <section aria-labelledby="features-heading" className="mt-24">
+          <div className="max-w-2xl">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-primary">one relay, two ways to work</p>
+            <h2 id="features-heading" className="mt-3 font-mono text-3xl font-bold sm:text-4xl">Features for the people who use Relay and the people who build it.</h2>
+          </div>
+          <div className="mt-10 grid gap-5 lg:grid-cols-2">
+            {landingFeatureGroups.map((group) => {
+              const GroupIcon = group.icon;
+              return <article key={group.label} className="rounded-2xl border border-border bg-card/70 p-6 shadow-lg sm:p-7">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-primary">{group.label}</p>
+                    <h3 className="mt-3 font-mono text-xl font-bold leading-tight">{group.title}</h3>
+                  </div>
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary"><GroupIcon className="h-5 w-5" /></div>
+                </div>
+                <p className="mt-4 text-sm leading-6 text-muted-foreground">{group.description}</p>
+                <div className="mt-6 space-y-4 border-t border-border pt-5">
+                  {group.features.map((feature) => {
+                    const FeatureIcon = feature.icon;
+                    return <div key={feature.title} className="flex gap-3">
+                      <FeatureIcon className="mt-0.5 h-4 w-4 shrink-0 text-secondary-foreground" />
+                      <div>
+                        <h4 className="font-mono text-xs font-bold">{feature.title}</h4>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">{feature.description}</p>
+                      </div>
+                    </div>;
+                  })}
+                </div>
+              </article>;
+            })}
+          </div>
+        </section>
       </main>
     </div>
   );
