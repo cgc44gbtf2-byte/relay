@@ -1218,8 +1218,148 @@ type CommunityDetail = {
   employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
   invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
+  tasks: Array<{
+    id: number;
+    title: string;
+    description: string;
+    assignedTo: string | null;
+    departmentId: number | null;
+    locationId: number | null;
+    priority: string;
+    dueDate: string | null;
+    status: string;
+    createdBy: string;
+    createdAt: string;
+    updatedAt: string;
+    comments: Array<{ id: number; taskId: number; authorId: string; author: string; body: string; createdAt: string }>;
+    attachments: Array<{ id: number; taskId: number; uploaderId: string; objectPath: string; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
+  }>;
   canManage: boolean;
 };
+
+function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [assignedTo, setAssignedTo] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [dueDate, setDueDate] = useState("");
+  const [taskSearch, setTaskSearch] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
+  const [comment, setComment] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const createTask = async (event: FormEvent) => {
+    event.preventDefault();
+    const selectedFiles = files;
+    setWorking(true);
+    try {
+      const task = await api<CommunityDetail["tasks"][number]>(`/communities/${detail.community.id}/tasks`, {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          description,
+          assignedTo: assignedTo || null,
+          departmentId: departmentId || null,
+          locationId: locationId || null,
+          priority,
+          dueDate: dueDate ? `${dueDate}T23:59:59.000Z` : null,
+        }),
+      });
+      for (const file of selectedFiles) {
+        const upload = await api<{ uploadURL: string; objectPath: string }>(
+          "/storage/uploads/request-url",
+          { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }) },
+        );
+        const uploaded = await fetch(upload.uploadURL, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+        if (!uploaded.ok) throw new Error(`Could not upload ${file.name}`);
+        await api(`/communities/${detail.community.id}/tasks/${task.id}/attachments`, {
+          method: "POST",
+          body: JSON.stringify({ objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }),
+        });
+      }
+      setTitle("");
+      setDescription("");
+      setAssignedTo("");
+      setDepartmentId("");
+      setLocationId("");
+      setPriority("medium");
+      setDueDate("");
+      setFiles([]);
+      setNotice("Task created.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create task");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const updateStatus = async (taskId: number, status: string) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify({ status }) });
+      setNotice("Task status updated.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update task");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const addComment = async (event: FormEvent, taskId: number) => {
+    event.preventDefault();
+    if (!comment.trim()) return;
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/tasks/${taskId}/comments`, { method: "POST", body: JSON.stringify({ body: comment.trim() }) });
+      setComment("");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add task comment");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const visibleTasks = detail.tasks.filter((task) => {
+    const assignee = detail.members.find((member) => member.id === task.assignedTo);
+    const department = detail.departments.find((item) => item.id === task.departmentId);
+    const location = detail.locations.find((item) => item.id === task.locationId);
+    return [task.title, task.description, task.status, task.priority, assignee?.displayName, department?.name, location?.name]
+      .filter(Boolean).join(" ").toLowerCase().includes(taskSearch.trim().toLowerCase());
+  });
+  const selectedTask = detail.tasks.find((task) => task.id === selectedTaskId) ?? null;
+  const statusLabel: Record<string, string> = { todo: "To Do", in_progress: "In Progress", waiting: "Waiting", completed: "Completed", cancelled: "Cancelled" };
+  return <section className="space-y-5">
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">work management</p><h2 className="mt-2 font-mono text-xl font-bold">Tasks</h2><p className="mt-1 text-sm text-muted-foreground">Coordinate work across employees, departments, and locations.</p></div>
+      <input value={taskSearch} onChange={(event) => setTaskSearch(event.target.value)} placeholder="Search tasks…" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs sm:w-64" />
+    </div>
+    {detail.canManage && <form onSubmit={createTask} className="rounded-xl border border-border bg-card p-5">
+      <div className="flex items-center justify-between gap-3"><div><h3 className="font-mono text-sm font-bold">create task</h3><p className="mt-1 font-mono text-[10px] text-muted-foreground">Assign the work before it gets lost in chat.</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{detail.tasks.length} total</span></div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Task title" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs md:col-span-2" />
+        <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" className="min-h-20 rounded border border-input bg-background px-3 py-2 font-mono text-xs md:col-span-2" />
+        <select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Assign to employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select>
+        <select value={departmentId} onChange={(event) => setDepartmentId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Department</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <select value={locationId} onChange={(event) => setLocationId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Location</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <select value={priority} onChange={(event) => setPriority(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="low">Low priority</option><option value="medium">Medium priority</option><option value="high">High priority</option><option value="urgent">Urgent</option></select>
+        <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" />
+        <input type="file" multiple onChange={(event) => setFiles(Array.from(event.target.files ?? []))} className="h-9 min-w-0 rounded border border-input bg-background px-2 py-1.5 font-mono text-[10px] md:col-span-2" />
+      </div>
+      {files.length > 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">{files.length} attachment{files.length === 1 ? "" : "s"} selected</p>}
+      <button disabled={working} className="mt-4 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">create task</button>
+    </form>}
+    <div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
+      <section className="rounded-xl border border-border bg-card">
+        <div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">task queue</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{visibleTasks.length} matching task{visibleTasks.length === 1 ? "" : "s"}</p></div>
+        <div className="divide-y divide-border">{visibleTasks.map((task) => { const assignee = detail.members.find((member) => member.id === task.assignedTo); const department = detail.departments.find((item) => item.id === task.departmentId); const location = detail.locations.find((item) => item.id === task.locationId); return <button key={task.id} onClick={() => setSelectedTaskId(task.id)} className={`block w-full px-5 py-4 text-left hover:bg-muted/40 ${selectedTaskId === task.id ? "bg-muted/40" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs font-bold">{task.title}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{task.description || "No description."}</p></div><span className={`shrink-0 rounded px-2 py-1 font-mono text-[9px] uppercase ${task.priority === "urgent" ? "bg-destructive/15 text-destructive" : "bg-primary/10 text-primary"}`}>{task.priority}</span></div><div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>{statusLabel[task.status] ?? task.status}</span><span>{assignee?.displayName ?? "Unassigned"}</span>{department && <span>{department.name}</span>}{location && <span>{location.name}</span>}{task.dueDate && <span>due {new Date(task.dueDate).toLocaleDateString()}</span>}</div></button>; })}{visibleTasks.length === 0 && <EmptyAdminState label={taskSearch ? "No tasks match that search." : "No tasks yet."} />}</div>
+      </section>
+      <section className="rounded-xl border border-border bg-card">
+        {!selectedTask ? <div className="p-6"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">task details</p><p className="mt-3 text-sm text-muted-foreground">Select a task to view comments and attachments.</p></div> : <div><div className="border-b border-border p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="font-mono text-sm font-bold">{selectedTask.title}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{selectedTask.description || "No description."}</p></div>{detail.canManage && <select disabled={working} value={selectedTask.status} onChange={(event) => void updateStatus(selectedTask.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="todo">To Do</option><option value="in_progress">In Progress</option><option value="waiting">Waiting</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select>}</div></div><div className="p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">attachments</p><div className="mt-3 space-y-2">{selectedTask.attachments.map((attachment) => <a key={attachment.id} href={`/api/communities/${detail.community.id}/tasks/${selectedTask.id}/attachments/${attachment.id}`} target="_blank" rel="noreferrer" className="block rounded border border-border/70 px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{attachment.fileName}<span className="ml-2 text-[9px] text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)} KB</span></a>)}{selectedTask.attachments.length === 0 && <p className="text-xs text-muted-foreground">No attachments.</p>}</div><p className="mt-5 font-mono text-[10px] uppercase tracking-[.16em] text-primary">comments</p><div className="mt-3 space-y-3">{selectedTask.comments.map((item) => <div key={item.id} className="rounded border border-border/70 p-3"><p className="font-mono text-[10px]">{item.author}<span className="ml-2 text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</span></p><p className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">{item.body}</p></div>)}{selectedTask.comments.length === 0 && <p className="text-xs text-muted-foreground">No comments yet.</p>}</div><form onSubmit={(event) => void addComment(event, selectedTask.id)} className="mt-4 flex gap-2"><input required value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Add a comment" className="h-9 min-w-0 flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">comment</button></form></div></div>}
+      </section>
+    </div>
+  </section>;
+}
 
 function OrganizationPanel({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [department, setDepartment] = useState("");
@@ -1634,6 +1774,7 @@ function CommunityConsole() {
               <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
+             <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              {detail.canManage && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
            </div>}
         </section>

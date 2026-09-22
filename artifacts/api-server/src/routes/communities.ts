@@ -22,7 +22,11 @@ import {
   workspaceInvitationsTable,
   workspacePoliciesTable,
   policyAcknowledgementsTable,
+  workspaceTasksTable,
+  workspaceTaskCommentsTable,
+  workspaceTaskAttachmentsTable,
 } from "@workspace/db";
+import { signedObjectUrlForPath } from "./storage";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import {
   communityForId,
@@ -241,7 +245,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     res.status(404).json({ error: "Business workspace not found." });
     return;
   }
-  const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies] = await Promise.all([
+  const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments] = await Promise.all([
     db.select({
       id: usersTable.clerkId,
       username: usersTable.username,
@@ -286,6 +290,29 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .where(eq(employeeProfilesTable.communityId, community.id)),
     db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id)).orderBy(desc(workspaceInvitationsTable.createdAt)).limit(50),
     db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt)),
+    db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.updatedAt)),
+    db.select({
+      id: workspaceTaskCommentsTable.id,
+      taskId: workspaceTaskCommentsTable.taskId,
+      authorId: workspaceTaskCommentsTable.authorId,
+      author: usersTable.displayName,
+      body: workspaceTaskCommentsTable.body,
+      createdAt: workspaceTaskCommentsTable.createdAt,
+    }).from(workspaceTaskCommentsTable).innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
+      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskCommentsTable.taskId))
+      .where(eq(workspaceTasksTable.communityId, community.id)).orderBy(asc(workspaceTaskCommentsTable.createdAt)),
+    db.select({
+      id: workspaceTaskAttachmentsTable.id,
+      taskId: workspaceTaskAttachmentsTable.taskId,
+      uploaderId: workspaceTaskAttachmentsTable.uploaderId,
+      objectPath: workspaceTaskAttachmentsTable.objectPath,
+      fileName: workspaceTaskAttachmentsTable.fileName,
+      contentType: workspaceTaskAttachmentsTable.contentType,
+      fileSize: workspaceTaskAttachmentsTable.fileSize,
+      createdAt: workspaceTaskAttachmentsTable.createdAt,
+    }).from(workspaceTaskAttachmentsTable)
+      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
+      .where(eq(workspaceTasksTable.communityId, community.id)),
   ]);
   const visibleChannels = (await Promise.all(channels.map(async (channel) => {
     if (!channel.isPrivate) return channel;
@@ -331,8 +358,153 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     employees: directoryEmployees,
     invitations: invitations.map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
     policies,
+    tasks: tasks.map((task) => ({
+      ...task,
+      comments: taskComments.filter((comment) => comment.taskId === task.id),
+      attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
+    })),
     canManage: await communityPermission(userId, community.id, "manage_community"),
   });
+});
+
+router.post("/communities/:communityId/tasks", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage tasks in this workspace." });
+    return;
+  }
+  const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 160) : "";
+  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 10000) : "";
+  const assignedTo = typeof req.body?.assignedTo === "string" && req.body.assignedTo ? req.body.assignedTo : null;
+  const departmentId = req.body?.departmentId ? Number(req.body.departmentId) : null;
+  const locationId = req.body?.locationId ? Number(req.body.locationId) : null;
+  const priority = typeof req.body?.priority === "string" ? req.body.priority : "medium";
+  const dueDate = req.body?.dueDate ? new Date(req.body.dueDate) : null;
+  if (!title) {
+    res.status(400).json({ error: "A task title is required." });
+    return;
+  }
+  if (!["low", "medium", "high", "urgent"].includes(priority) || (dueDate && Number.isNaN(dueDate.getTime()))) {
+    res.status(400).json({ error: "Invalid task priority or due date." });
+    return;
+  }
+  if (assignedTo) {
+    const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, assignedTo)));
+    if (!member) {
+      res.status(400).json({ error: "The assignee must be a member of this workspace." });
+      return;
+    }
+  }
+  const [task] = await db.insert(workspaceTasksTable).values({
+    communityId, title, description, assignedTo, departmentId, locationId, priority, dueDate, createdBy: userId,
+  }).returning();
+  await writeCommunityAudit(userId, "created_workspace_task", communityId, title);
+  res.status(201).json({ ...task, comments: [], attachments: [] });
+});
+
+router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const taskId = Number(param(req, "taskId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(taskId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot update tasks in this workspace." });
+    return;
+  }
+  const [current] = await db.select().from(workspaceTasksTable)
+    .where(and(eq(workspaceTasksTable.id, taskId), eq(workspaceTasksTable.communityId, communityId)));
+  if (!current) {
+    res.status(404).json({ error: "Task not found." });
+    return;
+  }
+  const allowedStatuses = ["todo", "in_progress", "waiting", "completed", "cancelled"];
+  const status = typeof req.body?.status === "string" ? req.body.status : undefined;
+  const priority = typeof req.body?.priority === "string" ? req.body.priority : undefined;
+  const dueDate = req.body?.dueDate === null ? null : req.body?.dueDate ? new Date(req.body.dueDate) : undefined;
+  if (status !== undefined && !allowedStatuses.includes(status)) {
+    res.status(400).json({ error: "Invalid task status." });
+    return;
+  }
+  if (priority !== undefined && !["low", "medium", "high", "urgent"].includes(priority)) {
+    res.status(400).json({ error: "Invalid task priority." });
+    return;
+  }
+  if (dueDate instanceof Date && Number.isNaN(dueDate.getTime())) {
+    res.status(400).json({ error: "Invalid due date." });
+    return;
+  }
+  const [updated] = await db.update(workspaceTasksTable).set({
+    ...(typeof req.body?.title === "string" ? { title: req.body.title.trim().slice(0, 160) } : {}),
+    ...(typeof req.body?.description === "string" ? { description: req.body.description.trim().slice(0, 10000) } : {}),
+    ...(typeof req.body?.assignedTo === "string" || req.body?.assignedTo === null ? { assignedTo: req.body.assignedTo || null } : {}),
+    ...(status === undefined ? {} : { status, completedAt: status === "completed" ? new Date() : null }),
+    ...(priority === undefined ? {} : { priority }),
+    ...(dueDate === undefined ? {} : { dueDate }),
+    updatedAt: new Date(),
+  }).where(eq(workspaceTasksTable.id, taskId)).returning();
+  await writeCommunityAudit(userId, "updated_workspace_task", communityId, `${taskId}${status ? ` → ${status}` : ""}`);
+  res.json({ ...updated, comments: [], attachments: [] });
+});
+
+router.post("/communities/:communityId/tasks/:taskId/comments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const taskId = Number(param(req, "taskId"));
+  const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 5000) : "";
+  const [task] = await db.select({ id: workspaceTasksTable.id }).from(workspaceTasksTable)
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, workspaceTasksTable.communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(workspaceTasksTable.id, taskId), eq(workspaceTasksTable.communityId, communityId)));
+  if (!task) {
+    res.status(404).json({ error: "Task not found." });
+    return;
+  }
+  if (!body) {
+    res.status(400).json({ error: "A comment is required." });
+    return;
+  }
+  const [comment] = await db.insert(workspaceTaskCommentsTable).values({ taskId, authorId: userId, body }).returning();
+  await writeCommunityAudit(userId, "commented_on_workspace_task", communityId, String(taskId));
+  res.status(201).json(comment);
+});
+
+router.post("/communities/:communityId/tasks/:taskId/attachments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const taskId = Number(param(req, "taskId"));
+  const [task] = await db.select({ id: workspaceTasksTable.id }).from(workspaceTasksTable)
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, workspaceTasksTable.communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(workspaceTasksTable.id, taskId), eq(workspaceTasksTable.communityId, communityId)));
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
+  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
+  const fileSize = Number(req.body?.fileSize);
+  if (!task) {
+    res.status(404).json({ error: "Task not found." });
+    return;
+  }
+  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+    res.status(400).json({ error: "Invalid task attachment." });
+    return;
+  }
+  const [attachment] = await db.insert(workspaceTaskAttachmentsTable).values({ taskId, uploaderId: userId, objectPath, fileName, contentType, fileSize }).returning();
+  res.status(201).json(attachment);
+});
+
+router.get("/communities/:communityId/tasks/:taskId/attachments/:attachmentId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const taskId = Number(param(req, "taskId"));
+  const attachmentId = Number(param(req, "attachmentId"));
+  const [attachment] = await db.select({ objectPath: workspaceTaskAttachmentsTable.objectPath }).from(workspaceTaskAttachmentsTable)
+    .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, workspaceTasksTable.communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(workspaceTaskAttachmentsTable.id, attachmentId), eq(workspaceTaskAttachmentsTable.taskId, taskId), eq(workspaceTasksTable.communityId, communityId)));
+  if (!attachment) {
+    res.status(404).json({ error: "Attachment not found." });
+    return;
+  }
+  res.redirect(await signedObjectUrlForPath(attachment.objectPath));
 });
 
 router.post("/communities/:communityId/departments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

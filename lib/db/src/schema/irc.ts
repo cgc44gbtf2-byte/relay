@@ -214,6 +214,42 @@ export const policyAcknowledgementsTable = pgTable("irc_policy_acknowledgements"
   acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [primaryKey({ columns: [table.policyId, table.userId] })]);
 
+export const workspaceTasksTable = pgTable("irc_workspace_tasks", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  description: text("description").notNull().default(""),
+  assignedTo: text("assigned_to").references(() => usersTable.clerkId, { onDelete: "set null" }),
+  departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
+  locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
+  priority: text("priority").notNull().default("medium"),
+  dueDate: timestamp("due_date", { withTimezone: true }),
+  status: text("status").notNull().default("todo"),
+  createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
+
+export const workspaceTaskCommentsTable = pgTable("irc_workspace_task_comments", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => workspaceTasksTable.id, { onDelete: "cascade" }),
+  authorId: text("author_id").notNull().references(() => usersTable.clerkId),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const workspaceTaskAttachmentsTable = pgTable("irc_workspace_task_attachments", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => workspaceTasksTable.id, { onDelete: "cascade" }),
+  uploaderId: text("uploader_id").notNull().references(() => usersTable.clerkId),
+  objectPath: text("object_path").notNull(),
+  fileName: text("file_name").notNull(),
+  contentType: text("content_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const channelsTable = pgTable(
   "irc_channels",
   {
@@ -422,3 +458,6 @@ export type Team = typeof teamsTable.$inferSelect;
 export type EmployeeProfile = typeof employeeProfilesTable.$inferSelect;
 export type WorkspaceInvitation = typeof workspaceInvitationsTable.$inferSelect;
 export type WorkspacePolicy = typeof workspacePoliciesTable.$inferSelect;
+export type WorkspaceTask = typeof workspaceTasksTable.$inferSelect;
+export type WorkspaceTaskComment = typeof workspaceTaskCommentsTable.$inferSelect;
+export type WorkspaceTaskAttachment = typeof workspaceTaskAttachmentsTable.$inferSelect;
