@@ -578,10 +578,13 @@ export const developerReleasesTable = pgTable("irc_developer_releases", {
   createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
   reviewedBy: text("reviewed_by").references(() => usersTable.clerkId),
   publishedBy: text("published_by").references(() => usersTable.clerkId),
+  announcementId: integer("announcement_id").references(() => serverAnnouncementsTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   publishedAt: timestamp("published_at", { withTimezone: true }),
-});
+}, (table) => [
+  uniqueIndex("irc_developer_releases_announcement_idx").on(table.announcementId),
+]);
 
 export const insertUserSchema = createInsertSchema(usersTable);
 export const insertChannelSchema = createInsertSchema(channelsTable);

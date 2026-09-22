@@ -1,10 +1,13 @@
 import { Router, type IRouter } from "express";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import {
   adminAuditLogsTable,
   db,
   developerReleasesTable,
   developerSettingsTable,
+  notificationsTable,
+  serverAnnouncementsTable,
+  usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 
@@ -164,13 +167,80 @@ router.patch("/developer/releases/:releaseId/status", requireAuth, async (req: A
     return;
   }
   const now = new Date();
-  const [updated] = await db.update(developerReleasesTable).set({
-    status: nextStatus,
-    ...(nextStatus === "review" ? { reviewedBy: actor.clerkId, reviewedAt: now } : {}),
-    ...(nextStatus === "published" ? { publishedBy: actor.clerkId, publishedAt: now } : {}),
-  }).where(eq(developerReleasesTable.id, releaseId)).returning();
+  const updated = await db.transaction(async (tx) => {
+    const [release] = await tx.update(developerReleasesTable).set({
+      status: nextStatus,
+      ...(nextStatus === "review" ? { reviewedBy: actor.clerkId, reviewedAt: now } : {}),
+      ...(nextStatus === "published" ? { publishedBy: actor.clerkId, publishedAt: now } : {}),
+    }).where(eq(developerReleasesTable.id, releaseId)).returning();
+    if (!release) throw new Error("Release update failed.");
+    if (nextStatus !== "published" || release.announcementId) return release;
+    const [draft] = await tx.insert(serverAnnouncementsTable).values({
+      authorId: actor.clerkId,
+      title: `Release ${release.version}: ${release.title}`,
+      body: release.notes || `Release ${release.version} is ready for announcement review.`,
+      audienceType: "company",
+      status: "draft",
+    }).returning({ id: serverAnnouncementsTable.id });
+    if (!draft) throw new Error("Release announcement draft could not be created.");
+    const [linked] = await tx.update(developerReleasesTable)
+      .set({ announcementId: draft.id })
+      .where(eq(developerReleasesTable.id, release.id))
+      .returning();
+    if (!linked) throw new Error("Release announcement draft could not be linked.");
+    return linked;
+  });
   await writeDeveloperAudit(actor.clerkId, actor.displayName, `release_${nextStatus}`, String(updated.id), `${updated.version} · ${updated.title}`);
   res.json(updated);
+});
+
+router.patch("/developer/releases/:releaseId/announcement", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await developerProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Developer access required." });
+    return;
+  }
+  const releaseId = Number(Array.isArray(req.params.releaseId) ? req.params.releaseId[0] : req.params.releaseId);
+  if (!Number.isInteger(releaseId) || req.body?.status !== "published") {
+    res.status(400).json({ error: "A valid release and announcement status are required." });
+    return;
+  }
+  const [release] = await db.select().from(developerReleasesTable).where(eq(developerReleasesTable.id, releaseId));
+  if (!release) {
+    res.status(404).json({ error: "Release not found." });
+    return;
+  }
+  if (release.status !== "published" || !release.announcementId) {
+    res.status(400).json({ error: "Publish the release before publishing its announcement." });
+    return;
+  }
+  const [announcement] = await db.update(serverAnnouncementsTable).set({ status: "published" })
+    .where(and(
+      eq(serverAnnouncementsTable.id, release.announcementId),
+      eq(serverAnnouncementsTable.status, "draft"),
+    )).returning();
+  if (!announcement) {
+    res.status(409).json({ error: "This release announcement is already published or unavailable." });
+    return;
+  }
+  const recipients = await db.select({ userId: usersTable.clerkId }).from(usersTable);
+  if (recipients.length) {
+    await db.insert(notificationsTable).values(recipients.map((recipient) => ({
+      userId: recipient.userId,
+      type: "server_announcement",
+      category: "announcement",
+      body: `${announcement.title}: ${announcement.body}`,
+    })));
+  }
+  await writeDeveloperAudit(
+    actor.clerkId,
+    actor.displayName,
+    "published_release_announcement",
+    String(announcement.id),
+    "release announcement",
+    `${release.version} · ${release.title}`,
+  );
+  res.json({ release, announcement });
 });
 
 export default router;

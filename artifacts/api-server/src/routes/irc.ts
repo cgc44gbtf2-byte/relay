@@ -1136,7 +1136,10 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
     })
     .from(serverAnnouncementsTable)
     .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
-    .where(visibility)
+    .where(and(
+      eq(serverAnnouncementsTable.status, "published"),
+      visibility,
+    ))
     .orderBy(desc(serverAnnouncementsTable.createdAt))
     .limit(20);
   res.json(announcements);
