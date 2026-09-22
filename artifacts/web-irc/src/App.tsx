@@ -1296,6 +1296,7 @@ type CommunitySummary = {
   id: number;
   name: string;
   slug: string;
+  plan: "free_community" | "paid_workspace";
   description: string;
   rules: string;
   businessType: string;
@@ -1314,6 +1315,7 @@ type OnboardingCommunity = {
   id: number;
   name: string;
   slug: string;
+  plan: "free_community" | "paid_workspace";
   onboardingStep: number;
   joined: boolean;
   canManage: boolean;
@@ -1903,7 +1905,7 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
   const [location, setLocation] = useState("");
   const [team, setTeam] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("employee");
+  const [inviteRole, setInviteRole] = useState("member");
   const [inviteToken, setInviteToken] = useState("");
   const [ownershipTarget, setOwnershipTarget] = useState("");
   const [policyTitle, setPolicyTitle] = useState("");
@@ -2301,18 +2303,23 @@ function OnboardingPage() {
     setState(next);
     if (!next.ownerCommunity) {
       setCommunity(null);
+      setError("Relay could not provision your free community. Please try again.");
       return;
     }
-    const detail = await api<CommunityDetail>(`/communities/${next.ownerCommunity.id}?view=summary`);
-    setCommunity(detail.community);
-    setName(detail.community.name);
-    setDescription(detail.community.description);
-    setRules(detail.community.rules);
-    setServices(detail.community.services);
-    setServiceArea(detail.community.serviceArea);
-    setBusinessHours(detail.community.businessHours);
-    setContactEmail(detail.community.contactEmail);
-    setContactPhone(detail.community.contactPhone);
+    setCommunity({
+      ...next.ownerCommunity,
+      description: "",
+      rules: "",
+      businessType: "community",
+      services: "",
+      serviceArea: "",
+      businessHours: "",
+      contactEmail: "",
+      contactPhone: "",
+      status: "active",
+      isPrivate: false,
+    });
+    setName(next.ownerCommunity.name);
   };
 
   useEffect(() => {
@@ -2409,13 +2416,13 @@ function OnboardingPage() {
   const step = state?.nextStep ?? "create";
   return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10">
     <main className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm font-bold">relay / workspace setup</p><p className="mt-1 font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">save your progress and return anytime</p></div><a href={`${basePath}/`} className="font-mono text-[10px] text-muted-foreground hover:text-primary">relay home</a></div>
-      <div className="mt-10 grid grid-cols-3 gap-2">{[["create", "create"], ["configure", "configure"], ["invite", "invite"]].map(([key, label], index) => <div key={key} className={`rounded-lg border p-3 ${step === key ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}><p className="font-mono text-[9px] uppercase">0{index + 1}</p><p className="mt-1 font-mono text-xs font-bold">{label}</p></div>)}</div>
+      <div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm font-bold">relay / free community</p><p className="mt-1 font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">your community is ready automatically</p></div><a href={`${basePath}/`} className="font-mono text-[10px] text-muted-foreground hover:text-primary">relay home</a></div>
+      <div className="mt-10 rounded-lg border border-primary/30 bg-primary/10 p-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">free community</p><p className="mt-2 text-sm leading-6 text-muted-foreground">Relay created <span className="font-semibold text-foreground">{community?.name ?? "your community"}</span> with welcome and general rooms. No workspace setup is required.</p></div>
       {error && <div className="mt-6 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}</div>}
       {notice && <div className="mt-6 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}</div>}
-      {!community && <form onSubmit={createCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 01 / create</p><h1 className="mt-2 font-mono text-3xl font-bold">Create your community.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Start with a private workspace. Relay will create the first rooms and make you the owner.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">community name</span><input required autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Northstar Services" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="mt-4 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">short description</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="A home for our team and daily work" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating…" : "create workspace"}</button></form>}
+      {!community && <div className="mt-8 rounded-2xl border border-border bg-card p-6 font-mono text-sm text-muted-foreground">Preparing your free community…</div>}
       {community && step === "configure" && <form onSubmit={configureCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 02 / configure</p><h1 className="mt-2 font-mono text-3xl font-bold">Make it useful on day one.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Add the context people need before they join. You can change any of this later.</p><div className="mt-7 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace name</span><input required value={name} onChange={(event) => setName(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services or focus</span><input value={services} onChange={(event) => setServices(event.target.value)} placeholder="Operations, design, support" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={serviceArea} onChange={(event) => setServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={businessHours} onChange={(event) => setBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">rules and expectations</span><textarea value={rules} onChange={(event) => setRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "saving…" : "save and invite people"}</button></form>}
-      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 03 / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter one or more verified email addresses. Relay creates a one-time token for each person to use after signing in.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><label className="mt-4 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">role</span><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs"><option value="employee">employee</option><option value="member">member</option><option value="contractor">contractor</option></select></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create invitations" : "skip and start using Relay"}</button></form>}
+      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">optional / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter email addresses to create member invitations. You can also skip this and start using your free community right away.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create member invitations" : "skip and start using Relay"}</button></form>}
     </main>
   </div>;
 }

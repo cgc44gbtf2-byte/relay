@@ -74,6 +74,7 @@ function onboardingCommunity(community: typeof communitiesTable.$inferSelect, jo
     id: community.id,
     name: community.name,
     slug: community.slug,
+    plan: community.plan,
     onboardingStep: community.onboardingStep,
     joined,
     canManage,
@@ -84,6 +85,72 @@ function onboardingNextStep(ownerCommunity: ReturnType<typeof onboardingCommunit
   if (!ownerCommunity) return hasMembership ? "start" : "create";
   if (ownerCommunity.onboardingStep >= 9) return "start";
   return ownerCommunity.onboardingStep >= 2 ? "invite" : "configure";
+}
+
+async function provisionFreeCommunity(userId: string, displayName: string) {
+  const slug = `relay-${slugify(userId).slice(-20) || randomUUID().slice(0, 8)}`;
+  const name = `${displayName.trim().slice(0, 56) || "Relay"} community`;
+  const existing = await db.select().from(communitiesTable).where(and(
+    eq(communitiesTable.ownerId, userId),
+    eq(communitiesTable.plan, "free_community"),
+  )).orderBy(desc(communitiesTable.createdAt)).limit(1);
+  if (existing[0]) return existing[0];
+  try {
+    return await db.transaction(async (tx) => {
+      const [created] = await tx.insert(communitiesTable).values({
+        name,
+        slug,
+        description: "A free Relay community.",
+        businessType: "community",
+        plan: "free_community",
+        onboardingStep: 2,
+        isPrivate: false,
+        ownerId: userId,
+      }).returning();
+      await tx.insert(communityMembersTable).values({ communityId: created.id, userId, status: "owner" });
+      await tx.insert(employeeProfilesTable).values({ communityId: created.id, userId, employmentStatus: "active", onboardedAt: new Date() });
+      await tx.insert(userRolesTable).values({
+        userId,
+        role: "community_admin",
+        scopeType: "community",
+        communityId: created.id,
+        grantedBy: userId,
+      });
+      const [generalCategory] = await tx.insert(categoriesTable).values({
+        name: "community",
+        description: "Shared rooms for the community.",
+        ownerId: userId,
+        communityId: created.id,
+      }).returning({ id: categoriesTable.id });
+      const defaultChannels = [
+        ["#welcome", "Introduce yourself and meet the community."],
+        ["#general", "The main room for conversation."],
+      ];
+      const createdChannels = await tx.insert(channelsTable).values(defaultChannels.map(([channelName, topic]) => ({
+        name: channelName,
+        topic,
+        ownerId: userId,
+        communityId: created.id,
+        categoryId: generalCategory.id,
+        isPrivate: false,
+      }))).returning({ id: channelsTable.id });
+      if (createdChannels.length) {
+        await tx.insert(channelMembersTable).values(createdChannels.map((channel) => ({
+          channelId: channel.id,
+          userId,
+          role: "owner",
+        })));
+      }
+      return created;
+    });
+  } catch {
+    const [createdByAnotherRequest] = await db.select().from(communitiesTable).where(and(
+      eq(communitiesTable.ownerId, userId),
+      eq(communitiesTable.plan, "free_community"),
+    )).orderBy(desc(communitiesTable.createdAt)).limit(1);
+    if (createdByAnotherRequest) return createdByAnotherRequest;
+    throw new Error("Unable to create a free community");
+  }
 }
 
 async function requireWorkspaceManager(userId: string, communityId: number): Promise<boolean> {
@@ -275,16 +342,20 @@ router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest
 
 router.get("/onboarding", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  await ensureProfile(userId);
+  const profile = await ensureProfile(userId);
+  await provisionFreeCommunity(userId, profile.displayName);
   const [ownedCommunities, memberships] = await Promise.all([
     db.select().from(communitiesTable)
-      .where(eq(communitiesTable.ownerId, userId))
+      .where(and(eq(communitiesTable.ownerId, userId), eq(communitiesTable.plan, "free_community")))
       .orderBy(desc(communitiesTable.createdAt)),
     db.select({
       community: communitiesTable,
     }).from(communityMembersTable)
       .innerJoin(communitiesTable, eq(communitiesTable.id, communityMembersTable.communityId))
-      .where(eq(communityMembersTable.userId, userId))
+      .where(and(
+        eq(communityMembersTable.userId, userId),
+        eq(communitiesTable.plan, "free_community"),
+      ))
       .orderBy(desc(communitiesTable.createdAt)),
   ]);
   const ownerCommunity = ownedCommunities[0] ? onboardingCommunity(ownedCommunities[0], true, true) : null;
@@ -333,7 +404,9 @@ router.post("/onboarding/:communityId/progress", requireAuth, async (req: Authen
 router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   await ensureProfile(userId);
-  const communities = await db.select().from(communitiesTable).orderBy(asc(communitiesTable.name));
+  const communities = await db.select().from(communitiesTable)
+    .where(eq(communitiesTable.plan, "paid_workspace"))
+    .orderBy(asc(communitiesTable.name));
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
@@ -389,6 +462,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         businessHours,
         contactEmail,
         contactPhone,
+        plan: "paid_workspace",
         onboardingStep: req.body?.onboarding === true ? 1 : 9,
         isPrivate,
         ownerId: userId,
@@ -1460,6 +1534,11 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
   }
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase().slice(0, 320) : "";
   const role = typeof req.body?.role === "string" ? req.body.role.trim().slice(0, 60) : "member";
+  const [community] = await db.select({ plan: communitiesTable.plan })
+    .from(communitiesTable)
+    .where(eq(communitiesTable.id, communityId))
+    .limit(1);
+  const invitationRole = community?.plan === "free_community" ? "member" : role;
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     res.status(400).json({ error: "A valid employee email is required." });
     return;
@@ -1477,7 +1556,7 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
   ));
   const [invitation] = existingPending
     ? await db.update(workspaceInvitationsTable).set({
-      role,
+      role: invitationRole,
       invitedBy: userId,
       tokenHash,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
@@ -1486,7 +1565,7 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     : await db.insert(workspaceInvitationsTable).values({
       communityId,
       email,
-      role,
+      role: invitationRole,
       invitedBy: userId,
       tokenHash,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),

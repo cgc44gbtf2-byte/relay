@@ -44,6 +44,7 @@ export const communitiesTable = pgTable(
     description: text("description").notNull().default(""),
     rules: text("rules").notNull().default(""),
     businessType: text("business_type").notNull().default("service_business"),
+    plan: text("plan").notNull().default("paid_workspace"),
     services: text("services").notNull().default(""),
     serviceArea: text("service_area").notNull().default(""),
     businessHours: text("business_hours").notNull().default(""),
@@ -55,7 +56,12 @@ export const communitiesTable = pgTable(
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_communities_slug_idx").on(table.slug)],
+  (table) => [
+    uniqueIndex("irc_communities_slug_idx").on(table.slug),
+    uniqueIndex("irc_communities_free_owner_idx")
+      .on(table.ownerId)
+      .where(sql`${table.plan} = 'free_community'`),
+  ],
 );
 
 export const permissionDefinitionsTable = pgTable(

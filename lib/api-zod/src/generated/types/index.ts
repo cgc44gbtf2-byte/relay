@@ -17,6 +17,7 @@ export * from './ircState';
 export * from './ircUser';
 export * from './ircUserStatus';
 export * from './onboardingCommunity';
+export * from './onboardingCommunityPlan';
 export * from './onboardingProgress';
 export * from './onboardingProgressInput';
 export * from './onboardingProgressInputStep';

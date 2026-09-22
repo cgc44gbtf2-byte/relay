@@ -270,13 +270,16 @@ components:
           type: string
         slug:
           type: string
+        plan:
+          type: string
+          enum: [free_community, paid_workspace]
         onboardingStep:
           type: integer
         joined:
           type: boolean
         canManage:
           type: boolean
-      required: [id, name, slug, onboardingStep, joined, canManage]
+      required: [id, name, slug, plan, onboardingStep, joined, canManage]
     OnboardingState:
       type: object
       properties:

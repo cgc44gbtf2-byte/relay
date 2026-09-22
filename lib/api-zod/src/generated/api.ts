@@ -128,6 +128,7 @@ export const GetOnboardingStateResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
   "slug": zod.string(),
+  "plan": zod.enum(['free_community', 'paid_workspace']),
   "onboardingStep": zod.number().int(),
   "joined": zod.boolean(),
   "canManage": zod.boolean()
@@ -136,6 +137,7 @@ export const GetOnboardingStateResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
   "slug": zod.string(),
+  "plan": zod.enum(['free_community', 'paid_workspace']),
   "onboardingStep": zod.number().int(),
   "joined": zod.boolean(),
   "canManage": zod.boolean()
@@ -159,6 +161,7 @@ export const AdvanceOnboardingResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
   "slug": zod.string(),
+  "plan": zod.enum(['free_community', 'paid_workspace']),
   "onboardingStep": zod.number().int(),
   "joined": zod.boolean(),
   "canManage": zod.boolean()

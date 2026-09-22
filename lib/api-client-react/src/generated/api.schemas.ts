@@ -76,10 +76,19 @@ export interface IrcMessageInput {
   text: string;
 }
 
+export type OnboardingCommunityPlan = typeof OnboardingCommunityPlan[keyof typeof OnboardingCommunityPlan];
+
+
+export const OnboardingCommunityPlan = {
+  free_community: 'free_community',
+  paid_workspace: 'paid_workspace',
+} as const;
+
 export interface OnboardingCommunity {
   id: number;
   name: string;
   slug: string;
+  plan: OnboardingCommunityPlan;
   onboardingStep: number;
   joined: boolean;
   canManage: boolean;

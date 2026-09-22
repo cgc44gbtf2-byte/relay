@@ -5,11 +5,13 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { OnboardingCommunityPlan } from './onboardingCommunityPlan';
 
 export interface OnboardingCommunity {
   id: number;
   name: string;
   slug: string;
+  plan: OnboardingCommunityPlan;
   onboardingStep: number;
   joined: boolean;
   canManage: boolean;
