@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   channelsTable,
   categoriesTable,
@@ -294,6 +294,15 @@ function roleAllows(role: string, permission: PermissionKey): boolean {
   return role in ROLE_PERMISSIONS && ROLE_PERMISSIONS[role as AuthorizationRole].includes(permission);
 }
 
+async function customRoleAllows(role: string, permission: PermissionKey): Promise<boolean> {
+  const [match] = await db.select({ role: rolePermissionsTable.role })
+    .from(rolePermissionsTable)
+    .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+    .where(and(eq(rolePermissionsTable.role, role), eq(permissionDefinitionsTable.key, permission)))
+    .limit(1);
+  return Boolean(match);
+}
+
 function roleRank(role: string): number {
   return role === "admin" ? 8
     : role === "platform_moderator" ? 7
@@ -326,7 +335,10 @@ export async function hasPermission(
     const primaryAssignment = assignments.find((assignment) => assignment.role === user.role);
     if (user.role !== "community_admin" || (primaryAssignment && assignmentMatches(primaryAssignment, scope))) return true;
   }
-  return assignments.some((assignment) => roleAllows(assignment.role, permission) && assignmentMatches(assignment, scope));
+  for (const assignment of assignments) {
+    if (assignmentMatches(assignment, scope) && (roleAllows(assignment.role, permission) || await customRoleAllows(assignment.role, permission))) return true;
+  }
+  return false;
 }
 
 export async function permissionsForUser(userId: string): Promise<{
@@ -343,6 +355,16 @@ export async function permissionsForUser(userId: string): Promise<{
   for (const assignment of assignments) {
     if (assignment.role in ROLE_PERMISSIONS) {
       for (const permission of ROLE_PERMISSIONS[assignment.role as AuthorizationRole]) permissionSet.add(permission);
+    }
+  }
+  const customRoleNames = assignments.map((assignment) => assignment.role).filter((role) => !(role in ROLE_PERMISSIONS));
+  if (customRoleNames.length) {
+    const customPermissions = await db.select({ key: permissionDefinitionsTable.key })
+      .from(rolePermissionsTable)
+      .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+      .where(inArray(rolePermissionsTable.role, customRoleNames));
+    for (const item of customPermissions) {
+      if (PERMISSIONS.includes(item.key as PermissionKey)) permissionSet.add(item.key as PermissionKey);
     }
   }
   const effectiveRole = [user?.role ?? "member", ...assignments.map((assignment) => assignment.role)]

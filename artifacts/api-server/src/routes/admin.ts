@@ -6,16 +6,19 @@ import {
   channelMembersTable,
   channelsTable,
   communitiesTable,
+  customRolesTable,
   db,
   messagesTable,
   notificationsTable,
+  permissionDefinitionsTable,
+  rolePermissionsTable,
   serverAnnouncementsTable,
   userRolesTable,
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { channelNotFoundError } from "./errors";
-import { PRIMARY_ROLES } from "../lib/permissions";
+import { PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -446,6 +449,58 @@ router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest
   res.json({ communities, categories, channels });
 });
 
+router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const [roles, links] = await Promise.all([
+    db.select().from(customRolesTable).where(eq(customRolesTable.isActive, true)).orderBy(asc(customRolesTable.label)),
+    db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
+      .from(rolePermissionsTable)
+      .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId)),
+  ]);
+  res.json({
+    roles: roles.map((role) => ({ ...role, permissions: links.filter((link) => link.role === role.key).map((link) => link.permission) })),
+    permissions: PERMISSIONS.map((key) => ({ key })),
+  });
+});
+
+router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const label = typeof req.body?.label === "string" ? req.body.label.trim().slice(0, 60) : "";
+  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 240) : "";
+  const scopeType = req.body?.scopeType;
+  const requested = Array.isArray(req.body?.permissions) ? req.body.permissions.filter((value: unknown): value is string => typeof value === "string") : [];
+  const permissions = [...new Set(requested)].filter((value): value is typeof PERMISSIONS[number] => PERMISSIONS.includes(value as typeof PERMISSIONS[number]));
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
+  const key = `custom_${slug}`;
+  if (!label || !slug || !["community", "category", "channel"].includes(scopeType) || permissions.length === 0) {
+    res.status(400).json({ error: "Name, scope, and at least one valid permission are required." });
+    return;
+  }
+  try {
+    const role = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(customRolesTable).values({ key, label, description, scopeType, createdBy: actor.clerkId }).returning();
+      const definitions = await tx.select({ id: permissionDefinitionsTable.id, key: permissionDefinitionsTable.key })
+        .from(permissionDefinitionsTable);
+      const ids = new Map(definitions.map((definition) => [definition.key, definition.id]));
+      const links = permissions.map((permission) => ids.get(permission)).filter((id): id is number => id !== undefined)
+        .map((permissionId) => ({ role: key, permissionId }));
+      if (links.length) await tx.insert(rolePermissionsTable).values(links);
+      return created;
+    });
+    await writeAudit(actor.clerkId, actor.displayName, "created_custom_role", key, label, permissions.join(", "));
+    res.status(201).json({ ...role, permissions });
+  } catch (error) {
+    res.status(isUniqueViolation(error) ? 409 : 500).json({ error: isUniqueViolation(error) ? "A custom role with that name already exists." : "Could not create custom role." });
+  }
+});
+
 router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const actor = await adminProfile(req);
   if (!actor) {
@@ -458,8 +513,16 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
   const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
   const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null ? null : Number(req.body.categoryId);
   const channelId = req.body?.channelId === undefined || req.body.channelId === null ? null : Number(req.body.channelId);
-  if (!userId || !["platform_moderator", "workspace_owner", "workspace_admin", "department_admin", "manager", "moderator"].includes(role) || !["platform", "community", "category", "channel"].includes(scopeType)) {
+  const [customRole] = typeof role === "string"
+    ? await db.select().from(customRolesTable).where(and(eq(customRolesTable.key, role), eq(customRolesTable.isActive, true))).limit(1)
+    : [];
+  const builtInRole = ["platform_moderator", "workspace_owner", "workspace_admin", "department_admin", "manager", "moderator"].includes(role);
+  if (!userId || (!builtInRole && !customRole) || !["platform", "community", "category", "channel"].includes(scopeType)) {
     res.status(400).json({ error: "A valid scoped role assignment is required." });
+    return;
+  }
+  if (customRole && customRole.scopeType !== scopeType) {
+    res.status(400).json({ error: `This custom role requires a ${customRole.scopeType} scope.` });
     return;
   }
   if (scopeType === "platform" && role !== "platform_moderator") {

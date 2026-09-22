@@ -67,6 +67,20 @@ export const permissionDefinitionsTable = pgTable(
   (table) => [uniqueIndex("irc_permission_definitions_key_idx").on(table.key)],
 );
 
+export const customRolesTable = pgTable(
+  "irc_custom_roles",
+  {
+    key: text("key").primaryKey(),
+    label: text("label").notNull(),
+    description: text("description").notNull().default(""),
+    scopeType: text("scope_type").notNull().default("community"),
+    createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
 export const rolePermissionsTable = pgTable(
   "irc_role_permissions",
   {
@@ -306,3 +320,4 @@ export type Message = typeof messagesTable.$inferSelect;
 export type AdminAuditLog = typeof adminAuditLogsTable.$inferSelect;
 export type DeveloperSetting = typeof developerSettingsTable.$inferSelect;
 export type DeveloperRelease = typeof developerReleasesTable.$inferSelect;
+export type CustomRole = typeof customRolesTable.$inferSelect;
