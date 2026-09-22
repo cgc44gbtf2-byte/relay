@@ -530,7 +530,7 @@ function ChatApp() {
         connectedSocket.onmessage = (event) => {
         try {
            if (cancelled) return;
-           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
+           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
            if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items.map((item) => item.id === data.message!.id ? { ...item, ...data.message } : item) : [...items, data.message!]);
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
