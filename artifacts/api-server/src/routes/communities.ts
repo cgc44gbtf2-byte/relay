@@ -246,6 +246,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       id: usersTable.clerkId,
       username: usersTable.username,
       displayName: usersTable.displayName,
+      presenceStatus: usersTable.status,
       status: usersTable.status,
       joinedAt: communityMembersTable.joinedAt,
     }).from(communityMembersTable)
@@ -299,6 +300,24 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       ? channel
       : null;
   }))).filter((channel): channel is typeof channels[number] => channel !== null);
+  const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
+  const directoryEmployees = members.map((member) => {
+    const profile = employeeProfilesByUserId.get(member.id);
+    return {
+      userId: member.id,
+      username: member.username,
+      displayName: member.displayName,
+      employeeNumber: profile?.employeeNumber ?? "",
+      jobTitle: profile?.jobTitle ?? "",
+      employmentStatus: profile?.employmentStatus ?? "active",
+      departmentId: profile?.departmentId ?? null,
+      locationId: profile?.locationId ?? null,
+      managerId: profile?.managerId ?? null,
+      onboardedAt: profile?.onboardedAt ?? null,
+      offboardedAt: profile?.offboardedAt ?? null,
+      presenceStatus: member.status,
+    };
+  });
   res.json({
     community,
     members,
@@ -309,7 +328,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     departments,
     locations,
     teams,
-    employees,
+    employees: directoryEmployees,
     invitations: invitations.map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
     policies,
     canManage: await communityPermission(userId, community.id, "manage_community"),

@@ -1215,7 +1215,7 @@ type CommunityDetail = {
   departments: Array<{ id: number; name: string; description: string; managerId: string | null; status: string }>;
   locations: Array<{ id: number; name: string; code: string; address: string; timezone: string; status: string }>;
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
-  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null }>;
+  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
   invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
   canManage: boolean;
@@ -1228,6 +1228,7 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
   const [inviteEmail, setInviteEmail] = useState("");
   const [policyTitle, setPolicyTitle] = useState("");
   const [policyBody, setPolicyBody] = useState("");
+  const [directorySearch, setDirectorySearch] = useState("");
   const mutate = async (path: string, body: unknown, message: string) => {
     setWorking(true);
     try {
@@ -1252,8 +1253,24 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       setWorking(false);
     }
   };
+  const filteredEmployees = detail.employees.filter((employee) => {
+    const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name ?? "";
+    const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name ?? "";
+    const roleNames = detail.assignments.filter((item) => item.userId === employee.userId).map((item) => item.role).join(" ");
+    const searchable = [
+      employee.displayName,
+      employee.username,
+      employee.jobTitle,
+      departmentName,
+      locationName,
+      roleNames,
+      employee.presenceStatus,
+      employee.employmentStatus,
+    ].join(" ").toLowerCase();
+    return searchable.includes(directorySearch.trim().toLowerCase());
+  });
   return <section className="space-y-5">
-    <div className="grid gap-5 xl:grid-cols-3">
+    {detail.canManage && <div className="grid gap-5 xl:grid-cols-3">
       <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/departments`, { name: department }, "Department created."); setDepartment(""); }} className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-mono text-sm font-bold">departments</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.departments.length} departments</p>
         <input required value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="Operations" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
@@ -1272,16 +1289,16 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
         <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add team</button>
         <div className="mt-4 space-y-2">{detail.teams.map((item) => <div key={item.id} className="rounded border border-border/70 px-3 py-2 font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></div>)}</div>
       </form>
-    </div>
+    </div>}
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
       <section className="rounded-xl border border-border bg-card">
-        <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.employees.length} employee records · onboarding and offboarding status</p></div>
-        <div className="divide-y divide-border">{detail.employees.map((employee) => <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-3"><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{employee.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{employee.username} {employee.jobTitle && `· ${employee.jobTitle}`}</p></div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}</div>)}{detail.employees.length === 0 && <EmptyAdminState label="No employee profiles yet." />}</div>
+        <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
+        <div className="divide-y divide-border">{filteredEmployees.map((employee) => { const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name; const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name; const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member"; const online = employee.presenceStatus === "online"; return <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-4"><div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{employee.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p></div><div className="flex flex-wrap items-center gap-2"><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}</div></div>; })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
       </section>
-      <div className="space-y-5">
+      {detail.canManage && <div className="space-y-5">
         <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/invitations`, { email: inviteEmail }, "Employee invitation created."); setInviteEmail(""); }} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button></form>
         <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/policies`, { title: policyTitle, body: policyBody }, "Workspace policy published."); setPolicyTitle(""); setPolicyBody(""); }} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">workspace policy</h2><input required value={policyTitle} onChange={(event) => setPolicyTitle(event.target.value)} placeholder="Safety policy" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><textarea required value={policyBody} onChange={(event) => setPolicyBody(event.target.value)} placeholder="Policy details" className="mt-3 min-h-20 w-full rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">publish policy</button><div className="mt-4 space-y-2">{detail.policies.slice(0, 3).map((policy) => <div key={policy.id} className="rounded border border-border/70 p-2"><p className="font-mono text-xs">{policy.title} <span className="text-[9px] text-muted-foreground">v{policy.version}</span></p><p className="mt-1 line-clamp-2 text-[10px] text-muted-foreground">{policy.body}</p></div>)}</div></form>
-      </div>
+      </div>}
     </div>
   </section>;
 }
