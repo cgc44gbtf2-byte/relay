@@ -1934,6 +1934,307 @@ describe("admin access controls", () => {
     }
   });
 
+  test("prevents workspace administrators from promoting at or above their own rank", async () => {
+    const ownerSession = await createTestSession("role_guard_owner");
+    const actorSession = await createTestSession("role_guard_actor");
+    const targetSession = await createTestSession("role_guard_target");
+    let communityId: number | null = null;
+
+    try {
+      const [actorProfile, targetProfile] = await Promise.all([
+        apiRequest(actorSession, "/me"),
+        apiRequest(targetSession, "/me"),
+      ]);
+      assert.equal(actorProfile.status, 200, JSON.stringify(actorProfile));
+      assert.equal(targetProfile.status, 200, JSON.stringify(targetProfile));
+
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Role guard ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, actorSession.userId, targetSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [actorSession.userId, communityId, ownerSession.userId],
+      );
+
+      const auditCountBefore = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+
+      for (const role of ["workspace_owner", "workspace_admin"]) {
+        const rejected = await apiRequest(
+          actorSession,
+          `/communities/${communityId}/members/${targetSession.userId}/role`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ role }),
+          },
+        );
+        assert.equal(rejected.status, 403, JSON.stringify(rejected));
+        assert.deepEqual(rejected.body, {
+          error: "You can only assign roles below your own workspace role.",
+        });
+      }
+
+      const rejectedRoles = await pool.query<{ role: string }>(
+        `SELECT role
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2
+         ORDER BY role`,
+        [targetSession.userId, communityId],
+      );
+      assert.deepEqual(rejectedRoles.rows, []);
+      const auditAfterRejections = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+      assert.equal(auditAfterRejections, auditCountBefore);
+
+      const allowed = await apiRequest(
+        actorSession,
+        `/communities/${communityId}/members/${targetSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "manager" }),
+        },
+      );
+      assert.equal(allowed.status, 200, JSON.stringify(allowed));
+      assert.deepEqual(allowed.body, {
+        ok: true,
+        userId: targetSession.userId,
+        role: "manager",
+        communityId,
+      });
+      const assignedRoles = await pool.query<{ role: string }>(
+        `SELECT role
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2
+         ORDER BY role`,
+        [targetSession.userId, communityId],
+      );
+      assert.deepEqual(assignedRoles.rows, [{ role: "manager" }]);
+      const auditAfterSuccess = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+      assert.equal(auditAfterSuccess, auditCountBefore + 1);
+    } finally {
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [
+          communityId,
+        ]);
+      }
+    }
+  });
+
+  test("creates only one chat identity during concurrent first-session requests", async () => {
+    const session = await createTestSession("concurrent_profile");
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        apiRequest(session, index % 2 === 0 ? "/me" : "/channels"),
+      ),
+    );
+    assert.ok(
+      responses.every(({ status }) => status === 200),
+      JSON.stringify(responses),
+    );
+
+    const profiles = await pool.query<{
+      clerk_id: string;
+      username: string;
+    }>(
+      `SELECT clerk_id, username
+       FROM irc_users
+       WHERE clerk_id = $1`,
+      [session.userId],
+    );
+    assert.equal(profiles.rows.length, 1);
+    assert.equal(profiles.rows[0]?.clerk_id, session.userId);
+
+    const profile = await apiRequest(session, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    assert.equal(
+      (profile.body as { id?: unknown }).id,
+      session.userId,
+    );
+  });
+
+  test("prevents suspended accounts from changing their profile", async () => {
+    const suspendedSession = await createTestSession("suspended_profile");
+    let suspended = false;
+
+    try {
+      const initial = await apiRequest(suspendedSession, "/me");
+      assert.equal(initial.status, 200, JSON.stringify(initial));
+      assert.ok(initial.body && typeof initial.body === "object");
+      const initialUsername = (initial.body as { username?: unknown }).username;
+      const initialDisplayName = (
+        initial.body as { displayName?: unknown }
+      ).displayName;
+
+      const suspension = await apiRequest(
+        adminSession,
+        `/admin/users/${suspendedSession.userId}/account-status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountStatus: "suspended" }),
+        },
+      );
+      assert.equal(suspension.status, 200, JSON.stringify(suspension));
+      suspended = true;
+
+      const rejected = await apiRequest(suspendedSession, "/me", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: `blocked_${randomUUID().slice(0, 8)}`,
+          displayName: "Blocked profile update",
+        }),
+      });
+      assert.equal(rejected.status, 403, JSON.stringify(rejected));
+      assert.deepEqual(rejected.body, {
+        error: "This account is suspended.",
+      });
+
+      const stored = await pool.query<{
+        username: string;
+        display_name: string;
+        account_status: string;
+      }>(
+        `SELECT username, display_name, account_status
+         FROM irc_users
+         WHERE clerk_id = $1`,
+        [suspendedSession.userId],
+      );
+      assert.deepEqual(stored.rows, [
+        {
+          username: initialUsername,
+          display_name: initialDisplayName,
+          account_status: "suspended",
+        },
+      ]);
+    } finally {
+      if (suspended) {
+        await apiRequest(
+          adminSession,
+          `/admin/users/${suspendedSession.userId}/account-status`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ accountStatus: "active" }),
+          },
+        );
+      }
+    }
+  });
+
+  test("ignores malformed realtime channel subscriptions", async () => {
+    const ownerSession = await createTestSession("malformed_subscription");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `malformed-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Malformed subscription isolation",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const socket = await openWebSocket(ownerSession);
+      sockets.push(socket);
+      const malformedFrames = [
+        "{",
+        JSON.stringify({}),
+        JSON.stringify({ type: "unknown", channelId }),
+        JSON.stringify({ type: "subscribe", channelId: String(channelId) }),
+        JSON.stringify({ type: "subscribe", channelId: null }),
+        JSON.stringify({ type: "subscribe", channelId: 1.5 }),
+        JSON.stringify({ type: "subscribe", channelId: -1 }),
+        JSON.stringify({
+          type: "subscribe",
+          channelId: Number.MAX_SAFE_INTEGER + 1,
+        }),
+      ];
+      for (const frame of malformedFrames) socket.send(frame);
+
+      const body = `Malformed subscription ${randomUUID()}`;
+      const blockedEvent = expectNoWebSocketEvent(
+        socket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { body?: unknown }).body === body,
+        750,
+      );
+      const message = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body }),
+        },
+      );
+      assert.equal(message.status, 201, JSON.stringify(message));
+      await blockedEvent;
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
   test("reports channel member counts without loading every membership row", async () => {
     const ownerSession = await createTestSession("channel_count_owner");
     const memberSession = await createTestSession("channel_count_member");

@@ -43,7 +43,7 @@ export async function ensureProfile(userId: string): Promise<User> {
       displayName: username,
       status: "online",
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing({ target: usersTable.clerkId });
   const created = await db.query.usersTable.findFirst({
     where: eq(usersTable.clerkId, userId),
   });

@@ -111,7 +111,8 @@ class Hub {
             (message.type !== "subscribe" &&
               message.type !== "unsubscribe" &&
               message.type !== "typing") ||
-            !Number.isInteger(message.channelId)
+            !Number.isSafeInteger(message.channelId) ||
+            Number(message.channelId) <= 0
           ) {
             return;
           }
