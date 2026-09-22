@@ -254,14 +254,15 @@ router.post("/admin/announcements", requireAuth, async (req: AuthenticatedReques
     return;
   }
   const [announcement] = await db.insert(serverAnnouncementsTable).values({ authorId: actor.clerkId, body }).returning();
-  const recipients = await db.select({ clerkId: usersTable.clerkId }).from(usersTable);
-  if (recipients.length) {
-    await db.insert(notificationsTable).values(recipients.map((user) => ({
-      userId: user.clerkId,
-      type: "server_announcement",
-      body,
-    })));
-  }
+  await db.insert(notificationsTable).select(
+    db
+      .select({
+        userId: usersTable.clerkId,
+        type: sql<string>`${"server_announcement"}`.as("type"),
+        body: sql<string>`${body}`.as("body"),
+      })
+      .from(usersTable),
+  );
   await writeAudit(
     actor.clerkId,
     actor.displayName,

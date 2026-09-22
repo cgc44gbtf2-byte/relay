@@ -1010,6 +1010,78 @@ describe("admin access controls", () => {
     });
   });
 
+  test("publishes one announcement notification for every current user", async () => {
+    const body = `Operations update ${randomUUID()}`;
+    let announcementId: number | null = null;
+
+    try {
+      const [{ count: userCount }] = (
+        await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM irc_users",
+        )
+      ).rows;
+
+      const response = await apiRequest(adminSession, "/admin/announcements", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      assert.equal(response.status, 201, JSON.stringify(response));
+      assert.ok(response.body && typeof response.body === "object");
+      announcementId = (response.body as { id?: unknown }).id as number;
+      assert.equal(typeof announcementId, "number");
+
+      const notifications = await pool.query<{
+        user_id: string;
+        notification_count: number;
+      }>(
+        `SELECT user_id, count(*)::int AS notification_count
+         FROM irc_notifications
+         WHERE type = 'server_announcement' AND body = $1
+         GROUP BY user_id
+         ORDER BY user_id`,
+        [body],
+      );
+      assert.equal(notifications.rows.length, userCount);
+      assert.ok(
+        notifications.rows.every(
+          ({ notification_count }) => notification_count === 1,
+        ),
+      );
+
+      const audit = await pool.query(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'published_server_announcement' AND target_id = $1`,
+        [String(announcementId)],
+      );
+      assert.deepEqual(audit.rows, [
+        {
+          actor_id: adminSession.userId,
+          action: "published_server_announcement",
+          target_id: String(announcementId),
+          target_label: "server announcement",
+          details: body,
+        },
+      ]);
+    } finally {
+      await pool.query(
+        "DELETE FROM irc_notifications WHERE type = 'server_announcement' AND body = $1",
+        [body],
+      );
+      if (announcementId !== null) {
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE action = 'published_server_announcement' AND target_id = $1",
+          [String(announcementId)],
+        );
+        await pool.query(
+          "DELETE FROM irc_server_announcements WHERE id = $1",
+          [announcementId],
+        );
+      }
+    }
+  });
+
   test("keeps the original actor identity and label after the admin is renamed", async () => {
     const beforeRename = await apiRequest(adminSession, "/me");
     assert.equal(beforeRename.status, 200);
