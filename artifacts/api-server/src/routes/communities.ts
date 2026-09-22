@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { and, asc, desc, eq } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
   categoriesTable,
@@ -7,12 +8,20 @@ import {
   channelsTable,
   communitiesTable,
   communityMembersTable,
+  departmentsTable,
   db,
+  employeeProfilesTable,
+  locationsTable,
   moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
+  teamsTable,
+  teamMembersTable,
   userRolesTable,
   usersTable,
+  workspaceInvitationsTable,
+  workspacePoliciesTable,
+  policyAcknowledgementsTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import {
@@ -36,6 +45,10 @@ const workspaceRoleRank: Record<string, number> = {
   business_manager: 2,
   business_owner: 5,
 };
+
+async function requireWorkspaceManager(userId: string, communityId: number): Promise<boolean> {
+  return communityPermission(userId, communityId, "manage_community");
+}
 
 async function writeCommunityAudit(actorId: string, action: string, communityId: number, details?: string): Promise<void> {
   await db.insert(adminAuditLogsTable).values({
@@ -166,6 +179,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         ownerId: userId,
       }).returning();
       await tx.insert(communityMembersTable).values({ communityId: created.id, userId, status: "owner" });
+      await tx.insert(employeeProfilesTable).values({ communityId: created.id, userId, employmentStatus: "active", onboardedAt: new Date() });
       await tx.insert(userRolesTable).values({
         userId,
         role: "community_admin",
@@ -180,19 +194,23 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         communityId: created.id,
         grantedBy: userId,
       });
+      const [corporateCategory] = await tx.insert(categoriesTable).values({
+        name: "corporate",
+        description: "Company-wide communication and leadership.",
+        ownerId: userId,
+        communityId: created.id,
+      }).returning({ id: categoriesTable.id });
       const defaultChannels = [
-        ["#general", "The main business conversation."],
-        ["#leads", "New and active lead conversations."],
-        ["#appointments", "Scheduling and appointment coordination."],
-        ["#jobs", "Active work and job updates."],
-        ["#customers", "Customer conversations and service history."],
-        ["#management", "Private business operations and decisions."],
+        ["#announcements", "Company-wide announcements and updates."],
+        ["#hr", "People operations, policies, and employee support."],
+        ["#management", "Leadership planning and company operations."],
       ];
       const createdChannels = await tx.insert(channelsTable).values(defaultChannels.map(([channelName, topic]) => ({
         name: channelName,
         topic,
         ownerId: userId,
         communityId: created.id,
+        categoryId: corporateCategory.id,
         isPrivate: channelName === "#management",
       }))).returning({ id: channelsTable.id });
       if (createdChannels.length) {
@@ -223,7 +241,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     res.status(404).json({ error: "Business workspace not found." });
     return;
   }
-  const [members, channels, categories, assignments, announcements] = await Promise.all([
+  const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies] = await Promise.all([
     db.select({
       id: usersTable.clerkId,
       username: usersTable.username,
@@ -247,6 +265,26 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .where(eq(serverAnnouncementsTable.communityId, community.id))
       .orderBy(desc(serverAnnouncementsTable.createdAt))
       .limit(20),
+    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name)),
+    db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name)),
+    db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name)),
+    db.select({
+      communityId: employeeProfilesTable.communityId,
+      userId: employeeProfilesTable.userId,
+      employeeNumber: employeeProfilesTable.employeeNumber,
+      jobTitle: employeeProfilesTable.jobTitle,
+      employmentStatus: employeeProfilesTable.employmentStatus,
+      departmentId: employeeProfilesTable.departmentId,
+      locationId: employeeProfilesTable.locationId,
+      managerId: employeeProfilesTable.managerId,
+      onboardedAt: employeeProfilesTable.onboardedAt,
+      offboardedAt: employeeProfilesTable.offboardedAt,
+      username: usersTable.username,
+      displayName: usersTable.displayName,
+    }).from(employeeProfilesTable).innerJoin(usersTable, eq(usersTable.clerkId, employeeProfilesTable.userId))
+      .where(eq(employeeProfilesTable.communityId, community.id)),
+    db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id)).orderBy(desc(workspaceInvitationsTable.createdAt)).limit(50),
+    db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt)),
   ]);
   const visibleChannels = (await Promise.all(channels.map(async (channel) => {
     if (!channel.isPrivate) return channel;
@@ -268,8 +306,197 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     categories,
     assignments: assignments.map((assignment) => ({ ...assignment, grantedBy: undefined })),
     announcements,
+    departments,
+    locations,
+    teams,
+    employees,
+    invitations: invitations.map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
+    policies,
     canManage: await communityPermission(userId, community.id, "manage_community"),
   });
+});
+
+router.post("/communities/:communityId/departments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage departments in this workspace." });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
+  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 300) : "";
+  if (!name) {
+    res.status(400).json({ error: "A department name is required." });
+    return;
+  }
+  const [department] = await db.insert(departmentsTable).values({ communityId, name, description }).returning();
+  await writeCommunityAudit(userId, "created_workspace_department", communityId, name);
+  res.status(201).json(department);
+});
+
+router.post("/communities/:communityId/locations", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage locations in this workspace." });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
+  const code = typeof req.body?.code === "string" ? req.body.code.trim().slice(0, 20) : "";
+  const address = typeof req.body?.address === "string" ? req.body.address.trim().slice(0, 240) : "";
+  const timezone = typeof req.body?.timezone === "string" ? req.body.timezone.trim().slice(0, 80) : "America/Chicago";
+  if (!name) {
+    res.status(400).json({ error: "A location name is required." });
+    return;
+  }
+  const [location] = await db.insert(locationsTable).values({ communityId, name, code, address, timezone }).returning();
+  const [locationCategory] = await db.insert(categoriesTable).values({
+    communityId,
+    name: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || `location-${location.id}`,
+    description: `${name} location channels.`,
+    ownerId: userId,
+  }).returning({ id: categoriesTable.id });
+  const locationChannels = [
+    ["#general", `General conversation for ${name}.`],
+    ["#managers", `Managers and supervisors at ${name}.`],
+    ["#staff", `Staff conversation for ${name}.`],
+  ];
+  const createdChannels = await db.insert(channelsTable).values(locationChannels.map(([channelName, topic]) => ({
+    communityId,
+    categoryId: locationCategory.id,
+    name: channelName,
+    topic,
+    ownerId: userId,
+    isPrivate: channelName !== "#general",
+  }))).returning({ id: channelsTable.id });
+  if (createdChannels.length) {
+    await db.insert(channelMembersTable).values(createdChannels.map((channel) => ({ channelId: channel.id, userId, role: "owner" })));
+  }
+  await writeCommunityAudit(userId, "created_workspace_location", communityId, name);
+  res.status(201).json({ ...location, categoryId: locationCategory.id, defaultChannelsCreated: createdChannels.length });
+});
+
+router.post("/communities/:communityId/teams", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage teams in this workspace." });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
+  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 300) : "";
+  const departmentId = req.body?.departmentId ? Number(req.body.departmentId) : null;
+  const locationId = req.body?.locationId ? Number(req.body.locationId) : null;
+  if (!name) {
+    res.status(400).json({ error: "A team name is required." });
+    return;
+  }
+  const [team] = await db.insert(teamsTable).values({ communityId, name, description, departmentId, locationId }).returning();
+  await writeCommunityAudit(userId, "created_workspace_team", communityId, name);
+  res.status(201).json(team);
+});
+
+router.patch("/communities/:communityId/employees/:employeeId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const employeeId = param(req, "employeeId");
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage employees in this workspace." });
+    return;
+  }
+  const employmentStatus = typeof req.body?.employmentStatus === "string" ? req.body.employmentStatus : undefined;
+  const allowedStatuses = ["invited", "onboarding", "active", "leave", "offboarding", "terminated"];
+  if (employmentStatus !== undefined && !allowedStatuses.includes(employmentStatus)) {
+    res.status(400).json({ error: "Invalid employee status." });
+    return;
+  }
+  const now = new Date();
+  const [updated] = await db.update(employeeProfilesTable).set({
+    ...(employmentStatus === undefined ? {} : { employmentStatus }),
+    ...(employmentStatus === "onboarding" ? { onboardingStartedAt: now } : {}),
+    ...(employmentStatus === "active" ? { onboardedAt: now } : {}),
+    ...(employmentStatus === "offboarding" ? { offboardingAt: now } : {}),
+    ...(employmentStatus === "terminated" ? { offboardedAt: now } : {}),
+  }).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, employeeId))).returning();
+  if (!updated) {
+    res.status(404).json({ error: "Employee profile not found." });
+    return;
+  }
+  if (employmentStatus === "terminated") {
+    await db.delete(teamMembersTable).where(eq(teamMembersTable.userId, employeeId));
+    await db.delete(userRolesTable).where(and(eq(userRolesTable.userId, employeeId), eq(userRolesTable.communityId, communityId)));
+  }
+  await writeCommunityAudit(userId, "updated_employee_status", communityId, `${employeeId} → ${employmentStatus ?? "updated"}`);
+  res.json(updated);
+});
+
+router.post("/communities/:communityId/invitations", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot invite employees to this workspace." });
+    return;
+  }
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase().slice(0, 320) : "";
+  const role = typeof req.body?.role === "string" ? req.body.role.trim().slice(0, 60) : "member";
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    res.status(400).json({ error: "A valid employee email is required." });
+    return;
+  }
+  const rawToken = randomUUID();
+  const [invitation] = await db.insert(workspaceInvitationsTable).values({
+    communityId,
+    email,
+    role,
+    invitedBy: userId,
+    tokenHash: createHash("sha256").update(rawToken).digest("hex"),
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  }).returning();
+  await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
+  res.status(201).json({ ...invitation, tokenHash: undefined });
+});
+
+router.post("/communities/:communityId/policies", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isInteger(communityId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot manage policies in this workspace." });
+    return;
+  }
+  const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 120) : "";
+  const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 8000) : "";
+  if (!title || !body) {
+    res.status(400).json({ error: "A policy title and body are required." });
+    return;
+  }
+  const [previous] = await db.select({ version: workspacePoliciesTable.version }).from(workspacePoliciesTable)
+    .where(eq(workspacePoliciesTable.communityId, communityId)).orderBy(desc(workspacePoliciesTable.version)).limit(1);
+  const [policy] = await db.insert(workspacePoliciesTable).values({
+    communityId, title, body, version: (previous?.version ?? 0) + 1, createdBy: userId,
+  }).returning();
+  await writeCommunityAudit(userId, "published_workspace_policy", communityId, title);
+  res.status(201).json(policy);
+});
+
+router.post("/communities/:communityId/policies/:policyId/acknowledge", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const policyId = Number(param(req, "policyId"));
+  const [policy] = await db.select({ id: workspacePoliciesTable.id }).from(workspacePoliciesTable)
+    .where(and(eq(workspacePoliciesTable.id, policyId), eq(workspacePoliciesTable.communityId, communityId)));
+  if (!policy) {
+    res.status(404).json({ error: "Policy not found." });
+    return;
+  }
+  const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, userId)));
+  if (!member) {
+    res.status(403).json({ error: "You are not a workspace member." });
+    return;
+  }
+  const [acknowledgement] = await db.insert(policyAcknowledgementsTable).values({ policyId, userId })
+    .onConflictDoUpdate({ target: [policyAcknowledgementsTable.policyId, policyAcknowledgementsTable.userId], set: { acknowledgedAt: new Date() } }).returning();
+  res.json(acknowledgement);
 });
 
 router.post("/communities/:communityId/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

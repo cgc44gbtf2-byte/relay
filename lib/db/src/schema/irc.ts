@@ -119,6 +119,101 @@ export const communityMembersTable = pgTable(
   (table) => [primaryKey({ columns: [table.communityId, table.userId] })],
 );
 
+export const departmentsTable = pgTable("irc_departments", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  managerId: text("manager_id").references(() => usersTable.clerkId),
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const locationsTable = pgTable("irc_locations", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  code: text("code").notNull().default(""),
+  address: text("address").notNull().default(""),
+  timezone: text("timezone").notNull().default("America/Chicago"),
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const teamsTable = pgTable("irc_teams", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
+  locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  managerId: text("manager_id").references(() => usersTable.clerkId),
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const teamMembersTable = pgTable("irc_team_members", {
+  teamId: integer("team_id").notNull().references(() => teamsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  role: text("role").notNull().default("member"),
+  status: text("status").notNull().default("active"),
+  joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+}, (table) => [primaryKey({ columns: [table.teamId, table.userId] })]);
+
+export const employeeProfilesTable = pgTable("irc_employee_profiles", {
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  employeeNumber: text("employee_number").notNull().default(""),
+  jobTitle: text("job_title").notNull().default(""),
+  employmentStatus: text("employment_status").notNull().default("active"),
+  departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
+  locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
+  managerId: text("manager_id").references(() => usersTable.clerkId),
+  invitedAt: timestamp("invited_at", { withTimezone: true }),
+  onboardingStartedAt: timestamp("onboarding_started_at", { withTimezone: true }),
+  onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
+  offboardingAt: timestamp("offboarding_at", { withTimezone: true }),
+  offboardedAt: timestamp("offboarded_at", { withTimezone: true }),
+  notes: text("notes").notNull().default(""),
+}, (table) => [primaryKey({ columns: [table.communityId, table.userId] })]);
+
+export const workspaceInvitationsTable = pgTable("irc_workspace_invitations", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  invitedUserId: text("invited_user_id").references(() => usersTable.clerkId, { onDelete: "set null" }),
+  role: text("role").notNull().default("member"),
+  departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
+  locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
+  teamId: integer("team_id").references(() => teamsTable.id, { onDelete: "set null" }),
+  status: text("status").notNull().default("pending"),
+  invitedBy: text("invited_by").notNull().references(() => usersTable.clerkId),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
+export const workspacePoliciesTable = pgTable("irc_workspace_policies", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  version: integer("version").notNull().default(1),
+  status: text("status").notNull().default("published"),
+  effectiveAt: timestamp("effective_at", { withTimezone: true }).notNull().defaultNow(),
+  createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const policyAcknowledgementsTable = pgTable("irc_policy_acknowledgements", {
+  policyId: integer("policy_id").notNull().references(() => workspacePoliciesTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.policyId, table.userId] })]);
+
 export const channelsTable = pgTable(
   "irc_channels",
   {
@@ -134,7 +229,7 @@ export const channelsTable = pgTable(
     passwordHash: text("password_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_channels_community_name_idx").on(table.communityId, table.name)],
+  (table) => [uniqueIndex("irc_channels_community_category_name_idx").on(table.communityId, table.categoryId, table.name)],
 );
 
 export const categoriesTable = pgTable(
@@ -321,3 +416,9 @@ export type AdminAuditLog = typeof adminAuditLogsTable.$inferSelect;
 export type DeveloperSetting = typeof developerSettingsTable.$inferSelect;
 export type DeveloperRelease = typeof developerReleasesTable.$inferSelect;
 export type CustomRole = typeof customRolesTable.$inferSelect;
+export type Department = typeof departmentsTable.$inferSelect;
+export type Location = typeof locationsTable.$inferSelect;
+export type Team = typeof teamsTable.$inferSelect;
+export type EmployeeProfile = typeof employeeProfilesTable.$inferSelect;
+export type WorkspaceInvitation = typeof workspaceInvitationsTable.$inferSelect;
+export type WorkspacePolicy = typeof workspacePoliciesTable.$inferSelect;
