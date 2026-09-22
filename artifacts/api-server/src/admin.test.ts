@@ -2235,6 +2235,80 @@ describe("admin access controls", () => {
     }
   });
 
+  test("preserves channel history when channel settings change", async () => {
+    const ownerSession = await createTestSession("history_preservation");
+    const channelIds: number[] = [];
+
+    try {
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `history-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Initial topic",
+          description: "Initial description",
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const sent = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "History must survive edits." }),
+        },
+      );
+      assert.equal(sent.status, 201, JSON.stringify(sent));
+
+      const ownerEdit = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            topic: "Updated topic",
+            description: "Updated description",
+            isInviteOnly: true,
+          }),
+        },
+      );
+      assert.equal(ownerEdit.status, 200, JSON.stringify(ownerEdit));
+
+      const adminEdit = await apiRequest(
+        adminSession,
+        `/admin/channels/${channelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Admin updated topic" }),
+        },
+      );
+      assert.equal(adminEdit.status, 200, JSON.stringify(adminEdit));
+
+      const history = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.ok(history.body && typeof history.body === "object");
+      const messages = (history.body as {
+        messages?: Array<{ body?: unknown }>;
+      }).messages;
+      assert.deepEqual(messages?.map(({ body }) => body), [
+        "History must survive edits.",
+      ]);
+    } finally {
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
   test("reports channel member counts without loading every membership row", async () => {
     const ownerSession = await createTestSession("channel_count_owner");
     const memberSession = await createTestSession("channel_count_member");

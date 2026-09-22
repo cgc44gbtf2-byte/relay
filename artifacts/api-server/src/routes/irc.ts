@@ -753,7 +753,7 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
   const rows = await db.select().from(messagesTable).where(and(
     eq(messagesTable.channelId, channel.id),
     query ? ilike(messagesTable.body, `%${query}%`) : undefined,
-  )).orderBy(desc(messagesTable.createdAt)).limit(100);
+  )).orderBy(desc(messagesTable.createdAt), desc(messagesTable.id)).limit(100);
   res.json({ channel: { ...channel, passwordHash: undefined }, messages: await messageViews(rows.reverse(), userId) });
 });
 
