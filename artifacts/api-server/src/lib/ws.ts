@@ -11,6 +11,9 @@ type Client = {
   userId: string;
   channelIds: Set<number>;
   channelGenerations: Map<number, number>;
+  typingWindowStartedAt: number;
+  typingFrameCount: number;
+  lastTypingAt: number;
 };
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
 
@@ -62,7 +65,7 @@ class Hub {
   }
 
   attach(server: Server): void {
-    const wss = new WebSocketServer({ noServer: true });
+    const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
     server.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "", "http://localhost");
       if (url.pathname !== "/api/ws") return;
@@ -103,6 +106,9 @@ class Hub {
         userId: ticket.userId,
         channelIds: new Set(),
         channelGenerations: new Map(),
+        typingWindowStartedAt: Date.now(),
+        typingFrameCount: 0,
+        lastTypingAt: 0,
       };
       this.clients.add(client);
       void db
@@ -127,6 +133,16 @@ class Hub {
           }
 
           const channelId = Number(message.channelId);
+          if (message.type === "typing") {
+            const now = Date.now();
+            if (now - client.typingWindowStartedAt >= 1000) {
+              client.typingWindowStartedAt = now;
+              client.typingFrameCount = 0;
+            }
+            if (client.typingFrameCount >= 20 || now - client.lastTypingAt < 75) return;
+            client.typingFrameCount += 1;
+            client.lastTypingAt = now;
+          }
           if (message.type === "unsubscribe") {
             this.removeChannelSubscription(client, channelId);
             return;
@@ -171,6 +187,9 @@ class Hub {
           .update(usersTable)
           .set({ status: "offline", lastSeenAt: new Date() })
           .where(eq(usersTable.clerkId, ticket.userId));
+      });
+      ws.on("error", () => {
+        if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close();
       });
       this.send(ws, { type: "ready" });
     });
