@@ -183,6 +183,7 @@ describe("deleted room recovery", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
     latestWebSocket = null;
     webSocketFrames = [];
@@ -319,5 +320,23 @@ describe("deleted room recovery", () => {
     expect(screen.getAllByText("reaction survived")).toHaveLength(1);
     expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+  });
+
+  it("requests a fresh socket and resubscribes after a connection drops", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    const firstSocket = latestWebSocket;
+    expect(firstSocket).toBeTruthy();
+
+    vi.useFakeTimers();
+    firstSocket?.onclose?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const reconnectedSocket = latestWebSocket;
+    expect(reconnectedSocket).toBeTruthy();
+    expect(reconnectedSocket).not.toBe(firstSocket);
+    reconnectedSocket?.onopen?.();
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
+      { type: "subscribe", channelId: 1 },
+    ]));
   });
 });
