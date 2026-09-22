@@ -9,6 +9,7 @@ import {
   ilike,
   inArray,
   isNull,
+  lt,
   lte,
   notInArray,
   or,
@@ -1109,8 +1110,17 @@ router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest
     return;
   }
   const key = threadKey(userId, peerId);
-  const rows = await db.select().from(messagesTable).where(eq(messagesTable.threadKey, key)).orderBy(asc(messagesTable.createdAt)).limit(100);
-  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await messageViews(rows, userId) });
+  const beforeValue = typeof req.query.before === "string" ? req.query.before : null;
+  const before = beforeValue ? new Date(beforeValue) : null;
+  if (beforeValue && (!before || Number.isNaN(before.getTime()))) {
+    res.status(400).json({ error: "Invalid message cursor." });
+    return;
+  }
+  const rows = await db.select().from(messagesTable).where(and(
+    eq(messagesTable.threadKey, key),
+    before ? lt(messagesTable.createdAt, before) : undefined,
+  )).orderBy(desc(messagesTable.createdAt), desc(messagesTable.id)).limit(100);
+  res.json({ threadKey: key, peer: await publicUser(peerId), messages: await messageViews(rows.reverse(), userId) });
 });
 
 router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
