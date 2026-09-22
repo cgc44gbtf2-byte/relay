@@ -42,6 +42,7 @@ import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
 import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -797,10 +798,12 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
     }
   }
   const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, replyToId, body }).returning();
-  await notifyMentionedUsers(body, userId, channel.id);
   const view = await messageView(message);
-  wsHub.broadcastChannel(channel.id, { type: "message", message: view });
   res.status(201).json(view);
+  void notifyMentionedUsers(body, userId, channel.id).catch((error) => {
+    logger.warn({ err: error, messageId: message.id }, "Message mention notifications failed.");
+  });
+  wsHub.broadcastChannel(channel.id, { type: "message", message: view });
 });
 
 router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1155,18 +1158,20 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
     }
   }
   const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), replyToId, body }).returning();
-  await createNotification({
+  const view = await messageView(message);
+  res.status(201).json(view);
+  void createNotification({
     userId: recipientId,
     type: "direct_message",
     category: "direct_message",
     body: "You have a new direct message.",
     entityType: "message",
     entityId: message.id,
+  }).catch((error) => {
+    logger.warn({ err: error, messageId: message.id }, "Direct-message notification failed.");
   });
-  const view = await messageView(message);
   wsHub.broadcastUser(senderId, { type: "dm", message: view });
   wsHub.broadcastUser(recipientId, { type: "dm", message: view });
-  res.status(201).json(view);
 });
 
 router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
