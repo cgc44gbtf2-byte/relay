@@ -2713,6 +2713,166 @@ describe("admin access controls", () => {
     }
   });
 
+  test("lets organization managers assign employees without crossing workspace boundaries", async () => {
+    const ownerSession = await createTestSession("organization_owner");
+    const managerSession = await createTestSession("organization_manager");
+    const employeeSession = await createTestSession("organization_employee");
+    const communityIds: number[] = [];
+
+    try {
+      const createCommunity = async (name: string) => {
+        const response = await apiRequest(ownerSession, "/communities", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, isPrivate: true }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        const id = (response.body as { id?: unknown }).id;
+        assert.equal(typeof id, "number");
+        communityIds.push(id as number);
+        return id as number;
+      };
+      const communityId = await createCommunity(`Organization ${randomUUID().slice(0, 8)}`);
+      const foreignCommunityId = await createCommunity(`Foreign ${randomUUID().slice(0, 8)}`);
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, managerSession.userId, employeeSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
+         VALUES ($1, $2, 'active'), ($1, $3, 'active')`,
+        [communityId, managerSession.userId, employeeSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'manager', 'community', $2, $3)`,
+        [managerSession.userId, communityId, ownerSession.userId],
+      );
+
+      const createDepartment = async (session: TestSession, targetCommunityId: number, name: string) => {
+        const response = await apiRequest(session, `/communities/${targetCommunityId}/departments`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        return (response.body as { id?: unknown }).id as number;
+      };
+      const createLocation = async (targetCommunityId: number) => {
+        const response = await apiRequest(ownerSession, `/communities/${targetCommunityId}/locations`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `Office ${randomUUID().slice(0, 6)}` }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        return (response.body as { id?: unknown }).id as number;
+      };
+      const departmentId = await createDepartment(ownerSession, communityId, "Operations");
+      const foreignDepartmentId = await createDepartment(ownerSession, foreignCommunityId, "Foreign Operations");
+      const locationId = await createLocation(communityId);
+      const teamResponse = await apiRequest(ownerSession, `/communities/${communityId}/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Field team", departmentId, locationId }),
+      });
+      assert.equal(teamResponse.status, 201, JSON.stringify(teamResponse));
+      assert.ok(teamResponse.body && typeof teamResponse.body === "object");
+      const teamId = (teamResponse.body as { id?: unknown }).id as number;
+      const foreignTeamResponse = await apiRequest(ownerSession, `/communities/${foreignCommunityId}/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Foreign team" }),
+      });
+      assert.equal(foreignTeamResponse.status, 201, JSON.stringify(foreignTeamResponse));
+      assert.ok(foreignTeamResponse.body && typeof foreignTeamResponse.body === "object");
+      const foreignTeamId = (foreignTeamResponse.body as { id?: unknown }).id as number;
+
+      const crossWorkspaceAssignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/employees/${employeeSession.userId}/organization`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ departmentId: foreignDepartmentId }),
+        },
+      );
+      assert.equal(crossWorkspaceAssignment.status, 400, JSON.stringify(crossWorkspaceAssignment));
+
+      const assignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/employees/${employeeSession.userId}/organization`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ departmentId, locationId, managerId: managerSession.userId }),
+        },
+      );
+      assert.equal(assignment.status, 200, JSON.stringify(assignment));
+      assert.ok(assignment.body && typeof assignment.body === "object");
+      assert.deepEqual(
+        await pool.query(
+          `SELECT department_id AS "departmentId", location_id AS "locationId", manager_id AS "managerId"
+           FROM irc_employee_profiles
+           WHERE community_id = $1 AND user_id = $2`,
+          [communityId, employeeSession.userId],
+        ).then((result) => result.rows),
+        [{ departmentId, locationId, managerId: managerSession.userId }],
+      );
+
+      const addToTeam = async (targetTeamId: number) => apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${targetTeamId}/members/${employeeSession.userId}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member", status: "active" }),
+        },
+      );
+      const firstMembership = await addToTeam(teamId);
+      assert.equal(firstMembership.status, 200, JSON.stringify(firstMembership));
+      const repeatedMembership = await addToTeam(teamId);
+      assert.equal(repeatedMembership.status, 200, JSON.stringify(repeatedMembership));
+      const membershipCount = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+         FROM irc_team_members
+         WHERE team_id = $1 AND user_id = $2`,
+        [teamId, employeeSession.userId],
+      );
+      assert.deepEqual(membershipCount.rows, [{ count: 1 }]);
+
+      const detail = await apiRequest(managerSession, `/communities/${communityId}`);
+      assert.equal(detail.status, 200, JSON.stringify(detail));
+      assert.ok(detail.body && typeof detail.body === "object");
+      const detailEmployee = (detail.body as { employees?: Array<{ userId: string; teamIds: number[] }> }).employees
+        ?.find((employee) => employee.userId === employeeSession.userId);
+      assert.deepEqual(detailEmployee?.teamIds, [teamId]);
+
+      const foreignTeamAssignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${foreignTeamId}/members/${employeeSession.userId}`,
+        { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" },
+      );
+      assert.equal(foreignTeamAssignment.status, 404, JSON.stringify(foreignTeamAssignment));
+
+      const removeFromTeam = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${teamId}/members/${employeeSession.userId}`,
+        { method: "DELETE" },
+      );
+      assert.equal(removeFromTeam.status, 200, JSON.stringify(removeFromTeam));
+    } finally {
+      if (communityIds.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+      }
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");

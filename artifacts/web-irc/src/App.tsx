@@ -1339,7 +1339,8 @@ type CommunityDetail = {
   departments: Array<{ id: number; name: string; description: string; managerId: string | null; status: string }>;
   locations: Array<{ id: number; name: string; code: string; address: string; timezone: string; status: string }>;
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
-  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
+  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; teamIds: number[]; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
+  teamMemberships: Array<{ teamId: number; userId: string; role: string; status: string; joinedAt: string; endedAt: string | null }>;
   invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; acceptedAt?: string | null }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
   tasks: Array<{
@@ -1359,6 +1360,7 @@ type CommunityDetail = {
     attachments: Array<{ id: number; taskId: number; uploaderId: string; objectPath: string; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
   }>;
   canManage: boolean;
+  canManageOrganization: boolean;
 };
 
 type BusinessDashboardPayload = {
@@ -1433,6 +1435,9 @@ function auditActionLabel(action: string): string {
     updated_community_category: "updated",
     updated_community_settings: "updated",
     updated_employee_status: "updated",
+    assigned_employee_organization: "assigned",
+    assigned_employee_team: "assigned",
+    removed_employee_team: "removed",
     updated_workspace_task: "updated",
     uploaded_document_version: "uploaded",
     commented_on_workspace_task: "commented on",
@@ -1914,6 +1919,36 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       setWorking(false);
     }
   };
+  const updateOrganization = async (employeeId: string, body: { departmentId?: number | null; locationId?: number | null; managerId?: string | null }) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/employees/${employeeId}/organization`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setNotice("Employee organization assignment updated.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update employee organization");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const updateTeamMembership = async (teamId: number, employeeId: string, assigned: boolean) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/teams/${teamId}/members/${employeeId}`, {
+        method: assigned ? "PUT" : "DELETE",
+        ...(assigned ? { body: JSON.stringify({ role: "member", status: "active" }) } : {}),
+      });
+      setNotice(assigned ? "Employee added to team." : "Employee removed from team.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update team membership");
+    } finally {
+      setWorking(false);
+    }
+  };
   const createInvitation = async (event: FormEvent) => {
     event.preventDefault();
     setWorking(true);
@@ -2004,7 +2039,36 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
        <section className="rounded-xl border border-border bg-card">
          <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
-         <div className="divide-y divide-border">{filteredEmployees.map((employee) => { const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name; const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name; const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member"; const online = employee.presenceStatus === "online"; return <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-4"><div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{employee.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p></div><div className="flex flex-wrap items-center gap-2"><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}{detail.canManage && employee.employmentStatus !== "terminated" && <button disabled={working} onClick={() => void offboardEmployee(employee.userId, employee.displayName)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">offboard</button>}</div></div>; })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
+          <div className="divide-y divide-border">{filteredEmployees.map((employee) => {
+            const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name;
+            const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name;
+            const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member";
+            const online = employee.presenceStatus === "online";
+            const employeeTeams = detail.teams.filter((item) => employee.teamIds.includes(item.id));
+            const eligibleManagers = detail.employees.filter((item) => item.userId !== employee.userId && item.employmentStatus === "active");
+            return <div key={employee.userId} className="px-5 py-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs font-bold">{employee.displayName}</p>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Teams: {employeeTeams.map((item) => item.name).join(", ") || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>
+                  <span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>
+                  {detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}
+                  {detail.canManage && employee.employmentStatus !== "terminated" && <button disabled={working} onClick={() => void offboardEmployee(employee.userId, employee.displayName)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">offboard</button>}
+                </div>
+              </div>
+              {detail.canManageOrganization && employee.employmentStatus !== "terminated" && <div className="mt-4 grid gap-2 rounded-lg border border-primary/15 bg-primary/5 p-3 sm:grid-cols-3">
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Department</span><select disabled={working} value={employee.departmentId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { departmentId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Location</span><select disabled={working} value={employee.locationId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { locationId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Manager</span><select disabled={working} value={employee.managerId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { managerId: event.target.value || null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{eligibleManagers.map((item) => <option key={item.userId} value={item.userId}>{item.displayName}</option>)}</select></label>
+                <div className="sm:col-span-3"><span className="font-mono text-[9px] uppercase text-muted-foreground">Teams</span><div className="mt-2 flex flex-wrap gap-2">{detail.teams.length === 0 ? <span className="font-mono text-[10px] text-muted-foreground">Create a team first.</span> : detail.teams.map((item) => <label key={item.id} className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"><input type="checkbox" disabled={working} checked={employee.teamIds.includes(item.id)} onChange={(event) => void updateTeamMembership(item.id, employee.userId, event.target.checked)} />{item.name}</label>)}</div></div>
+              </div>}
+            </div>;
+          })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
       </section>
       {detail.canManage && <div className="space-y-5">
         <form onSubmit={createInvitation} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><div className="mt-4 grid gap-2"><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="employee">Employee</option><option value="contractor">Contractor</option><option value="member">Member</option></select></div><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button>{inviteToken && <div className="mt-4 rounded border border-primary/30 bg-primary/5 p-3"><p className="font-mono text-[9px] uppercase tracking-wider text-primary">one-time invitation token</p><code className="mt-2 block break-all text-[10px] text-foreground">{inviteToken}</code><p className="mt-2 text-[10px] leading-4 text-muted-foreground">Share this token securely. The recipient must be signed in with the invited email address before joining the private workspace.</p></div>}<div className="mt-4 space-y-2 border-t border-border pt-4">{detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2"><div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>{invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}</div>)}</div></form>
@@ -2405,7 +2469,7 @@ function CommunityConsole() {
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
-             {detail.canManage && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
+             {(detail.canManage || detail.canManageOrganization) && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
            </div>}
         </section>
       </main>

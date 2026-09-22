@@ -73,6 +73,10 @@ async function requireWorkspaceManager(userId: string, communityId: number): Pro
   return communityPermission(userId, communityId, "manage_community");
 }
 
+async function requireOrganizationManager(userId: string, communityId: number): Promise<boolean> {
+  return communityPermission(userId, communityId, "manage_organization");
+}
+
 type CommunityAuditMetadata = {
   details?: string;
   resourceType?: string;
@@ -516,7 +520,14 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.updatedAt)),
     taskCommentsQuery,
     taskAttachmentsQuery,
-    db.select({ teamId: teamMembersTable.teamId, userId: teamMembersTable.userId }).from(teamMembersTable)
+    db.select({
+      teamId: teamMembersTable.teamId,
+      userId: teamMembersTable.userId,
+      role: teamMembersTable.role,
+      status: teamMembersTable.status,
+      joinedAt: teamMembersTable.joinedAt,
+      endedAt: teamMembersTable.endedAt,
+    }).from(teamMembersTable)
       .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
       .where(eq(teamsTable.communityId, community.id)),
     db.select({
@@ -538,9 +549,16 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .where(eq(serverAnnouncementsTable.communityId, community.id)),
   ]);
   const canManage = await communityPermission(userId, community.id, "manage_community");
+  const canManageOrganization = await requireOrganizationManager(userId, community.id);
   const viewerIsMember = members.some((member) => member.id === userId);
   const visibleChannels = channels.filter((channel) => !channel.isPrivate || viewerIsMember || canManage);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
+  const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
+  for (const membership of teamMemberships) {
+    const existing = teamMembershipsByUserId.get(membership.userId) ?? [];
+    existing.push(membership);
+    teamMembershipsByUserId.set(membership.userId, existing);
+  }
   const directoryEmployees = members.map((member) => {
     const profile = employeeProfilesByUserId.get(member.id);
     return {
@@ -553,6 +571,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       departmentId: profile?.departmentId ?? null,
       locationId: profile?.locationId ?? null,
       managerId: profile?.managerId ?? null,
+      teamIds: (teamMembershipsByUserId.get(member.id) ?? [])
+        .filter((membership) => membership.status === "active")
+        .map((membership) => membership.teamId),
       onboardedAt: profile?.onboardedAt ?? null,
       offboardedAt: profile?.offboardedAt ?? null,
       presenceStatus: member.status,
@@ -601,6 +622,8 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
     })),
     canManage,
+    canManageOrganization,
+    teamMemberships,
   });
 });
 
@@ -1007,6 +1030,20 @@ router.post("/communities/:communityId/teams", requireAuth, async (req: Authenti
     res.status(400).json({ error: "A team name is required." });
     return;
   }
+  if (departmentId !== null && (!Number.isSafeInteger(departmentId) || !(await db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+    eq(departmentsTable.id, departmentId),
+    eq(departmentsTable.communityId, communityId),
+  )).limit(1)).length)) {
+    res.status(400).json({ error: "Department does not belong to this workspace." });
+    return;
+  }
+  if (locationId !== null && (!Number.isSafeInteger(locationId) || !(await db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+    eq(locationsTable.id, locationId),
+    eq(locationsTable.communityId, communityId),
+  )).limit(1)).length)) {
+    res.status(400).json({ error: "Location does not belong to this workspace." });
+    return;
+  }
   const [team] = await db.insert(teamsTable).values({ communityId, name, description, departmentId, locationId }).returning();
   await writeCommunityAudit(userId, "created_workspace_team", communityId, name);
   res.status(201).json(team);
@@ -1097,6 +1134,194 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
     details: `${employeeId} → ${employmentStatus ?? "updated"}`,
   });
   res.json(updated);
+});
+
+router.patch("/communities/:communityId/employees/:employeeId/organization", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const employeeId = param(req, "employeeId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+  const fields = ["departmentId", "locationId", "managerId"] as const;
+  if (!fields.some((field) => Object.hasOwn(body, field))) {
+    res.status(400).json({ error: "At least one organization assignment is required." });
+    return;
+  }
+  const parseNullableId = (value: unknown): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null || value === "") return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  };
+  const departmentId = parseNullableId(body.departmentId);
+  const locationId = parseNullableId(body.locationId);
+  const managerId = body.managerId === undefined
+    ? undefined
+    : body.managerId === null || body.managerId === ""
+      ? null
+      : typeof body.managerId === "string" ? body.managerId : undefined;
+  if ((Object.hasOwn(body, "departmentId") && departmentId === undefined)
+    || (Object.hasOwn(body, "locationId") && locationId === undefined)
+    || (Object.hasOwn(body, "managerId") && managerId === undefined)) {
+    res.status(400).json({ error: "Organization assignments must use valid IDs." });
+    return;
+  }
+  const [employee] = await db.select().from(employeeProfilesTable).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, employeeId),
+  ));
+  if (!employee) {
+    res.status(404).json({ error: "Employee profile not found." });
+    return;
+  }
+  if (departmentId !== undefined && departmentId !== null) {
+    const [department] = await db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+      eq(departmentsTable.id, departmentId),
+      eq(departmentsTable.communityId, communityId),
+    ));
+    if (!department) {
+      res.status(400).json({ error: "Department does not belong to this workspace." });
+      return;
+    }
+  }
+  if (locationId !== undefined && locationId !== null) {
+    const [location] = await db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+      eq(locationsTable.id, locationId),
+      eq(locationsTable.communityId, communityId),
+    ));
+    if (!location) {
+      res.status(400).json({ error: "Location does not belong to this workspace." });
+      return;
+    }
+  }
+  if (managerId !== undefined && managerId !== null) {
+    const [manager] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .innerJoin(employeeProfilesTable, and(
+        eq(employeeProfilesTable.communityId, communityMembersTable.communityId),
+        eq(employeeProfilesTable.userId, communityMembersTable.userId),
+      ))
+      .where(and(
+        eq(communityMembersTable.communityId, communityId),
+        eq(communityMembersTable.userId, managerId),
+        eq(employeeProfilesTable.employmentStatus, "active"),
+      ));
+    if (!manager || managerId === employeeId) {
+      res.status(400).json({ error: "Manager must be another active workspace employee." });
+      return;
+    }
+  }
+  const [updated] = await db.update(employeeProfilesTable).set({
+    ...(departmentId === undefined ? {} : { departmentId }),
+    ...(locationId === undefined ? {} : { locationId }),
+    ...(managerId === undefined ? {} : { managerId }),
+  }).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, employeeId),
+  )).returning();
+  await writeCommunityAudit(userId, "assigned_employee_organization", communityId, {
+    resourceType: "employee",
+    resourceId: employeeId,
+    targetId: employeeId,
+    details: JSON.stringify({
+      departmentId: updated?.departmentId ?? null,
+      locationId: updated?.locationId ?? null,
+      managerId: updated?.managerId ?? null,
+    }),
+  });
+  res.json(updated);
+});
+
+router.put("/communities/:communityId/teams/:teamId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const teamId = Number(param(req, "teamId"));
+  const memberId = param(req, "memberId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  if (!Number.isSafeInteger(teamId) || teamId <= 0) {
+    res.status(400).json({ error: "Invalid team." });
+    return;
+  }
+  const [team] = await db.select({ id: teamsTable.id }).from(teamsTable).where(and(
+    eq(teamsTable.id, teamId),
+    eq(teamsTable.communityId, communityId),
+  ));
+  const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .innerJoin(employeeProfilesTable, and(
+      eq(employeeProfilesTable.communityId, communityMembersTable.communityId),
+      eq(employeeProfilesTable.userId, communityMembersTable.userId),
+    ))
+    .where(and(
+      eq(communityMembersTable.communityId, communityId),
+      eq(communityMembersTable.userId, memberId),
+      eq(employeeProfilesTable.employmentStatus, "active"),
+    ));
+  if (!team || !member) {
+    res.status(404).json({ error: "Team or employee not found in this workspace." });
+    return;
+  }
+  const role = typeof req.body?.role === "string" ? req.body.role : "member";
+  const status = typeof req.body?.status === "string" ? req.body.status : "active";
+  if (!["member", "lead", "manager"].includes(role) || !["active", "inactive"].includes(status)) {
+    res.status(400).json({ error: "Invalid team membership." });
+    return;
+  }
+  const [membership] = await db.insert(teamMembersTable).values({
+    teamId,
+    userId: memberId,
+    role,
+    status,
+    endedAt: status === "active" ? null : new Date(),
+  }).onConflictDoUpdate({
+    target: [teamMembersTable.teamId, teamMembersTable.userId],
+    set: { role, status, endedAt: status === "active" ? null : new Date() },
+  }).returning();
+  await writeCommunityAudit(userId, "assigned_employee_team", communityId, {
+    resourceType: "team_membership",
+    resourceId: `${teamId}:${memberId}`,
+    targetId: memberId,
+    details: `${memberId} → team ${teamId} (${role}, ${status})`,
+  });
+  res.json(membership);
+});
+
+router.delete("/communities/:communityId/teams/:teamId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const teamId = Number(param(req, "teamId"));
+  const memberId = param(req, "memberId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  const [team] = await db.select({ id: teamsTable.id }).from(teamsTable).where(and(
+    eq(teamsTable.id, teamId),
+    eq(teamsTable.communityId, communityId),
+  ));
+  if (!team) {
+    res.status(404).json({ error: "Team not found in this workspace." });
+    return;
+  }
+  const deleted = await db.delete(teamMembersTable).where(and(
+    eq(teamMembersTable.teamId, teamId),
+    eq(teamMembersTable.userId, memberId),
+  )).returning();
+  if (!deleted.length) {
+    res.status(404).json({ error: "Team membership not found." });
+    return;
+  }
+  await writeCommunityAudit(userId, "removed_employee_team", communityId, {
+    resourceType: "team_membership",
+    resourceId: `${teamId}:${memberId}`,
+    targetId: memberId,
+    details: `${memberId} ← team ${teamId}`,
+  });
+  res.json({ ok: true });
 });
 
 router.post("/communities/:communityId/invitations", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
