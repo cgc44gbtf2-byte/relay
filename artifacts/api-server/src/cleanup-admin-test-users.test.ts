@@ -1,0 +1,781 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import {
+  assertSafeCleanupEnvironment,
+  cleanupUsers,
+  listMatchingUsers,
+  listUserSessions,
+  main,
+  runCleanup,
+  type CleanupClerkClient,
+  type CleanupDatabase,
+  type CleanupDependencies,
+  type CleanupFailureNotification,
+} from "./cleanup-admin-test-users";
+import {
+  TEST_EMAIL_DOMAIN,
+  TEST_USERNAME_PREFIX,
+  isAdminRegressionTestUser,
+} from "./admin-test-identity";
+
+function createUser(
+  id: string,
+  username: string | null,
+  emailAddresses: string[],
+) {
+  return {
+    id,
+    username,
+    emailAddresses: emailAddresses.map((emailAddress) => ({ emailAddress })),
+  };
+}
+
+function createDatabase(
+  query: CleanupDatabase["query"] = async () => undefined,
+): CleanupDatabase {
+  return { query };
+}
+
+function createClerk(
+  overrides: Partial<{
+    getUserList: CleanupClerkClient["users"]["getUserList"];
+    deleteUser: CleanupClerkClient["users"]["deleteUser"];
+    getSessionList: CleanupClerkClient["sessions"]["getSessionList"];
+    revokeSession: CleanupClerkClient["sessions"]["revokeSession"];
+  }> = {},
+): CleanupClerkClient {
+  return {
+    users: {
+      getUserList:
+        overrides.getUserList ??
+        (async () => ({ data: [] })),
+      deleteUser: overrides.deleteUser ?? (async () => undefined),
+    },
+    sessions: {
+      getSessionList:
+        overrides.getSessionList ??
+        (async () => ({ data: [] })),
+      revokeSession: overrides.revokeSession ?? (async () => undefined),
+    },
+  };
+}
+
+async function withSafeCleanupEnvironment<T>(
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const previous = {
+    nodeEnv: process.env.NODE_ENV,
+    secretKey: process.env.CLERK_SECRET_KEY,
+    publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL,
+    databaseUrl: process.env.DATABASE_URL,
+  };
+
+  process.env.NODE_ENV = "test";
+  process.env.CLERK_SECRET_KEY = "sk_test_cleanup";
+  process.env.CLERK_PUBLISHABLE_KEY = "pk_test_cleanup";
+  process.env.TEST_DATABASE_URL = "postgres://test-only.invalid/web_irc_test";
+  delete process.env.DATABASE_URL;
+
+  try {
+    return await callback();
+  } finally {
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous.nodeEnv;
+    if (previous.secretKey === undefined) delete process.env.CLERK_SECRET_KEY;
+    else process.env.CLERK_SECRET_KEY = previous.secretKey;
+    if (previous.publishableKey === undefined) {
+      delete process.env.CLERK_PUBLISHABLE_KEY;
+    } else {
+      process.env.CLERK_PUBLISHABLE_KEY = previous.publishableKey;
+    }
+    if (previous.testDatabaseUrl === undefined) {
+      delete process.env.TEST_DATABASE_URL;
+    } else {
+      process.env.TEST_DATABASE_URL = previous.testDatabaseUrl;
+    }
+    if (previous.databaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = previous.databaseUrl;
+    }
+  }
+}
+
+describe("admin test-user cleanup safeguards", () => {
+  test("rejects missing Clerk credentials", async () => {
+    await withSafeCleanupEnvironment(() => {
+      delete process.env.CLERK_SECRET_KEY;
+      delete process.env.CLERK_PUBLISHABLE_KEY;
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY are required/,
+      );
+    });
+  });
+
+  test("rejects live Clerk keys", async () => {
+    await withSafeCleanupEnvironment(() => {
+      process.env.CLERK_SECRET_KEY = "sk_live_not_for_cleanup";
+      process.env.CLERK_PUBLISHABLE_KEY = "pk_live_not_for_cleanup";
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /without sk_test_ and pk_test_ keys/,
+      );
+    });
+  });
+
+  test("requires a disposable test database", async () => {
+    await withSafeCleanupEnvironment(() => {
+      delete process.env.TEST_DATABASE_URL;
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /TEST_DATABASE_URL is required/,
+      );
+    });
+  });
+
+  test("rejects a shared database configuration", async () => {
+    await withSafeCleanupEnvironment(() => {
+      process.env.DATABASE_URL = "";
+
+      assert.throws(
+        () => assertSafeCleanupEnvironment(),
+        /while DATABASE_URL is set/,
+      );
+    });
+  });
+
+  test("requires the exact test username and email pairing", () => {
+    const username = `${TEST_USERNAME_PREFIX}exact`;
+    const matchingUser = createUser("matching", username, [
+      `${username}@${TEST_EMAIL_DOMAIN}`,
+    ]);
+
+    assert.equal(isAdminRegressionTestUser(matchingUser), true);
+    assert.equal(
+      isAdminRegressionTestUser(
+        createUser("wrong-email", username, [`${username}@not-example.com`]),
+      ),
+      false,
+    );
+    assert.equal(
+      isAdminRegressionTestUser(
+        createUser("wrong-username", `${username}-other`, [
+          `${username}@${TEST_EMAIL_DOMAIN}`,
+        ]),
+      ),
+      false,
+    );
+  });
+
+  test("paginates through users and sessions", async () => {
+    const userPageCalls: number[] = [];
+    const sessionPageCalls: number[] = [];
+    const matchingUser = createUser(
+      "matching",
+      `${TEST_USERNAME_PREFIX}page`,
+      [`${TEST_USERNAME_PREFIX}page@${TEST_EMAIL_DOMAIN}`],
+    );
+    const clerk = createClerk({
+      getUserList: async ({ offset }) => {
+        userPageCalls.push(offset);
+        if (offset === 0) {
+          return {
+            data: Array.from({ length: 100 }, (_, index) =>
+              index === 0
+                ? matchingUser
+                : createUser(`non-matching-${index}`, "ordinary-user", []),
+            ),
+          };
+        }
+        return { data: [matchingUser] };
+      },
+      getSessionList: async ({ offset }) => {
+        sessionPageCalls.push(offset);
+        if (offset === 0) {
+          return {
+            data: Array.from({ length: 100 }, (_, index) => ({
+              id: `session-${index}`,
+              status: "revoked",
+            })),
+          };
+        }
+        return { data: [{ id: "session-final", status: "active" }] };
+      },
+    });
+
+    const users = await listMatchingUsers(clerk);
+    const sessions = await listUserSessions(matchingUser.id, clerk);
+
+    assert.deepEqual(userPageCalls, [0, 100]);
+    assert.equal(users.length, 2);
+    assert.deepEqual(sessionPageCalls, [0, 100]);
+    assert.equal(sessions.length, 101);
+  });
+
+  test("dry-run does not delete users or revoke sessions", async () => {
+    let deleteCalls = 0;
+    let revokeCalls = 0;
+    let databaseCalls = 0;
+    const username = `${TEST_USERNAME_PREFIX}dryrun`;
+    const clerk = createClerk({
+      getUserList: async () => ({
+        data: [
+          createUser("dry-run-user", username, [
+            `${username}@${TEST_EMAIL_DOMAIN}`,
+          ]),
+        ],
+      }),
+      getSessionList: async () => ({
+        data: [
+          { id: "active-session", status: "active" },
+          { id: "revoked-session", status: "revoked" },
+        ],
+      }),
+      deleteUser: async () => {
+        deleteCalls += 1;
+      },
+      revokeSession: async () => {
+        revokeCalls += 1;
+      },
+    });
+    const dependencies: CleanupDependencies = {
+      clerk,
+      database: createDatabase(async () => {
+        databaseCalls += 1;
+      }),
+    };
+
+    await withSafeCleanupEnvironment(() =>
+      main(["--dry-run"], dependencies),
+    );
+
+    assert.equal(deleteCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(databaseCalls, 0);
+  });
+
+  test("returns a non-zero result when cleanup fails", async () => {
+    const username = `${TEST_USERNAME_PREFIX}failure`;
+    const clerk = createClerk({
+      getUserList: async () => ({
+        data: [
+          createUser("failed-user", username, [
+            `${username}@${TEST_EMAIL_DOMAIN}`,
+          ]),
+        ],
+      }),
+      deleteUser: async () => {
+        throw new Error("delete failed");
+      },
+    });
+    const dependencies: CleanupDependencies = {
+      clerk,
+      database: createDatabase(),
+    };
+
+    const result = await withSafeCleanupEnvironment(() =>
+      runCleanup(["--apply"], dependencies),
+    );
+
+    assert.equal(result, 1);
+  });
+
+  test("reports multiple failed users and falls back to IDs without usernames", async () => {
+    const namedUsername = `${TEST_USERNAME_PREFIX}named`;
+    const users = [
+      createUser("named-user", namedUsername, [
+        `${namedUsername}@${TEST_EMAIL_DOMAIN}`,
+      ]),
+      createUser("user-without-username", null, []),
+    ];
+    const clerk = createClerk({
+      getSessionList: async () => ({ data: [] }),
+      deleteUser: async (userId) => {
+        throw new Error(`delete failed for ${userId}`);
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        cleanupUsers(users, {
+          clerk,
+          database: createDatabase(),
+        }),
+      (error: unknown) => {
+        assert.match(
+          String(error),
+          new RegExp(`user ${namedUsername}: delete failed for named-user`),
+        );
+        assert.match(
+          String(error),
+          /user user-without-username: delete failed for user-without-username/,
+        );
+        return true;
+      },
+    );
+  });
+
+  test("notifies maintenance with affected users without Clerk credentials", async () => {
+    const username = `${TEST_USERNAME_PREFIX}alert`;
+    const clerkSecret = "sk_test_alert_secret";
+    let notification: CleanupFailureNotification | undefined;
+    const clerk = createClerk({
+      getUserList: async () => ({
+        data: [
+          createUser("alert-user", username, [
+            `${username}@${TEST_EMAIL_DOMAIN}`,
+          ]),
+        ],
+      }),
+      deleteUser: async () => {
+        throw new Error(`delete failed: ${clerkSecret}`);
+      },
+    });
+    const dependencies: CleanupDependencies = {
+      clerk,
+      database: createDatabase(),
+      notifyFailure: (value) => {
+        notification = value;
+      },
+    };
+
+    const result = await withSafeCleanupEnvironment(() =>
+      runCleanup(["--apply"], dependencies),
+    );
+
+    assert.equal(result, 1);
+    assert.deepEqual(notification, {
+      affectedUserCount: 1,
+      affectedUsers: [{ id: "alert-user", username }],
+    });
+    assert.doesNotMatch(JSON.stringify(notification), /sk_test_alert_secret/);
+  });
+
+  test("redacts every Clerk key format from failure output", async () => {
+    const username = `${TEST_USERNAME_PREFIX}redaction`;
+    const keys = [
+      "pk_test_publishable",
+      "sk_test_secret",
+      "pk_live_publishable",
+      "sk_live_secret",
+    ];
+    const errors: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("redaction-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${keys.join(" ")}`);
+        },
+      });
+
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      const output = errors.join("\n");
+      for (const key of keys) {
+        assert.doesNotMatch(output, new RegExp(key));
+      }
+      assert.match(
+        output,
+        /\[REDACTED_CLERK_KEY\].*\[REDACTED_CLERK_KEY\]/,
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("notifies maintenance when listing abandoned users fails", async () => {
+    let notification: CleanupFailureNotification | undefined;
+    const dependencies: CleanupDependencies = {
+      clerk: createClerk({
+        getUserList: async () => {
+          throw new Error("user listing failed");
+        },
+      }),
+      database: createDatabase(),
+      notifyFailure: (value) => {
+        notification = value;
+      },
+    };
+
+    const result = await withSafeCleanupEnvironment(() =>
+      runCleanup(["--apply"], dependencies),
+    );
+
+    assert.equal(result, 1);
+    assert.deepEqual(notification, {
+      affectedUserCount: 0,
+      affectedUsers: [],
+    });
+  });
+
+  test("delivers the redacted failure summary to the team channel", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook`;
+    const clerkSecret = "sk_test_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/team";
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(
+        requests[0].url,
+        "https://notifications.example.invalid/team",
+      );
+      assert.equal(requests[0].init?.method, "POST");
+      assert.deepEqual(
+        JSON.parse(String(requests[0].init?.body)),
+        {
+          text: `Scheduled admin test-user cleanup failed for 1 affected user: ${username} (webhook-user).`,
+        },
+      );
+      assert.doesNotMatch(
+        String(requests[0].init?.body),
+        /sk_test_webhook_secret/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("retries transient webhook failures and stops after delivery succeeds", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-retry`;
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let attempt = 0;
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/retry";
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      attempt += 1;
+      if (attempt === 1) {
+        return new Response(null, { status: 503 });
+      }
+      if (attempt === 2) {
+        return new Response(null, { status: 429 });
+      }
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-retry-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 3);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("does not retry permanent webhook failures or expose webhook details", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-permanent`;
+    const clerkSecret = "sk_test_permanent_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const originalConsoleError = console.error;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const errors: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/permanent";
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      return new Response(null, { status: 400 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-permanent-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests.length, 1);
+      const output = errors.join("\n");
+      assert.match(output, /::error title=Abandoned test-user cleanup failed::/);
+      assert.match(output, /HTTP 400/);
+      assert.match(output, /delete failed/);
+      assert.doesNotMatch(output, /notifications\.example\.invalid/);
+      assert.doesNotMatch(output, /sk_test_permanent_webhook_secret/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("preserves the cleanup failure when the webhook request is rejected", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-rejected`;
+    const clerkSecret = "sk_test_rejected_webhook_secret";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const originalConsoleError = console.error;
+    const errors: string[] = [];
+    const webhookUrl = "https://notifications.example.invalid/rejected";
+    let requests = 0;
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL = webhookUrl;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    globalThis.fetch = async () => {
+      requests += 1;
+      throw new Error(`fetch failed for ${webhookUrl}`);
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-rejected-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error(`delete failed: ${clerkSecret}`);
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests, 3);
+      const output = errors.join("\n");
+      assert.match(output, /::error title=Abandoned test-user cleanup failed::/);
+      assert.match(output, /Failed to deliver cleanup failure notification/);
+      assert.match(output, /delete failed/);
+      assert.doesNotMatch(output, /notifications\.example\.invalid/);
+      assert.doesNotMatch(output, /sk_test_rejected_webhook_secret/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("stops retrying after the bounded transient attempt limit", async () => {
+    const username = `${TEST_USERNAME_PREFIX}webhook-exhausted`;
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
+      "https://notifications.example.invalid/exhausted";
+    globalThis.fetch = async (url) => {
+      requests.push(String(url));
+      return new Response(null, { status: 503 });
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("webhook-exhausted-user", username, [
+              `${username}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.deepEqual(requests, [
+        "https://notifications.example.invalid/exhausted",
+        "https://notifications.example.invalid/exhausted",
+        "https://notifications.example.invalid/exhausted",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
+  test("escapes affected identities in GitHub Actions annotations", async () => {
+    const firstUsername = `${TEST_USERNAME_PREFIX}first`;
+    const unsafeId = "second-user%\r\n::warning title=Injected::message";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const originalConsoleError = console.error;
+    const errors: string[] = [];
+
+    process.env.GITHUB_ACTIONS = "true";
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      const clerk = createClerk({
+        getUserList: async () => ({
+          data: [
+            createUser("first-user", firstUsername, [
+              `${firstUsername}@${TEST_EMAIL_DOMAIN}`,
+            ]),
+            createUser(unsafeId, `${TEST_USERNAME_PREFIX}second`, [
+              `${TEST_USERNAME_PREFIX}second@${TEST_EMAIL_DOMAIN}`,
+            ]),
+          ],
+        }),
+        deleteUser: async () => {
+          throw new Error("delete failed");
+        },
+      });
+
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk,
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.match(
+        errors[0] ?? "",
+        /::error title=Abandoned test-user cleanup failed::/,
+      );
+      assert.match(errors[0] ?? "", /second-user%25%0D%0A::warning/);
+      assert.doesNotMatch(errors[0] ?? "", /second-user%\r\n/);
+    } finally {
+      console.error = originalConsoleError;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+    }
+  });
+});
