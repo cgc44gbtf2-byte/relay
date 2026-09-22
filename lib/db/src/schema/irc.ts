@@ -387,7 +387,40 @@ export const serverAnnouncementsTable = pgTable("irc_server_announcements", {
   id: serial("id").primaryKey(),
   authorId: text("author_id").notNull().references(() => usersTable.clerkId),
   communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
+  title: text("title").notNull().default("Announcement"),
   body: text("body").notNull(),
+  audienceType: text("audience_type").notNull().default("company"),
+  departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
+  locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
+  teamId: integer("team_id").references(() => teamsTable.id, { onDelete: "set null" }),
+  recipientId: text("recipient_id").references(() => usersTable.clerkId, { onDelete: "set null" }),
+  requiresAcknowledgement: boolean("requires_acknowledgement").notNull().default(false),
+  scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  status: text("status").notNull().default("published"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const announcementReadReceiptsTable = pgTable("irc_announcement_read_receipts", {
+  announcementId: integer("announcement_id").notNull().references(() => serverAnnouncementsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  readAt: timestamp("read_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.announcementId, table.userId] })]);
+
+export const announcementAcknowledgementsTable = pgTable("irc_announcement_acknowledgements", {
+  announcementId: integer("announcement_id").notNull().references(() => serverAnnouncementsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.announcementId, table.userId] })]);
+
+export const announcementAttachmentsTable = pgTable("irc_announcement_attachments", {
+  id: serial("id").primaryKey(),
+  announcementId: integer("announcement_id").notNull().references(() => serverAnnouncementsTable.id, { onDelete: "cascade" }),
+  uploaderId: text("uploader_id").notNull().references(() => usersTable.clerkId),
+  objectPath: text("object_path").notNull(),
+  fileName: text("file_name").notNull(),
+  contentType: text("content_type").notNull(),
+  fileSize: integer("file_size").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -461,3 +494,6 @@ export type WorkspacePolicy = typeof workspacePoliciesTable.$inferSelect;
 export type WorkspaceTask = typeof workspaceTasksTable.$inferSelect;
 export type WorkspaceTaskComment = typeof workspaceTaskCommentsTable.$inferSelect;
 export type WorkspaceTaskAttachment = typeof workspaceTaskAttachmentsTable.$inferSelect;
+export type AnnouncementReadReceipt = typeof announcementReadReceiptsTable.$inferSelect;
+export type AnnouncementAcknowledgement = typeof announcementAcknowledgementsTable.$inferSelect;
+export type AnnouncementAttachment = typeof announcementAttachmentsTable.$inferSelect;
