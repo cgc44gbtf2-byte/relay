@@ -61,6 +61,11 @@ function hasChannelPassword(channel: { passwordHash: string | null }, password: 
   return !channel.passwordHash || (typeof password === "string" && passwordHash(password) === channel.passwordHash);
 }
 
+function publicChannel(channel: typeof channelsTable.$inferSelect) {
+  const { passwordHash: _passwordHash, ...safeChannel } = channel;
+  return safeChannel;
+}
+
 async function channelFor(id: string) {
   const channelId = Number(id);
   if (!Number.isInteger(channelId)) return null;
@@ -833,8 +838,8 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     action: "updated_channel",
     details: topic !== undefined ? `topic:${topic}` : "channel settings changed",
   });
-  wsHub.broadcastChannel(channel.id, { type: "channel", channel: updated });
-  res.json({ ...updated, passwordHash: undefined });
+  wsHub.broadcastChannel(channel.id, { type: "channel", channel: publicChannel(updated) });
+  res.json(publicChannel(updated));
 });
 
 router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -898,6 +903,10 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     res.status(403).json({ error: "You cannot attach files to this message." });
     return;
   }
+  if (message.senderId !== userId) {
+    res.status(403).json({ error: "Only the message sender can attach files." });
+    return;
+  }
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
   const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 160) : "";
   const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.trim().slice(0, 120) : "application/octet-stream";
@@ -953,8 +962,8 @@ router.post("/messages/:messageId/reactions", requireAuth, async (req: Authentic
     res.status(404).json({ error: "Message not found." });
     return;
   }
-  if (message.channelId && !(await canReadChannel(await channelFor(String(message.channelId)) as { id: number; isPrivate: boolean }, userId))) {
-    res.status(403).json({ error: "Join the private channel before reacting." });
+  if (!(await canReadMessage(message, userId))) {
+    res.status(403).json({ error: "You cannot react to this message." });
     return;
   }
   await db.insert(messageReactionsTable).values({ messageId, userId, emoji }).onConflictDoNothing();
@@ -970,6 +979,10 @@ router.delete("/messages/:messageId/reactions/:emoji", requireAuth, async (req: 
   const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
   if (!message) {
     res.status(404).json({ error: "Message not found." });
+    return;
+  }
+  if (!(await canReadMessage(message, userId))) {
+    res.status(403).json({ error: "You cannot change reactions on this message." });
     return;
   }
   await db.delete(messageReactionsTable).where(and(
