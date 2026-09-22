@@ -463,19 +463,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
       .where(eq(serverAnnouncementsTable.communityId, community.id)),
   ]);
-  const visibleChannels = (await Promise.all(channels.map(async (channel) => {
-    if (!channel.isPrivate) return channel;
-    const [member] = await db.select({ userId: communityMembersTable.userId })
-      .from(communityMembersTable)
-      .where(and(
-        eq(communityMembersTable.communityId, community.id),
-        eq(communityMembersTable.userId, userId),
-      ))
-      .limit(1);
-    return member || await communityPermission(userId, community.id, "manage_community")
-      ? channel
-      : null;
-  }))).filter((channel): channel is typeof channels[number] => channel !== null);
+  const canManage = await communityPermission(userId, community.id, "manage_community");
+  const viewerIsMember = members.some((member) => member.id === userId);
+  const visibleChannels = channels.filter((channel) => !channel.isPrivate || viewerIsMember || canManage);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
   const directoryEmployees = members.map((member) => {
     const profile = employeeProfilesByUserId.get(member.id);
@@ -494,7 +484,6 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       presenceStatus: member.status,
     };
   });
-  const canManage = await communityPermission(userId, community.id, "manage_community");
   const currentEmployee = employees.find((employee) => employee.userId === userId);
   const now = new Date();
   const visibleAnnouncements = announcements.filter((announcement) => canManage

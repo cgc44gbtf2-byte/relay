@@ -169,8 +169,11 @@ function preferredChannel(channels: Channel[]): Channel | null {
     ?? null;
 }
 
+const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const activityDateTimeFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
 function timeLabel(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value));
+  return timeFormatter.format(new Date(value));
 }
 
 function initials(value: string): string {
@@ -413,7 +416,6 @@ function ChatApp() {
         if (currentChannelId && !activeDm) {
           connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
         }
-        void room.refreshMessages();
       };
       connectedSocket.onclose = () => setConnection("offline");
       connectedSocket.onerror = () => setConnection("offline");
@@ -1427,7 +1429,7 @@ function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; se
         return <div key={entry.id} className="flex flex-wrap items-start gap-3 px-5 py-4">
           <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" />
           <div className="min-w-0 flex-1"><p className="font-mono text-xs leading-5"><span className="font-bold">{entry.actor ?? "System"}</span>{" "}{auditActionLabel(entry.action)}{" "}<span className="text-secondary-foreground">{resourceLabel}</span></p><p className="mt-1 truncate text-[10px] text-muted-foreground">{entry.details || `${entry.resourceType ?? "workspace"} ${entry.resourceId ?? ""}`}</p></div>
-          <time className="shrink-0 font-mono text-[9px] text-muted-foreground">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.createdAt))}</time>
+          <time className="shrink-0 font-mono text-[9px] text-muted-foreground">{activityDateTimeFormatter.format(new Date(entry.createdAt))}</time>
         </div>;
       })}</div>}
     </section>
