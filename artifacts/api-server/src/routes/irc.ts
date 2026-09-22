@@ -927,7 +927,14 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
   const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 160) : "";
   const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.trim().slice(0, 120) : "application/octet-stream";
   const fileSize = Number(req.body?.fileSize);
-  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+  if (
+    !/^\/objects\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(objectPath)
+    || !fileName
+    || fileName.includes("/")
+    || !Number.isSafeInteger(fileSize)
+    || fileSize < 1
+    || fileSize > 10_000_000
+  ) {
     res.status(400).json({ error: "Invalid attachment metadata." });
     return;
   }
