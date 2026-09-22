@@ -939,6 +939,8 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     contentType,
     fileSize,
   }).returning();
+  const updatedView = await messageView(message, userId);
+  broadcastMessageEvent(message, { type: "message", message: updatedView });
   res.status(201).json({ ...attachment, url: `/api/attachments/${attachment.id}` });
 });
 

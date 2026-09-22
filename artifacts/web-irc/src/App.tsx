@@ -531,7 +531,7 @@ function ChatApp() {
         try {
            if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
-           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
+           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items.map((item) => item.id === data.message!.id ? { ...item, ...data.message } : item) : [...items, data.message!]);
           if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
