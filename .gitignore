@@ -2,6 +2,8 @@
 
 # compiled output
 dist
+dist-*
+build
 dist-tests
 tmp
 out-tsc
@@ -11,6 +13,36 @@ out-tsc
 
 # dependencies
 node_modules
+
+# environment, credentials, and private keys
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+credentials/
+.credentials/
+secrets/
+.secrets/
+*.credentials.json
+service-account*.json
+
+# local databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+
+# generated caches
+cache
+.cache
+.parcel-cache
+.turbo
+.vite
 
 # IDEs and editors
 /.idea

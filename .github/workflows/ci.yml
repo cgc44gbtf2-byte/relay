@@ -133,7 +133,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_DB: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
@@ -143,7 +143,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CI_TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      CI_TEST_DATABASE_ADMIN_URL: postgresql://postgres@127.0.0.1:5432/postgres
       CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
       CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
     steps:
@@ -181,7 +181,7 @@ jobs:
         image: postgres:${{ matrix.postgres-version }}
         env:
           POSTGRES_DB: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
@@ -191,7 +191,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CI_TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      CI_TEST_DATABASE_ADMIN_URL: postgresql://postgres@127.0.0.1:5432/postgres
       CI_TEST_DATABASE_VERSION: ${{ matrix.postgres-version }}
     steps:
       - name: Check out repository
@@ -226,7 +226,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_DB: web_irc_cleanup
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
@@ -236,7 +236,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/web_irc_cleanup
+      TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/web_irc_cleanup
       CLERK_SECRET_KEY: ${{ secrets.CLERK_TEST_SECRET_KEY }}
       CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}
       TEAM_NOTIFICATION_WEBHOOK_URL: ${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}

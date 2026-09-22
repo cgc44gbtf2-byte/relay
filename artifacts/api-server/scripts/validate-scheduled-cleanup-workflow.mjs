@@ -22,7 +22,7 @@ const envEntries = parseEnvEntries(jobEnv);
 const expectedEnv = new Map([
   [
     "TEST_DATABASE_URL",
-    "postgresql://postgres:postgres@127.0.0.1:5432/web_irc_cleanup",
+    "postgresql://postgres@127.0.0.1:5432/web_irc_cleanup",
   ],
   ["CLERK_SECRET_KEY", "${{ secrets.CLERK_TEST_SECRET_KEY }}"],
   ["CLERK_PUBLISHABLE_KEY", "${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}"],
