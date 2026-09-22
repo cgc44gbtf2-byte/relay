@@ -7,6 +7,8 @@ import {
   announcementAttachmentsTable,
   announcementReadReceiptsTable,
   categoriesTable,
+  channelBansTable,
+  channelInvitesTable,
   channelMembersTable,
   channelJoinRequestsTable,
   channelsTable,
@@ -22,6 +24,9 @@ import {
   db,
   employeeProfilesTable,
   locationsTable,
+  messageAttachmentsTable,
+  messageReactionsTable,
+  messagesTable,
   moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
@@ -53,6 +58,7 @@ import {
   type PermissionKey,
 } from "../lib/permissions";
 import { createNotification, createNotifications } from "../lib/notifications";
+import { wsHub } from "../lib/ws";
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
@@ -2077,6 +2083,31 @@ router.patch("/communities/:communityId/categories/:categoryId", requireAuth, as
   res.json(updated);
 });
 
+router.delete("/communities/:communityId/categories/:categoryId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const categoryId = Number(param(req, "categoryId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(categoryId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "You cannot delete categories in this community." });
+    return;
+  }
+  const [category] = await db.select({ id: categoriesTable.id, name: categoriesTable.name })
+    .from(categoriesTable)
+    .where(and(eq(categoriesTable.id, categoryId), eq(categoriesTable.communityId, communityId)));
+  if (!category) {
+    res.status(404).json({ error: "Category not found." });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx.update(channelsTable)
+      .set({ categoryId: null })
+      .where(and(eq(channelsTable.communityId, communityId), eq(channelsTable.categoryId, categoryId)));
+    await tx.delete(categoriesTable).where(eq(categoriesTable.id, categoryId));
+  });
+  await writeCommunityAudit(userId, "deleted_community_category", communityId, category.name);
+  res.json({ ok: true, categoryId });
+});
+
 router.patch("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
@@ -2149,6 +2180,41 @@ router.post("/communities/:communityId/channels", requireAuth, async (req: Authe
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId, role: "owner" });
   await writeCommunityAudit(userId, "created_community_channel", communityId, channel.name);
   res.status(201).json({ ...channel, passwordHash: undefined });
+});
+
+router.delete("/communities/:communityId/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const channelId = Number(param(req, "channelId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(channelId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "You cannot delete channels in this community." });
+    return;
+  }
+  const [channel] = await db.select({ id: channelsTable.id, name: channelsTable.name })
+    .from(channelsTable)
+    .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)));
+  if (!channel) {
+    res.status(404).json({ error: "Channel not found." });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channelId));
+    await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channelId));
+    await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channelId));
+    const channelMessages = await tx.select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(eq(messagesTable.channelId, channelId));
+    if (channelMessages.length) {
+      await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, channelMessages.map((message) => message.id)));
+      await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, channelMessages.map((message) => message.id)));
+    }
+    await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channelId));
+    await tx.delete(messagesTable).where(eq(messagesTable.channelId, channelId));
+    await tx.delete(channelsTable).where(eq(channelsTable.id, channelId));
+  });
+  wsHub.broadcastChannelRemoved(channelId);
+  await writeCommunityAudit(userId, "deleted_community_channel", communityId, channel.name);
+  res.json({ ok: true, channelId });
 });
 
 router.patch("/communities/:communityId/members/:memberId/role", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -2293,6 +2359,26 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
   }
   await writeCommunityAudit(userId, isScheduled ? "scheduled_community_announcement" : "published_community_announcement", communityId, title);
   res.status(201).json(announcement);
+});
+
+router.delete("/communities/:communityId/announcements/:announcementId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(announcementId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "You cannot delete announcements in this community." });
+    return;
+  }
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id, title: serverAnnouncementsTable.title })
+    .from(serverAnnouncementsTable)
+    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  if (!announcement) {
+    res.status(404).json({ error: "Announcement not found." });
+    return;
+  }
+  await db.delete(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.id, announcementId));
+  await writeCommunityAudit(userId, "deleted_community_announcement", communityId, announcement.title);
+  res.json({ ok: true, announcementId });
 });
 
 router.post("/communities/:communityId/announcements/:announcementId/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

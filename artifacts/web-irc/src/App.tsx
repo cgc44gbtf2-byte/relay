@@ -1640,6 +1640,10 @@ function DocumentCenter({ detail, working, setWorking, setNotice, setError }: { 
   </section>;
 }
 
+function AdminDeleteButton({ label, working, onDelete }: { label: string; working: boolean; onDelete: () => void }) {
+  return <button type="button" disabled={working} onClick={onDelete} className="inline-flex items-center gap-1 rounded border border-destructive/40 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-50"><Trash2 className="h-3 w-3" />{label}</button>;
+}
+
 function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -2619,6 +2623,20 @@ function CommunityConsole() {
       setWorking(false);
     }
   };
+  const deleteCommunityResource = async (resource: "categories" | "channels" | "announcements", id: number, label: string) => {
+    if (!detail || !window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/communities/${detail.community.id}/${resource}/${id}`, { method: "DELETE" });
+      setNotice(`${label} deleted.`);
+      await loadDetail(detail.community.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `Could not delete ${label}`);
+    } finally {
+      setWorking(false);
+    }
+  };
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading communities…</div>;
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
@@ -2652,6 +2670,7 @@ function CommunityConsole() {
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              {(detail.canManage || detail.canManageOrganization) && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
+             {detail.canManage && <section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace resources</h2><p className="mt-1 text-xs text-muted-foreground">Deleting a category unassigns its channels. Deleting a channel removes its members, requests, messages, and invitations.</p></div><Trash2 className="h-5 w-5 text-destructive" /></div><div className="mt-5 grid gap-5 xl:grid-cols-3"><div><p className="font-mono text-[10px] uppercase text-muted-foreground">categories</p><div className="mt-2 space-y-2">{detail.categories.map((category) => <div key={category.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{category.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("categories", category.id, `category “${category.name}”`)} /></div>)}{detail.categories.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No categories.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">channels</p><div className="mt-2 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("channels", channel.id, `channel “${channel.name}”`)} /></div>)}{detail.channels.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No channels.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">announcements</p><div className="mt-2 space-y-2">{detail.announcements.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{item.title}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("announcements", item.id, `announcement “${item.title}”`)} /></div>)}{detail.announcements.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No announcements.</p>}</div></div></div></section>}
            </div>}
         </section>
       </main>
