@@ -2004,6 +2004,29 @@ describe("admin access controls", () => {
             channel.category?.communityId === publicCommunityId,
         ),
       );
+
+      const adminChannels = await apiRequest(adminSession, "/channels");
+      assert.equal(adminChannels.status, 200, JSON.stringify(adminChannels));
+      assert.ok(Array.isArray(adminChannels.body));
+      const visibleAdminPrivateChannels = adminChannels.body.filter(
+        (channel): channel is {
+          communityId: number;
+          isPrivate: boolean;
+          category: { communityId?: unknown } | null;
+        } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { communityId?: unknown }).communityId ===
+            privateCommunityId,
+      );
+      assert.ok(visibleAdminPrivateChannels.length > 0);
+      assert.ok(
+        visibleAdminPrivateChannels.every(
+          (channel) =>
+            channel.isPrivate === false &&
+            channel.category?.communityId === privateCommunityId,
+        ),
+      );
     } finally {
       if (communityIds.length) {
         await pool.query(

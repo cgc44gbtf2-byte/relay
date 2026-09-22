@@ -313,13 +313,78 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   const userId = getUserId(req);
   await ensureProfile(userId);
   await ensureDefaults(userId);
-  const allChannels = await db.select().from(channelsTable).orderBy(asc(channelsTable.name));
-  const joined = await db.select({ channelId: channelMembersTable.channelId })
-    .from(channelMembersTable).where(eq(channelMembersTable.userId, userId));
+  const [allChannels, joined, allCategories, pending] = await Promise.all([
+    db.select().from(channelsTable).orderBy(asc(channelsTable.name)),
+    db
+      .select({ channelId: channelMembersTable.channelId })
+      .from(channelMembersTable)
+      .where(eq(channelMembersTable.userId, userId)),
+    db.select().from(categoriesTable).orderBy(asc(categoriesTable.name)),
+    db
+      .select({ channelId: channelJoinRequestsTable.channelId })
+      .from(channelJoinRequestsTable)
+      .where(and(
+        eq(channelJoinRequestsTable.userId, userId),
+        eq(channelJoinRequestsTable.status, "pending"),
+      )),
+  ]);
   const joinedIds = new Set(joined.map((item) => item.channelId));
-  const visibleChannels = await Promise.all(allChannels.map(async (channel) => (
-    await canReadChannel(channel, userId) ? channel : null
-  )));
+  const communityIds = [
+    ...new Set([
+      ...allChannels.flatMap((channel) =>
+        channel.communityId === null ? [] : [channel.communityId],
+      ),
+      ...allCategories.flatMap((category) =>
+        category.communityId === null ? [] : [category.communityId],
+      ),
+    ]),
+  ];
+  const [communities, memberships] = communityIds.length
+    ? await Promise.all([
+      db
+        .select({
+          id: communitiesTable.id,
+          isPrivate: communitiesTable.isPrivate,
+        })
+        .from(communitiesTable)
+        .where(inArray(communitiesTable.id, communityIds)),
+      db
+        .select({ communityId: communityMembersTable.communityId })
+        .from(communityMembersTable)
+        .where(and(
+          eq(communityMembersTable.userId, userId),
+          inArray(communityMembersTable.communityId, communityIds),
+        )),
+    ])
+    : [[], []];
+  const communityPrivacy = new Map(
+    communities.map((community) => [community.id, community.isPrivate]),
+  );
+  const membershipIds = new Set(
+    memberships.map((membership) => membership.communityId),
+  );
+  const permissionAccess = new Map<number, Promise<boolean>>();
+  const hasPrivateCommunityAccess = (communityId: number): Promise<boolean> => {
+    if (membershipIds.has(communityId)) return Promise.resolve(true);
+    const cached = permissionAccess.get(communityId);
+    if (cached) return cached;
+    const access = (async () =>
+      await hasPermission(userId, "view_business", { communityId })
+      || await hasPermission(userId, "manage_community", { communityId })
+    )();
+    permissionAccess.set(communityId, access);
+    return access;
+  };
+  const visibleChannels = await Promise.all(allChannels.map(async (channel) => {
+    if (
+      channel.communityId !== null
+      && communityPrivacy.get(channel.communityId) !== false
+      && !(await hasPrivateCommunityAccess(channel.communityId))
+    ) {
+      return null;
+    }
+    return !channel.isPrivate || joinedIds.has(channel.id) ? channel : null;
+  }));
   const channels = visibleChannels.filter((channel): channel is typeof allChannels[number] => channel !== null);
   const counts = channels.length
     ? await db
@@ -334,56 +399,15 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   const countMap = new Map(
     counts.map(({ channelId, memberCount }) => [channelId, Number(memberCount)]),
   );
-  const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
-  const categoryCommunityIds = [
-    ...new Set(
-      allCategories.flatMap((category) =>
-        category.communityId === null ? [] : [category.communityId],
-      ),
-    ),
-  ];
-  const [categoryCommunities, categoryMemberships] = categoryCommunityIds.length
-    ? await Promise.all([
-      db
-        .select({
-          id: communitiesTable.id,
-          isPrivate: communitiesTable.isPrivate,
-        })
-        .from(communitiesTable)
-        .where(inArray(communitiesTable.id, categoryCommunityIds)),
-      db
-        .select({ communityId: communityMembersTable.communityId })
-        .from(communityMembersTable)
-        .where(and(
-          eq(communityMembersTable.userId, userId),
-          inArray(communityMembersTable.communityId, categoryCommunityIds),
-        )),
-    ])
-    : [[], []];
-  const categoryCommunityPrivacy = new Map(
-    categoryCommunities.map((community) => [community.id, community.isPrivate]),
-  );
-  const categoryMembershipIds = new Set(
-    categoryMemberships.map((membership) => membership.communityId),
-  );
   const visibleCategories = await Promise.all(allCategories.map(async (category) => {
     if (category.communityId === null) return category;
-    return categoryCommunityPrivacy.get(category.communityId) !== true
-      || categoryMembershipIds.has(category.communityId)
-      || await hasPermission(userId, "view_business", { communityId: category.communityId })
-      || await hasPermission(userId, "manage_community", { communityId: category.communityId })
+    return communityPrivacy.get(category.communityId) !== true
+      || await hasPrivateCommunityAccess(category.communityId)
       ? category
       : null;
   }));
   const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
-  const pending = await db
-    .select({ channelId: channelJoinRequestsTable.channelId })
-    .from(channelJoinRequestsTable)
-    .where(and(
-      eq(channelJoinRequestsTable.userId, userId),
-      eq(channelJoinRequestsTable.status, "pending"),
-    ));
   const pendingIds = new Set(pending.map((request) => request.channelId));
   res.json(channels.map((channel) => ({
     ...channel,
