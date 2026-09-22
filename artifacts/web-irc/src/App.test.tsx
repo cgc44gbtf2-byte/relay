@@ -235,13 +235,21 @@ describe("deleted room recovery", () => {
   it("removes a room immediately when another session deletes it", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    const deletedRoomSocket = latestWebSocket;
 
     latestWebSocket?.onmessage?.({
       data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
     } as MessageEvent);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    deletedRoomSocket?.onmessage?.({
+      data: JSON.stringify({
+        type: "message",
+        message: message(1, "late message from deleted room", "late-message"),
+      }),
+    } as MessageEvent);
     expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
+    expect(screen.queryByText("late message from deleted room")).toBeNull();
     expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
   });
 

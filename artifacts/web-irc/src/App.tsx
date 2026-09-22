@@ -485,13 +485,15 @@ function ChatApp() {
         if (currentChannelId && !activeDm) {
           connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
         }
+        if (currentChannelId || activeDm) void room.refreshMessages();
       };
       connectedSocket.onclose = () => setConnection("offline");
       connectedSocket.onerror = () => setConnection("offline");
       connectedSocket.onmessage = (event) => {
         try {
+           if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
-          if (data.type === "message" && data.message?.channelId === currentChannelId) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
+           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
           if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
@@ -518,10 +520,10 @@ function ChatApp() {
            if (data.type === "reaction" && data.messageId && data.reactions) {
              room.setMessages((items) => items.map((item) => item.id === data.messageId ? { ...item, reactions: data.reactions } : item));
            }
-          if (data.type === "presence" && currentChannelId) {
-            api<Member[]>(`/channels/${currentChannelId}/members`).then(room.setMembers).catch(() => undefined);
+           if (data.type === "presence" && currentChannelIdRef.current && !activeDmIdRef.current) {
+             api<Member[]>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
             const presenceUser = "user" in data && data.user ? (data.user as Profile).displayName : "Someone";
-            room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelId }]);
+             room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelIdRef.current }]);
           }
         } catch { /* ignore malformed frames */ }
       };

@@ -6,7 +6,12 @@ import type { Duplex } from "node:stream";
 import { clerkClient } from "@clerk/express";
 import { canReadChannel, channelForRead } from "./channel-access";
 
-type Client = { socket: WebSocket; userId: string; channelIds: Set<number> };
+type Client = {
+  socket: WebSocket;
+  userId: string;
+  channelIds: Set<number>;
+  channelGenerations: Map<number, number>;
+};
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
 
 class Hub {
@@ -42,13 +47,22 @@ class Hub {
 
   revokeChannelAccess(channelId: number, userId: string): void {
     for (const client of this.clients) {
-      if (client.userId === userId) client.channelIds.delete(channelId);
+      if (client.userId !== userId) continue;
+      client.channelGenerations.set(
+        channelId,
+        (client.channelGenerations.get(channelId) ?? 0) + 1,
+      );
+      client.channelIds.delete(channelId);
     }
   }
 
   broadcastChannelRemoved(channelId: number): void {
     for (const client of this.clients) {
       this.send(client.socket, { type: "channel_removed", channelId });
+      client.channelGenerations.set(
+        channelId,
+        (client.channelGenerations.get(channelId) ?? 0) + 1,
+      );
       client.channelIds.delete(channelId);
     }
   }
@@ -94,6 +108,7 @@ class Hub {
         socket: ws,
         userId: ticket.userId,
         channelIds: new Set(),
+        channelGenerations: new Map(),
       };
       this.clients.add(client);
       void db
@@ -119,13 +134,24 @@ class Hub {
 
           const channelId = Number(message.channelId);
           if (message.type === "unsubscribe") {
+            client.channelGenerations.set(
+              channelId,
+              (client.channelGenerations.get(channelId) ?? 0) + 1,
+            );
             client.channelIds.delete(channelId);
             return;
           }
 
+          const generation = client.channelGenerations.get(channelId) ?? 0;
           void channelForRead(channelId)
             .then(async (channel) => {
               if (!channel || !(await canReadChannel(channel, client.userId))) return;
+              if (
+                !this.clients.has(client)
+                || (client.channelGenerations.get(channelId) ?? 0) !== generation
+              ) {
+                return;
+              }
               if (message.type === "subscribe") {
                 client.channelIds.add(channelId);
               } else if (client.channelIds.has(channelId)) {
