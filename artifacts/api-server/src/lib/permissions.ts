@@ -341,6 +341,83 @@ export async function hasPermission(
   return false;
 }
 
+export async function permissionsForCommunities(
+  userId: string,
+  communityIds: number[],
+  requestedPermissions: readonly PermissionKey[],
+): Promise<Map<number, Set<PermissionKey>>> {
+  const result = new Map<number, Set<PermissionKey>>(
+    communityIds.map((communityId) => [communityId, new Set<PermissionKey>()]),
+  );
+  const requested = new Set(requestedPermissions);
+  if (!communityIds.length || !requested.size) return result;
+
+  const [user, assignments] = await Promise.all([
+    db.select({ role: usersTable.role }).from(usersTable).where(eq(usersTable.clerkId, userId)),
+    db.select().from(userRolesTable).where(eq(userRolesTable.userId, userId)),
+  ]);
+  const profile = user[0];
+  if (!profile) return result;
+
+  const addRolePermissions = (permissions: Set<PermissionKey>, role: string): void => {
+    if (role in ROLE_PERMISSIONS) {
+      for (const permission of ROLE_PERMISSIONS[role as AuthorizationRole]) {
+        if (requested.has(permission)) permissions.add(permission);
+      }
+    }
+  };
+
+  if (profile.role === "admin") {
+    for (const permissions of result.values()) {
+      for (const permission of requested) permissions.add(permission);
+    }
+    return result;
+  }
+
+  const customRoleNames = assignments
+    .map((assignment) => assignment.role)
+    .filter((role) => !(role in ROLE_PERMISSIONS));
+  const customPermissionRows = customRoleNames.length
+    ? await db.select({
+      role: rolePermissionsTable.role,
+      key: permissionDefinitionsTable.key,
+    }).from(rolePermissionsTable)
+      .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+      .where(inArray(rolePermissionsTable.role, customRoleNames))
+    : [];
+  const customPermissionsByRole = new Map<string, Set<PermissionKey>>();
+  for (const row of customPermissionRows) {
+    if (!requested.has(row.key as PermissionKey)) continue;
+    const permissions = customPermissionsByRole.get(row.role) ?? new Set<PermissionKey>();
+    permissions.add(row.key as PermissionKey);
+    customPermissionsByRole.set(row.role, permissions);
+  }
+
+  for (const communityId of communityIds) {
+    const permissions = result.get(communityId);
+    if (!permissions) continue;
+
+    if (["platform_moderator", "moderator"].includes(profile.role)) {
+      addRolePermissions(permissions, profile.role);
+    }
+
+    if (PRIMARY_ROLES.includes(profile.role as PrimaryRole)) {
+      const primaryAssignment = assignments.find((assignment) => assignment.role === profile.role);
+      if (profile.role !== "community_admin" || (primaryAssignment && assignmentMatches(primaryAssignment, { communityId }))) {
+        addRolePermissions(permissions, profile.role);
+      }
+    }
+
+    for (const assignment of assignments) {
+      if (!assignmentMatches(assignment, { communityId })) continue;
+      addRolePermissions(permissions, assignment.role);
+      for (const permission of customPermissionsByRole.get(assignment.role) ?? []) permissions.add(permission);
+    }
+  }
+
+  return result;
+}
+
 export async function permissionsForUser(userId: string): Promise<{
   role: string;
   permissions: PermissionKey[];

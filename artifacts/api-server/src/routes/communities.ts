@@ -42,6 +42,7 @@ import {
   communityForId,
   ensurePermissionCatalog,
   hasPermission,
+  permissionsForCommunities,
   permissionsForUser,
   type PermissionKey,
 } from "../lib/permissions";
@@ -253,17 +254,23 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
   const memberIds = new Set(memberships.map((membership) => membership.communityId));
-  const result = (await Promise.all(communities.map(async (community) => {
+  const permissionMap = await permissionsForCommunities(
+    userId,
+    communities.map((community) => community.id),
+    ["manage_community", "view_business"],
+  );
+  const result = communities.map((community) => {
     const joined = memberIds.has(community.id);
-    const canManage = await communityPermission(userId, community.id, "manage_community");
+    const permissions = permissionMap.get(community.id);
+    const canManage = permissions?.has("manage_community") ?? false;
     if (
       community.isPrivate
       && !joined
       && !canManage
-      && !(await hasPermission(userId, "view_business", { communityId: community.id }))
+      && !(permissions?.has("view_business") ?? false)
     ) return null;
     return { ...community, joined, canManage };
-  }))).filter((community): community is NonNullable<typeof community> => community !== null);
+  }).filter((community): community is NonNullable<typeof community> => community !== null);
   res.json(result);
 });
 
