@@ -114,6 +114,7 @@ function installApi({
     readAt: string | null;
     actionUrl: string | null;
   }>;
+  uploadFailure?: boolean;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = room(2, "#fallback-room");
