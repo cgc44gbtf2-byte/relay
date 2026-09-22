@@ -39,7 +39,7 @@ import { wsHub } from "../lib/ws";
 import { canReadChannel } from "../lib/channel-access";
 import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
-import { hasPermission } from "../lib/permissions";
+import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
 
 const router: IRouter = Router();
@@ -428,14 +428,24 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
 router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
-  const visibleCategories = await Promise.all(allCategories.map(async (category) => (
-    category.communityId === null
-      || await hasPermission(userId, "view_business", { communityId: category.communityId })
-      || await hasPermission(userId, "manage_community", { communityId: category.communityId })
-      ? category
-      : null
-  )));
-  const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
+  const communityIds = [
+    ...new Set(
+      allCategories.flatMap((category) =>
+        category.communityId === null ? [] : [category.communityId],
+      ),
+    ),
+  ];
+  const permissions = await permissionsForCommunities(
+    userId,
+    communityIds,
+    ["view_business", "manage_community"],
+  );
+  const categories = allCategories.filter((category) => {
+    if (category.communityId === null) return true;
+    const communityPermissions = permissions.get(category.communityId);
+    return communityPermissions?.has("view_business")
+      || communityPermissions?.has("manage_community");
+  });
   res.json(categories);
 });
 
