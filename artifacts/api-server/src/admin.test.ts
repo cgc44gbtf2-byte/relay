@@ -2037,6 +2037,131 @@ describe("admin access controls", () => {
     }
   });
 
+  test("reports exact community dashboard statistics from database aggregates", async () => {
+    const ownerSession = await createTestSession("dashboard_owner");
+    const workerSession = await createTestSession("dashboard_worker");
+    let communityId: number | null = null;
+
+    try {
+      const workerProfile = await apiRequest(workerSession, "/me");
+      assert.equal(workerProfile.status, 200, JSON.stringify(workerProfile));
+
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Dashboard ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `UPDATE irc_users SET status = CASE
+           WHEN clerk_id = $1 THEN 'online'
+           WHEN clerk_id = $2 THEN 'offline'
+           ELSE status
+         END
+         WHERE clerk_id IN ($1, $2)`,
+        [ownerSession.userId, workerSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member')`,
+        [communityId, workerSession.userId],
+      );
+
+      const channelIds = (
+        await pool.query<{ id: number }>(
+          "SELECT id FROM irc_channels WHERE community_id = $1 ORDER BY id",
+          [communityId],
+        )
+      ).rows.map(({ id }) => id);
+      assert.equal(channelIds.length, 3);
+
+      const now = Date.now();
+      await pool.query(
+        `INSERT INTO irc_workspace_tasks
+           (community_id, title, status, due_date, created_by)
+         VALUES
+           ($1, 'Open without due date', 'todo', NULL, $2),
+           ($1, 'Due this week', 'in_progress', $3, $2),
+           ($1, 'Overdue', 'todo', $4, $2),
+           ($1, 'Completed future task', 'completed', $3, $2),
+           ($1, 'Cancelled overdue task', 'cancelled', $4, $2)`,
+        [
+          communityId,
+          ownerSession.userId,
+          new Date(now + 2 * 24 * 60 * 60 * 1000),
+          new Date(now - 24 * 60 * 60 * 1000),
+        ],
+      );
+      await pool.query(
+        `INSERT INTO irc_server_announcements
+           (author_id, community_id, body, status, scheduled_at, expires_at)
+         VALUES
+           ($1, $2, 'Current unscheduled', 'published', NULL, NULL),
+           ($1, $2, 'Current scheduled', 'published', $3, $4),
+           ($1, $2, 'Future', 'published', $4, NULL),
+           ($1, $2, 'Expired', 'published', NULL, $3),
+           ($1, $2, 'Draft', 'draft', NULL, NULL)`,
+        [
+          ownerSession.userId,
+          communityId,
+          new Date(now - 60 * 60 * 1000),
+          new Date(now + 60 * 60 * 1000),
+        ],
+      );
+      await pool.query(
+        `INSERT INTO irc_channel_join_requests (channel_id, user_id, status)
+         VALUES ($1, $3, 'pending'), ($2, $3, 'approved')`,
+        [channelIds[0], channelIds[1], workerSession.userId],
+      );
+
+      const dashboard = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/dashboard`,
+      );
+      assert.equal(dashboard.status, 200, JSON.stringify(dashboard));
+      assert.ok(dashboard.body && typeof dashboard.body === "object");
+      const body = dashboard.body as {
+        stats?: unknown;
+        tasks?: unknown;
+        recentActivity?: unknown;
+      };
+      assert.deepEqual(body.stats, {
+        employees: 2,
+        online: 1,
+        channels: 3,
+        openTasks: 3,
+        announcements: 2,
+        pendingRequests: 1,
+      });
+      assert.deepEqual(body.tasks, {
+        open: 3,
+        dueThisWeek: 1,
+        overdue: 1,
+      });
+      assert.ok(Array.isArray(body.recentActivity));
+    } finally {
+      if (communityId !== null) {
+        await pool.query(
+          `DELETE FROM irc_channel_join_requests
+           WHERE channel_id IN (
+             SELECT id FROM irc_channels WHERE community_id = $1
+           )`,
+          [communityId],
+        );
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [
+          communityId,
+        ]);
+      }
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");

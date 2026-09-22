@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, asc, desc, eq, gte, ilike, inArray, lte, notInArray, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
@@ -613,15 +613,48 @@ router.get("/communities/:communityId/dashboard", requireAuth, async (req: Authe
   }
   const now = new Date();
   const weekAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const [members, channels, tasks, announcements, pendingRequests, activity] = await Promise.all([
-    db.select({ userId: communityMembersTable.userId, status: usersTable.status }).from(communityMembersTable)
+  const [
+    [memberStats],
+    [channelStats],
+    [taskStats],
+    [announcementStats],
+    [requestStats],
+    activity,
+  ] = await Promise.all([
+    db.select({
+      employees: count(),
+      online: sql<number>`count(*) filter (where ${usersTable.status} = ${"online"})`,
+    }).from(communityMembersTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
       .where(eq(communityMembersTable.communityId, communityId)),
-    db.select({ id: channelsTable.id }).from(channelsTable).where(eq(channelsTable.communityId, communityId)),
-    db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, communityId)),
-    db.select({ status: serverAnnouncementsTable.status, scheduledAt: serverAnnouncementsTable.scheduledAt, expiresAt: serverAnnouncementsTable.expiresAt })
+    db.select({ channels: count() }).from(channelsTable)
+      .where(eq(channelsTable.communityId, communityId)),
+    db.select({
+      open: sql<number>`count(*) filter (
+        where ${workspaceTasksTable.status} not in (${"completed"}, ${"cancelled"})
+      )`,
+      dueThisWeek: sql<number>`count(*) filter (
+        where ${workspaceTasksTable.status} not in (${"completed"}, ${"cancelled"})
+          and ${workspaceTasksTable.dueDate} is not null
+          and ${workspaceTasksTable.dueDate} >= ${now}
+          and ${workspaceTasksTable.dueDate} <= ${weekAhead}
+      )`,
+      overdue: sql<number>`count(*) filter (
+        where ${workspaceTasksTable.status} not in (${"completed"}, ${"cancelled"})
+          and ${workspaceTasksTable.dueDate} is not null
+          and ${workspaceTasksTable.dueDate} < ${now}
+      )`,
+    }).from(workspaceTasksTable)
+      .where(eq(workspaceTasksTable.communityId, communityId)),
+    db.select({
+      announcements: sql<number>`count(*) filter (
+        where ${serverAnnouncementsTable.status} = ${"published"}
+          and (${serverAnnouncementsTable.scheduledAt} is null or ${serverAnnouncementsTable.scheduledAt} <= ${now})
+          and (${serverAnnouncementsTable.expiresAt} is null or ${serverAnnouncementsTable.expiresAt} > ${now})
+      )`,
+    })
       .from(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.communityId, communityId)),
-    db.select({ id: channelJoinRequestsTable.id }).from(channelJoinRequestsTable)
+    db.select({ pendingRequests: count() }).from(channelJoinRequestsTable)
       .innerJoin(channelsTable, eq(channelsTable.id, channelJoinRequestsTable.channelId))
       .where(and(eq(channelsTable.communityId, communityId), eq(channelJoinRequestsTable.status, "pending"))),
     db.select({
@@ -641,25 +674,20 @@ router.get("/communities/:communityId/dashboard", requireAuth, async (req: Authe
       .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
       .limit(12),
   ]);
-  const openTasks = tasks.filter((task) => !["completed", "cancelled"].includes(task.status));
-  const dueThisWeek = openTasks.filter((task) => task.dueDate && task.dueDate >= now && task.dueDate <= weekAhead);
-  const overdue = openTasks.filter((task) => task.dueDate && task.dueDate < now);
-  const currentAnnouncements = announcements.filter((announcement) => announcement.status === "published"
-    && (!announcement.scheduledAt || announcement.scheduledAt <= now)
-    && (!announcement.expiresAt || announcement.expiresAt > now));
+  const openTasks = Number(taskStats?.open ?? 0);
   res.json({
     stats: {
-      employees: members.length,
-      online: members.filter((member) => member.status === "online").length,
-      channels: channels.length,
-      openTasks: openTasks.length,
-      announcements: currentAnnouncements.length,
-      pendingRequests: pendingRequests.length,
+      employees: Number(memberStats?.employees ?? 0),
+      online: Number(memberStats?.online ?? 0),
+      channels: Number(channelStats?.channels ?? 0),
+      openTasks,
+      announcements: Number(announcementStats?.announcements ?? 0),
+      pendingRequests: Number(requestStats?.pendingRequests ?? 0),
     },
     tasks: {
-      open: openTasks.length,
-      dueThisWeek: dueThisWeek.length,
-      overdue: overdue.length,
+      open: openTasks,
+      dueThisWeek: Number(taskStats?.dueThisWeek ?? 0),
+      overdue: Number(taskStats?.overdue ?? 0),
     },
     recentActivity: activity,
   });
