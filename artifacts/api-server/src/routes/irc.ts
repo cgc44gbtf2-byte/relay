@@ -1296,8 +1296,18 @@ router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedReq
   const userId = getUserId(req);
   const notificationId = Number(param(req, "id"));
   const readAt = new Date();
-  await db.update(notificationsTable).set({ readAt }).where(and(eq(notificationsTable.id, notificationId), eq(notificationsTable.userId, userId)));
-  wsHub.broadcastUser(userId, { type: "notification_read", notificationId, readAt });
+  const [updated] = await db
+    .update(notificationsTable)
+    .set({ readAt })
+    .where(and(eq(notificationsTable.id, notificationId), eq(notificationsTable.userId, userId)))
+    .returning({ id: notificationsTable.id, readAt: notificationsTable.readAt });
+  if (updated) {
+    wsHub.broadcastUser(userId, {
+      type: "notification_read",
+      notificationId: updated.id,
+      readAt: updated.readAt,
+    });
+  }
   res.json({ ok: true });
 });
 
