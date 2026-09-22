@@ -1083,6 +1083,143 @@ describe("admin access controls", () => {
     }
   });
 
+  test("repairs a published release whose announcement was deleted", async () => {
+    const version = `test-${randomUUID().slice(0, 8)}`;
+    const title = `Missing announcement recovery ${randomUUID().slice(0, 8)}`;
+    const notes = `Recovery notes ${randomUUID()}`;
+    let releaseId: number | null = null;
+    let draftAnnouncementId: number | null = null;
+    let replacementAnnouncementId: number | null = null;
+
+    try {
+      const created = await apiRequest(adminSession, "/developer/releases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version, title, notes }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      releaseId = (created.body as { id?: unknown }).id as number;
+      assert.equal(typeof releaseId, "number");
+
+      const review = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "review" }),
+        },
+      );
+      assert.equal(review.status, 200, JSON.stringify(review));
+
+      const published = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "published" }),
+        },
+      );
+      assert.equal(published.status, 200, JSON.stringify(published));
+      assert.ok(published.body && typeof published.body === "object");
+      draftAnnouncementId = (published.body as { announcementId?: unknown }).announcementId as number;
+      assert.equal(typeof draftAnnouncementId, "number");
+
+      await pool.query(
+        "DELETE FROM irc_server_announcements WHERE id = $1",
+        [draftAnnouncementId],
+      );
+
+      const releases = await apiRequest(adminSession, "/developer/releases");
+      assert.equal(releases.status, 200, JSON.stringify(releases));
+      assert.ok(Array.isArray(releases.body));
+      const visibleRelease = releases.body.find(
+        (release): release is { id: number; status: string; announcementId: number | null } =>
+          typeof release === "object" &&
+          release !== null &&
+          (release as { id?: unknown }).id === releaseId,
+      );
+      assert.deepEqual(visibleRelease, {
+        id: releaseId,
+        status: "published",
+        announcementId: null,
+      });
+
+      const repaired = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/announcement`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "published" }),
+        },
+      );
+      assert.equal(repaired.status, 200, JSON.stringify(repaired));
+      assert.ok(repaired.body && typeof repaired.body === "object");
+      const repairedBody = repaired.body as {
+        release?: { id?: unknown; status?: unknown; announcementId?: unknown };
+        announcement?: { id?: unknown; status?: unknown; title?: unknown; body?: unknown };
+      };
+      assert.equal(repairedBody.release?.id, releaseId);
+      assert.equal(repairedBody.release?.status, "published");
+      replacementAnnouncementId = repairedBody.announcement?.id as number;
+      assert.equal(typeof replacementAnnouncementId, "number");
+      assert.notEqual(replacementAnnouncementId, draftAnnouncementId);
+      assert.equal(repairedBody.announcement?.status, "published");
+      assert.equal(
+        repairedBody.announcement?.title,
+        `Release ${version}: ${title}`,
+      );
+      assert.equal(repairedBody.announcement?.body, notes);
+      assert.equal(repairedBody.release?.announcementId, replacementAnnouncementId);
+
+      const linkedRows = await pool.query<{
+        release_status: string;
+        announcement_id: number | null;
+        announcement_status: string | null;
+      }>(
+        `SELECT r.status AS release_status,
+                r.announcement_id,
+                a.status AS announcement_status
+         FROM irc_developer_releases r
+         LEFT JOIN irc_server_announcements a ON a.id = r.announcement_id
+         WHERE r.id = $1`,
+        [releaseId],
+      );
+      assert.deepEqual(linkedRows.rows, [{
+        release_status: "published",
+        announcement_id: replacementAnnouncementId,
+        announcement_status: "published",
+      }]);
+    } finally {
+      const notificationBody = `Release ${version}: ${title}: ${notes}`;
+      await pool.query(
+        "DELETE FROM irc_notifications WHERE type = 'server_announcement' AND body = $1",
+        [notificationBody],
+      );
+      if (releaseId !== null) {
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE target_id = $1 OR target_id = $2",
+          [String(releaseId), replacementAnnouncementId === null ? "" : String(replacementAnnouncementId)],
+        );
+        await pool.query(
+          "DELETE FROM irc_developer_releases WHERE id = $1",
+          [releaseId],
+        );
+      }
+      for (const announcementId of [draftAnnouncementId, replacementAnnouncementId]) {
+        if (announcementId !== null) {
+          await pool.query(
+            "DELETE FROM irc_server_announcements WHERE id = $1",
+            [announcementId],
+          );
+        }
+      }
+    }
+  });
+
   test("reports exact user statistics from the admin overview", async () => {
     const expected = (
       await pool.query<{
