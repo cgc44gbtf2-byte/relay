@@ -244,6 +244,12 @@ pnpm --filter @workspace/api-spec run codegen
 
 Authenticated API tests require a separate disposable `TEST_DATABASE_URL`. Test execution intentionally does not fall back to the development or production database.
 
+## Ownership and license diligence
+
+- [IP ownership register](docs/ip-ownership-register.md) — source, brand, domain, schema, documentation, and custom-system transfer checklist
+- [Third-party license inventory](docs/third-party-licenses.md) — dependency screening and acquisition blockers
+- `pnpm run audit:licenses` — fail the workspace when installed dependencies report unknown or unapproved licenses
+
 ## Design Principles
 
 - **Communication with context:** messages, tasks, files, people, and operational records belong in the same workspace.
