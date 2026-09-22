@@ -214,6 +214,65 @@ export const policyAcknowledgementsTable = pgTable("irc_policy_acknowledgements"
   acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [primaryKey({ columns: [table.policyId, table.userId] })]);
 
+export const documentFoldersTable = pgTable("irc_document_folders", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  parentId: integer("parent_id"),
+  name: text("name").notNull(),
+  createdBy: text("created_by").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const businessDocumentsTable = pgTable("irc_business_documents", {
+  id: serial("id").primaryKey(),
+  communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
+  folderId: integer("folder_id").references(() => documentFoldersTable.id, { onDelete: "set null" }),
+  title: text("title").notNull(),
+  description: text("description").notNull().default(""),
+  category: text("category").notNull().default("company"),
+  visibility: text("visibility").notNull().default("company"),
+  targetUserId: text("target_user_id").references(() => usersTable.clerkId, { onDelete: "set null" }),
+  requiresAcknowledgement: boolean("requires_acknowledgement").notNull().default(false),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const documentVersionsTable = pgTable("irc_document_versions", {
+  id: serial("id").primaryKey(),
+  documentId: integer("document_id").notNull().references(() => businessDocumentsTable.id, { onDelete: "cascade" }),
+  version: integer("version").notNull(),
+  objectPath: text("object_path").notNull(),
+  fileName: text("file_name").notNull(),
+  contentType: text("content_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  uploadedBy: text("uploaded_by").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const documentPermissionsTable = pgTable("irc_document_permissions", {
+  documentId: integer("document_id").notNull().references(() => businessDocumentsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  permission: text("permission").notNull().default("viewer"),
+  grantedBy: text("granted_by").notNull().references(() => usersTable.clerkId),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.documentId, table.userId] })]);
+
+export const documentAcknowledgementsTable = pgTable("irc_document_acknowledgements", {
+  documentId: integer("document_id").notNull().references(() => businessDocumentsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.documentId, table.userId] })]);
+
+export const documentDownloadsTable = pgTable("irc_document_downloads", {
+  id: serial("id").primaryKey(),
+  documentId: integer("document_id").notNull().references(() => businessDocumentsTable.id, { onDelete: "cascade" }),
+  versionId: integer("version_id").notNull().references(() => documentVersionsTable.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  downloadedAt: timestamp("downloaded_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const workspaceTasksTable = pgTable("irc_workspace_tasks", {
   id: serial("id").primaryKey(),
   communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
@@ -496,6 +555,12 @@ export type Team = typeof teamsTable.$inferSelect;
 export type EmployeeProfile = typeof employeeProfilesTable.$inferSelect;
 export type WorkspaceInvitation = typeof workspaceInvitationsTable.$inferSelect;
 export type WorkspacePolicy = typeof workspacePoliciesTable.$inferSelect;
+export type DocumentFolder = typeof documentFoldersTable.$inferSelect;
+export type BusinessDocument = typeof businessDocumentsTable.$inferSelect;
+export type DocumentVersion = typeof documentVersionsTable.$inferSelect;
+export type DocumentPermission = typeof documentPermissionsTable.$inferSelect;
+export type DocumentAcknowledgement = typeof documentAcknowledgementsTable.$inferSelect;
+export type DocumentDownload = typeof documentDownloadsTable.$inferSelect;
 export type WorkspaceTask = typeof workspaceTasksTable.$inferSelect;
 export type WorkspaceTaskComment = typeof workspaceTaskCommentsTable.$inferSelect;
 export type WorkspaceTaskAttachment = typeof workspaceTaskAttachmentsTable.$inferSelect;
