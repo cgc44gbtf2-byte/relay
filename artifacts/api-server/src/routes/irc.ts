@@ -21,7 +21,6 @@ import {
   channelMembersTable,
   categoriesTable,
   channelsTable,
-  communitiesTable,
   communityMembersTable,
   db,
   messageAttachmentsTable,
@@ -35,6 +34,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
+import { canReadChannel } from "../lib/channel-access";
 import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
 import { hasPermission } from "../lib/permissions";
@@ -106,27 +106,6 @@ async function sharesBusiness(firstUserId: string, secondUserId: string): Promis
     ))
     .limit(1);
   return Boolean(shared);
-}
-
-async function canReadChannel(channel: { id: number; isPrivate: boolean; communityId?: number | null }, userId: string): Promise<boolean> {
-  const communityId = channel.communityId ?? null;
-  if (communityId !== null && communityId !== undefined) {
-    const [community] = await db.select({ isPrivate: communitiesTable.isPrivate })
-      .from(communitiesTable)
-      .where(eq(communitiesTable.id, communityId))
-      .limit(1);
-    const [member] = await db.select({ userId: communityMembersTable.userId })
-      .from(communityMembersTable)
-      .where(and(
-        eq(communityMembersTable.communityId, communityId),
-        eq(communityMembersTable.userId, userId),
-      ))
-      .limit(1);
-    if (community?.isPrivate !== false && !member && !(await hasPermission(userId, "view_business", { communityId })) && !(await hasPermission(userId, "manage_community", { communityId }))) {
-      return false;
-    }
-  }
-  return !channel.isPrivate || Boolean(await membership(channel.id, userId));
 }
 
 async function visibleChannelIds(userId: string): Promise<number[]> {
@@ -653,7 +632,7 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
       eq(channelJoinRequestsTable.userId, userId),
     ));
   });
-  if (channel.isPrivate) wsHub.revokeChannelAccess(channel.id, userId);
+  wsHub.revokeChannelAccess(channel.id, userId);
   wsHub.broadcastChannel(channel.id, { type: "presence", channelId: channel.id, action: "leave", userId });
   res.json({ ok: true });
 });
@@ -944,9 +923,11 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     await db.update(channelMembersTable).set({ mutedUntil: new Date(Date.now() + minutes * 60_000) }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
   } else if (action === "kick") {
     await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
+    wsHub.revokeChannelAccess(channel.id, targetUserId);
   } else if (action === "ban") {
     await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
     await db.insert(channelBansTable).values({ channelId: channel.id, userId: targetUserId, reason: String(req.body.reason ?? "") }).onConflictDoUpdate({ target: [channelBansTable.channelId, channelBansTable.userId], set: { reason: String(req.body.reason ?? "") } });
+    wsHub.revokeChannelAccess(channel.id, targetUserId);
   } else if (action === "unban") {
     await db.delete(channelBansTable).where(and(eq(channelBansTable.channelId, channel.id), eq(channelBansTable.userId, targetUserId)));
   } else {

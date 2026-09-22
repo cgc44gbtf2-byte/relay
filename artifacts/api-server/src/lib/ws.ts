@@ -1,9 +1,10 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import { and, eq } from "drizzle-orm";
-import { channelMembersTable, channelsTable, db, usersTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
+import { db, usersTable } from "@workspace/db";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { clerkClient } from "@clerk/express";
+import { canReadChannel, channelForRead } from "./channel-access";
 
 type Client = { socket: WebSocket; userId: string; channelIds: Set<number> };
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
@@ -121,24 +122,9 @@ class Hub {
             return;
           }
 
-          void db
-            .select({ id: channelsTable.id, isPrivate: channelsTable.isPrivate })
-            .from(channelsTable)
-            .where(eq(channelsTable.id, channelId))
-            .then(async ([channel]) => {
-              if (!channel) return;
-              if (channel.isPrivate) {
-                const [member] = await db
-                  .select({ userId: channelMembersTable.userId })
-                  .from(channelMembersTable)
-                  .where(
-                    and(
-                      eq(channelMembersTable.channelId, channelId),
-                      eq(channelMembersTable.userId, client.userId),
-                    ),
-                  );
-                if (!member) return;
-              }
+          void channelForRead(channelId)
+            .then(async (channel) => {
+              if (!channel || !(await canReadChannel(channel, client.userId))) return;
               if (message.type === "subscribe") {
                 client.channelIds.add(channelId);
               } else if (client.channelIds.has(channelId)) {
