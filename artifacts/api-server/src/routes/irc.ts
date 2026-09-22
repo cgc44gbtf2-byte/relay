@@ -21,6 +21,7 @@ import {
   channelMembersTable,
   categoriesTable,
   channelsTable,
+  communitiesTable,
   communityMembersTable,
   db,
   messageAttachmentsTable,
