@@ -717,9 +717,15 @@ function ChatApp() {
   const sendAttachment = async (file: File) => {
     const channelId = currentChannelId;
     if (channelId === null || activeDm) return;
+    if (file.size < 1 || file.size > 10_000_000) {
+      window.alert("Files must be smaller than 10 MB.");
+      return;
+    }
     setUploading(true);
+    let sentMessageId: string | null = null;
     try {
       const sent = await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body: file.name }) });
+      sentMessageId = sent.id;
       const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }) });
       const uploaded = await fetch(upload.uploadURL, { method: "PUT", body: file, headers: { "content-type": file.type || "application/octet-stream" } });
       if (!uploaded.ok) throw new Error("File upload failed");
@@ -733,6 +739,13 @@ function ChatApp() {
         });
       }
     } catch (error) {
+      if (sentMessageId) {
+        try {
+          await api(`/messages/${sentMessageId}`, { method: "DELETE" });
+        } catch {
+          // Preserve the original upload error if cleanup also fails.
+        }
+      }
       if (isMissingChannelError(error)) {
         await recoverFromMissingChannel(channelId);
       } else {
