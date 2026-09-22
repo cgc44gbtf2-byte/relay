@@ -1,0 +1,210 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: irc
+    description: IRC room and message operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /irc/state:
+    get:
+      operationId: getIrcState
+      tags: [irc]
+      summary: Get current IRC room state
+      description: Returns the selected channel's recent messages and current nicknames.
+      parameters:
+        - name: channel
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: IRC room state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IrcState"
+        "400":
+          description: Invalid channel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /irc/join:
+    post:
+      operationId: joinIrcChannel
+      tags: [irc]
+      summary: Join an IRC channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IrcJoinInput"
+      responses:
+        "200":
+          description: Joined room state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IrcState"
+        "400":
+          description: Invalid join request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /irc/messages:
+    post:
+      operationId: sendIrcMessage
+      tags: [irc]
+      summary: Send a message to an IRC channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IrcMessageInput"
+      responses:
+        "201":
+          description: Message accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IrcMessage"
+        "400":
+          description: Invalid message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /irc/events:
+    get:
+      operationId: streamIrcEvents
+      tags: [irc]
+      summary: Stream IRC room events
+      description: Opens a server-sent events stream for messages and presence changes in a channel.
+      parameters:
+        - name: channel
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Server-sent events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+    IrcMessage:
+      type: object
+      properties:
+        id:
+          type: string
+        channel:
+          type: string
+        nick:
+          type: string
+        text:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum: [message, system]
+      required: [id, channel, nick, text, timestamp, kind]
+    IrcUser:
+      type: object
+      properties:
+        nick:
+          type: string
+        status:
+          type: string
+          enum: [online, away]
+        color:
+          type: string
+      required: [nick, status, color]
+    IrcState:
+      type: object
+      properties:
+        channel:
+          type: string
+        topic:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/IrcMessage"
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/IrcUser"
+      required: [channel, topic, messages, users]
+    IrcJoinInput:
+      type: object
+      properties:
+        channel:
+          type: string
+          minLength: 1
+        nick:
+          type: string
+          minLength: 1
+          maxLength: 24
+      required: [channel, nick]
+    IrcMessageInput:
+      type: object
+      properties:
+        channel:
+          type: string
+          minLength: 1
+        nick:
+          type: string
+          minLength: 1
+          maxLength: 24
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+      required: [channel, nick, text]
+
