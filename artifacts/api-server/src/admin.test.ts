@@ -1911,6 +1911,109 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps category visibility isolated while batching community access data", async () => {
+    const privateOwner = await createTestSession("private_category_owner");
+    const publicOwner = await createTestSession("public_category_owner");
+    const outsider = await createTestSession("category_outsider");
+    const communityIds: number[] = [];
+
+    try {
+      const outsiderProfile = await apiRequest(outsider, "/me");
+      assert.equal(outsiderProfile.status, 200, JSON.stringify(outsiderProfile));
+
+      const privateCommunity = await apiRequest(privateOwner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Private category ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(privateCommunity.status, 201, JSON.stringify(privateCommunity));
+      assert.ok(privateCommunity.body && typeof privateCommunity.body === "object");
+      const privateCommunityId = (
+        privateCommunity.body as { id?: unknown }
+      ).id;
+      assert.equal(typeof privateCommunityId, "number");
+      communityIds.push(privateCommunityId as number);
+
+      const publicCommunity = await apiRequest(publicOwner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Public category ${randomUUID().slice(0, 8)}`,
+          isPrivate: false,
+        }),
+      });
+      assert.equal(publicCommunity.status, 201, JSON.stringify(publicCommunity));
+      assert.ok(publicCommunity.body && typeof publicCommunity.body === "object");
+      const publicCommunityId = (
+        publicCommunity.body as { id?: unknown }
+      ).id;
+      assert.equal(typeof publicCommunityId, "number");
+      communityIds.push(publicCommunityId as number);
+
+      const ownerChannels = await apiRequest(privateOwner, "/channels");
+      assert.equal(ownerChannels.status, 200, JSON.stringify(ownerChannels));
+      assert.ok(Array.isArray(ownerChannels.body));
+      const visiblePrivateChannels = ownerChannels.body.filter(
+        (channel): channel is {
+          communityId: number;
+          category: { communityId?: unknown } | null;
+        } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { communityId?: unknown }).communityId ===
+            privateCommunityId,
+      );
+      assert.ok(visiblePrivateChannels.length > 0);
+      assert.ok(
+        visiblePrivateChannels.every(
+          (channel) =>
+            channel.category?.communityId === privateCommunityId,
+        ),
+      );
+
+      const outsiderChannels = await apiRequest(outsider, "/channels");
+      assert.equal(outsiderChannels.status, 200, JSON.stringify(outsiderChannels));
+      assert.ok(Array.isArray(outsiderChannels.body));
+      assert.equal(
+        outsiderChannels.body.some(
+          (channel) =>
+            typeof channel === "object" &&
+            channel !== null &&
+            (channel as { communityId?: unknown }).communityId ===
+              privateCommunityId,
+        ),
+        false,
+      );
+      const visiblePublicChannels = outsiderChannels.body.filter(
+        (channel): channel is {
+          communityId: number;
+          category: { communityId?: unknown } | null;
+        } =>
+          typeof channel === "object" &&
+          channel !== null &&
+          (channel as { communityId?: unknown }).communityId ===
+            publicCommunityId,
+      );
+      assert.ok(visiblePublicChannels.length > 0);
+      assert.ok(
+        visiblePublicChannels.every(
+          (channel) =>
+            channel.category?.communityId === publicCommunityId,
+        ),
+      );
+    } finally {
+      if (communityIds.length) {
+        await pool.query(
+          "DELETE FROM irc_communities WHERE id = ANY($1::int[])",
+          [communityIds],
+        );
+      }
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");

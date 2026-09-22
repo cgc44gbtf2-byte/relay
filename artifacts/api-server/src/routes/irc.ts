@@ -335,21 +335,45 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     counts.map(({ channelId, memberCount }) => [channelId, Number(memberCount)]),
   );
   const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
+  const categoryCommunityIds = [
+    ...new Set(
+      allCategories.flatMap((category) =>
+        category.communityId === null ? [] : [category.communityId],
+      ),
+    ),
+  ];
+  const [categoryCommunities, categoryMemberships] = categoryCommunityIds.length
+    ? await Promise.all([
+      db
+        .select({
+          id: communitiesTable.id,
+          isPrivate: communitiesTable.isPrivate,
+        })
+        .from(communitiesTable)
+        .where(inArray(communitiesTable.id, categoryCommunityIds)),
+      db
+        .select({ communityId: communityMembersTable.communityId })
+        .from(communityMembersTable)
+        .where(and(
+          eq(communityMembersTable.userId, userId),
+          inArray(communityMembersTable.communityId, categoryCommunityIds),
+        )),
+    ])
+    : [[], []];
+  const categoryCommunityPrivacy = new Map(
+    categoryCommunities.map((community) => [community.id, community.isPrivate]),
+  );
+  const categoryMembershipIds = new Set(
+    categoryMemberships.map((membership) => membership.communityId),
+  );
   const visibleCategories = await Promise.all(allCategories.map(async (category) => {
     if (category.communityId === null) return category;
-    const [community] = await db.select({ isPrivate: communitiesTable.isPrivate })
-      .from(communitiesTable)
-      .where(eq(communitiesTable.id, category.communityId))
-      .limit(1);
-    return !community?.isPrivate
+    return categoryCommunityPrivacy.get(category.communityId) !== true
+      || categoryMembershipIds.has(category.communityId)
       || await hasPermission(userId, "view_business", { communityId: category.communityId })
       || await hasPermission(userId, "manage_community", { communityId: category.communityId })
-      || (await db.query.communityMembersTable.findFirst({
-        where: and(
-          eq(communityMembersTable.communityId, category.communityId),
-          eq(communityMembersTable.userId, userId),
-        ),
-      })) ? category : null;
+      ? category
+      : null;
   }));
   const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
