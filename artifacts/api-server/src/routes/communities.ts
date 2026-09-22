@@ -1,8 +1,11 @@
 import { Router, type IRouter } from "express";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, lte } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
+  announcementAcknowledgementsTable,
+  announcementAttachmentsTable,
+  announcementReadReceiptsTable,
   categoriesTable,
   channelMembersTable,
   channelsTable,
@@ -99,6 +102,48 @@ async function canAccessBusiness(userId: string, communityId: number): Promise<b
       || await hasPermission(userId, "view_business", { communityId })
       || await hasPermission(userId, "manage_community", { communityId }),
   );
+}
+
+async function announcementRecipients(announcement: typeof serverAnnouncementsTable.$inferSelect, communityId: number): Promise<Array<{ userId: string }>> {
+  if (announcement.audienceType === "department" && announcement.departmentId) {
+    return db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable)
+      .where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, announcement.departmentId)));
+  }
+  if (announcement.audienceType === "location" && announcement.locationId) {
+    return db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable)
+      .where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, announcement.locationId)));
+  }
+  if (announcement.audienceType === "team" && announcement.teamId) {
+    return db.select({ userId: teamMembersTable.userId }).from(teamMembersTable)
+      .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+      .where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, announcement.teamId)));
+  }
+  if (announcement.audienceType === "individual" && announcement.recipientId) {
+    return [{ userId: announcement.recipientId }];
+  }
+  return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .where(eq(communityMembersTable.communityId, communityId));
+}
+
+async function activateDueAnnouncements(communityId: number): Promise<void> {
+  const due = await db.select().from(serverAnnouncementsTable).where(and(
+    eq(serverAnnouncementsTable.communityId, communityId),
+    eq(serverAnnouncementsTable.status, "scheduled"),
+    lte(serverAnnouncementsTable.scheduledAt, new Date()),
+  ));
+  for (const announcement of due) {
+    const [activated] = await db.update(serverAnnouncementsTable).set({ status: "published" })
+      .where(and(eq(serverAnnouncementsTable.id, announcement.id), eq(serverAnnouncementsTable.status, "scheduled"))).returning();
+    if (!activated) continue;
+    const recipients = await announcementRecipients(announcement, communityId);
+    if (recipients.length) {
+      await db.insert(notificationsTable).values(recipients.map((recipient) => ({
+        userId: recipient.userId,
+        type: "community_announcement",
+        body: `${announcement.title}: ${announcement.body}`,
+      })));
+    }
+  }
 }
 
 router.get("/permissions/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -245,7 +290,8 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     res.status(404).json({ error: "Business workspace not found." });
     return;
   }
-  const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments] = await Promise.all([
+  await activateDueAnnouncements(community.id);
+  const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
     db.select({
       id: usersTable.clerkId,
       username: usersTable.username,
@@ -262,7 +308,17 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)),
     db.select({
       id: serverAnnouncementsTable.id,
+      title: serverAnnouncementsTable.title,
       body: serverAnnouncementsTable.body,
+      audienceType: serverAnnouncementsTable.audienceType,
+      departmentId: serverAnnouncementsTable.departmentId,
+      locationId: serverAnnouncementsTable.locationId,
+      teamId: serverAnnouncementsTable.teamId,
+      recipientId: serverAnnouncementsTable.recipientId,
+      requiresAcknowledgement: serverAnnouncementsTable.requiresAcknowledgement,
+      scheduledAt: serverAnnouncementsTable.scheduledAt,
+      expiresAt: serverAnnouncementsTable.expiresAt,
+      status: serverAnnouncementsTable.status,
       createdAt: serverAnnouncementsTable.createdAt,
       author: usersTable.displayName,
     }).from(serverAnnouncementsTable)
@@ -313,6 +369,26 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     }).from(workspaceTaskAttachmentsTable)
       .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
       .where(eq(workspaceTasksTable.communityId, community.id)),
+    db.select({ teamId: teamMembersTable.teamId, userId: teamMembersTable.userId }).from(teamMembersTable)
+      .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+      .where(eq(teamsTable.communityId, community.id)),
+    db.select({
+      announcementId: announcementReadReceiptsTable.announcementId,
+      userId: announcementReadReceiptsTable.userId,
+      readAt: announcementReadReceiptsTable.readAt,
+    }).from(announcementReadReceiptsTable)
+      .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementReadReceiptsTable.announcementId))
+      .where(eq(serverAnnouncementsTable.communityId, community.id)),
+    db.select({
+      announcementId: announcementAcknowledgementsTable.announcementId,
+      userId: announcementAcknowledgementsTable.userId,
+      acknowledgedAt: announcementAcknowledgementsTable.acknowledgedAt,
+    }).from(announcementAcknowledgementsTable)
+      .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAcknowledgementsTable.announcementId))
+      .where(eq(serverAnnouncementsTable.communityId, community.id)),
+    db.select().from(announcementAttachmentsTable)
+      .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
+      .where(eq(serverAnnouncementsTable.communityId, community.id)),
   ]);
   const visibleChannels = (await Promise.all(channels.map(async (channel) => {
     if (!channel.isPrivate) return channel;
@@ -345,13 +421,38 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       presenceStatus: member.status,
     };
   });
+  const canManage = await communityPermission(userId, community.id, "manage_community");
+  const currentEmployee = employees.find((employee) => employee.userId === userId);
+  const now = new Date();
+  const visibleAnnouncements = announcements.filter((announcement) => canManage
+    || (
+      announcement.status === "published"
+      && (!announcement.scheduledAt || announcement.scheduledAt <= now)
+      && (!announcement.expiresAt || announcement.expiresAt > now)
+      && (
+        announcement.audienceType === "company"
+        || (announcement.audienceType === "department" && announcement.departmentId === currentEmployee?.departmentId)
+        || (announcement.audienceType === "location" && announcement.locationId === currentEmployee?.locationId)
+        || (announcement.audienceType === "team" && teamMemberships.some((item) => item.teamId === announcement.teamId && item.userId === userId))
+        || (announcement.audienceType === "individual" && announcement.recipientId === userId)
+      )
+    ));
   res.json({
     community,
     members,
     channels: visibleChannels.map((channel) => ({ ...channel, passwordHash: undefined })),
     categories,
     assignments: assignments.map((assignment) => ({ ...assignment, grantedBy: undefined })),
-    announcements,
+    announcements: visibleAnnouncements.map((announcement) => ({
+      ...announcement,
+      readAt: announcementReceipts.find((receipt) => receipt.announcementId === announcement.id && receipt.userId === userId)?.readAt ?? null,
+      acknowledgedAt: announcementAcks.find((ack) => ack.announcementId === announcement.id && ack.userId === userId)?.acknowledgedAt ?? null,
+      readCount: announcementReceipts.filter((receipt) => receipt.announcementId === announcement.id).length,
+      acknowledgementCount: announcementAcks.filter((ack) => ack.announcementId === announcement.id).length,
+      attachments: announcementAttachments
+        .map(({ irc_announcement_attachments: attachment }) => attachment)
+        .filter((attachment) => attachment.announcementId === announcement.id),
+    })),
     departments,
     locations,
     teams,
@@ -363,7 +464,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       comments: taskComments.filter((comment) => comment.taskId === task.id),
       attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
     })),
-    canManage: await communityPermission(userId, community.id, "manage_community"),
+    canManage,
   });
 });
 
@@ -864,24 +965,142 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
     res.status(403).json({ error: "You cannot announce in this community." });
     return;
   }
-  const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 500) : "";
+  const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 160) : "Announcement";
+  const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 10000) : "";
+  const audienceType = typeof req.body?.audienceType === "string" ? req.body.audienceType : "company";
+  const departmentId = req.body?.departmentId ? Number(req.body.departmentId) : null;
+  const locationId = req.body?.locationId ? Number(req.body.locationId) : null;
+  const teamId = req.body?.teamId ? Number(req.body.teamId) : null;
+  const recipientId = typeof req.body?.recipientId === "string" && req.body.recipientId ? req.body.recipientId : null;
+  const requiresAcknowledgement = Boolean(req.body?.requiresAcknowledgement);
+  const scheduledAt = req.body?.scheduledAt ? new Date(req.body.scheduledAt) : null;
+  const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt) : null;
+  const allowedAudiences = ["company", "department", "location", "team", "individual"];
   if (!body) {
     res.status(400).json({ error: "Announcement text is required." });
     return;
   }
-  const [announcement] = await db.insert(serverAnnouncementsTable).values({ authorId: userId, communityId, body }).returning();
-  const recipients = await db.select({ userId: communityMembersTable.userId })
-    .from(communityMembersTable)
-    .where(eq(communityMembersTable.communityId, communityId));
-  if (recipients.length) {
+  if (!allowedAudiences.includes(audienceType) || (scheduledAt && Number.isNaN(scheduledAt.getTime())) || (expiresAt && Number.isNaN(expiresAt.getTime()))) {
+    res.status(400).json({ error: "Invalid announcement audience or date." });
+    return;
+  }
+  if (scheduledAt && expiresAt && expiresAt <= scheduledAt) {
+    res.status(400).json({ error: "Expiration must be after the scheduled time." });
+    return;
+  }
+  if (audienceType === "department" && (!departmentId || !(await db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(eq(departmentsTable.id, departmentId), eq(departmentsTable.communityId, communityId))).limit(1)).length)) {
+    res.status(400).json({ error: "Choose a department in this workspace." });
+    return;
+  }
+  if (audienceType === "location" && (!locationId || !(await db.select({ id: locationsTable.id }).from(locationsTable).where(and(eq(locationsTable.id, locationId), eq(locationsTable.communityId, communityId))).limit(1)).length)) {
+    res.status(400).json({ error: "Choose a location in this workspace." });
+    return;
+  }
+  if (audienceType === "team" && (!teamId || !(await db.select({ id: teamsTable.id }).from(teamsTable).where(and(eq(teamsTable.id, teamId), eq(teamsTable.communityId, communityId))).limit(1)).length)) {
+    res.status(400).json({ error: "Choose a team in this workspace." });
+    return;
+  }
+  if (audienceType === "individual" && (!recipientId || !(await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, recipientId))).limit(1)).length)) {
+    res.status(400).json({ error: "Choose an employee in this workspace." });
+    return;
+  }
+  const isScheduled = scheduledAt !== null && scheduledAt > new Date();
+  const [announcement] = await db.insert(serverAnnouncementsTable).values({
+    authorId: userId, communityId, title, body, audienceType, departmentId, locationId, teamId, recipientId,
+    requiresAcknowledgement, scheduledAt, expiresAt, status: isScheduled ? "scheduled" : "published",
+  }).returning();
+  const recipients = audienceType === "company"
+    ? await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(eq(communityMembersTable.communityId, communityId))
+    : audienceType === "department"
+      ? await db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, departmentId!)))
+      : audienceType === "location"
+        ? await db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, locationId!)))
+        : audienceType === "team"
+          ? await db.select({ userId: teamMembersTable.userId }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!)))
+          : recipientId ? [{ userId: recipientId }] : [];
+  if (recipients.length && !isScheduled) {
     await db.insert(notificationsTable).values(recipients.map((recipient) => ({
       userId: recipient.userId,
       type: "community_announcement",
-      body,
+      body: `${title}: ${body}`,
     })));
   }
-  await writeCommunityAudit(userId, "published_community_announcement", communityId, body);
+  await writeCommunityAudit(userId, isScheduled ? "scheduled_community_announcement" : "published_community_announcement", communityId, title);
   res.status(201).json(announcement);
+});
+
+router.post("/communities/:communityId/announcements/:announcementId/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, serverAnnouncementsTable.communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  if (!announcement) {
+    res.status(404).json({ error: "Announcement not found." });
+    return;
+  }
+  const [receipt] = await db.insert(announcementReadReceiptsTable).values({ announcementId, userId })
+    .onConflictDoUpdate({ target: [announcementReadReceiptsTable.announcementId, announcementReadReceiptsTable.userId], set: { readAt: new Date() } }).returning();
+  res.json(receipt);
+});
+
+router.post("/communities/:communityId/announcements/:announcementId/acknowledge", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id, requiresAcknowledgement: serverAnnouncementsTable.requiresAcknowledgement }).from(serverAnnouncementsTable)
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, serverAnnouncementsTable.communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  if (!announcement) {
+    res.status(404).json({ error: "Announcement not found." });
+    return;
+  }
+  if (!announcement.requiresAcknowledgement) {
+    res.status(400).json({ error: "This announcement does not require acknowledgement." });
+    return;
+  }
+  const [acknowledgement] = await db.insert(announcementAcknowledgementsTable).values({ announcementId, userId })
+    .onConflictDoUpdate({ target: [announcementAcknowledgementsTable.announcementId, announcementAcknowledgementsTable.userId], set: { acknowledgedAt: new Date() } }).returning();
+  res.json(acknowledgement);
+});
+
+router.post("/communities/:communityId/announcements/:announcementId/attachments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
+    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId), eq(serverAnnouncementsTable.authorId, userId)));
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
+  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
+  const fileSize = Number(req.body?.fileSize);
+  if (!announcement) {
+    res.status(404).json({ error: "Announcement not found." });
+    return;
+  }
+  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+    res.status(400).json({ error: "Invalid announcement attachment." });
+    return;
+  }
+  const [attachment] = await db.insert(announcementAttachmentsTable).values({ announcementId, uploaderId: userId, objectPath, fileName, contentType, fileSize }).returning();
+  res.status(201).json(attachment);
+});
+
+router.get("/communities/:communityId/announcements/:announcementId/attachments/:attachmentId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  const attachmentId = Number(param(req, "attachmentId"));
+  const [attachment] = await db.select({ objectPath: announcementAttachmentsTable.objectPath }).from(announcementAttachmentsTable)
+    .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
+    .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, userId)))
+    .where(and(eq(announcementAttachmentsTable.id, attachmentId), eq(announcementAttachmentsTable.announcementId, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  if (!attachment) {
+    res.status(404).json({ error: "Attachment not found." });
+    return;
+  }
+  res.redirect(await signedObjectUrlForPath(attachment.objectPath));
 });
 
 router.get("/communities/:communityId/moderation-logs", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

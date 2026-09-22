@@ -8,6 +8,7 @@ import {
   ilike,
   inArray,
   isNull,
+  lte,
   or,
   sql,
 } from "drizzle-orm";
@@ -1032,6 +1033,21 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
+  await Promise.all(memberships.map(async ({ communityId }) => {
+    const due = await db.select().from(serverAnnouncementsTable).where(and(
+      eq(serverAnnouncementsTable.communityId, communityId),
+      eq(serverAnnouncementsTable.status, "scheduled"),
+      lte(serverAnnouncementsTable.scheduledAt, new Date()),
+    ));
+    for (const announcement of due) {
+      const [activated] = await db.update(serverAnnouncementsTable).set({ status: "published" })
+        .where(and(eq(serverAnnouncementsTable.id, announcement.id), eq(serverAnnouncementsTable.status, "scheduled"))).returning();
+      if (!activated) continue;
+      const recipients = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+        .where(eq(communityMembersTable.communityId, communityId));
+      if (recipients.length) await db.insert(notificationsTable).values(recipients.map((recipient) => ({ userId: recipient.userId, type: "community_announcement", body: `${announcement.title}: ${announcement.body}` })));
+    }
+  }));
   const isPlatformAdmin = await hasPermission(userId, "manage_any_community");
   const visibility = isPlatformAdmin
     ? undefined

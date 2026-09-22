@@ -1211,7 +1211,27 @@ type CommunityDetail = {
   categories: Array<{ id: number; name: string; description: string }>;
   channels: Array<{ id: number; name: string; topic: string; description: string; categoryId: number | null; isPrivate: boolean }>;
   assignments: Array<{ id: number; userId: string; role: string; scopeType: string; communityId: number | null }>;
-  announcements: Array<{ id: number; body: string; author: string; createdAt: string }>;
+  announcements: Array<{
+    id: number;
+    title: string;
+    body: string;
+    audienceType: string;
+    departmentId: number | null;
+    locationId: number | null;
+    teamId: number | null;
+    recipientId: string | null;
+    requiresAcknowledgement: boolean;
+    scheduledAt: string | null;
+    expiresAt: string | null;
+    status: string;
+    author: string;
+    createdAt: string;
+    readAt: string | null;
+    acknowledgedAt: string | null;
+    readCount: number;
+    acknowledgementCount: number;
+    attachments: Array<{ id: number; announcementId: number; uploaderId: string; objectPath: string; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
+  }>;
   departments: Array<{ id: number; name: string; description: string; managerId: string | null; status: string }>;
   locations: Array<{ id: number; name: string; code: string; address: string; timezone: string; status: string }>;
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
@@ -1236,6 +1256,120 @@ type CommunityDetail = {
   }>;
   canManage: boolean;
 };
+
+function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [audienceType, setAudienceType] = useState("company");
+  const [departmentId, setDepartmentId] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const [teamId, setTeamId] = useState("");
+  const [recipientId, setRecipientId] = useState("");
+  const [requiresAcknowledgement, setRequiresAcknowledgement] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const createAnnouncement = async (event: FormEvent) => {
+    event.preventDefault();
+    const selectedFiles = files;
+    setWorking(true);
+    try {
+      const announcement = await api<CommunityDetail["announcements"][number]>(`/communities/${detail.community.id}/announcements`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: title || "Announcement",
+          body,
+          audienceType,
+          departmentId: audienceType === "department" ? departmentId : null,
+          locationId: audienceType === "location" ? locationId : null,
+          teamId: audienceType === "team" ? teamId : null,
+          recipientId: audienceType === "individual" ? recipientId : null,
+          requiresAcknowledgement,
+          scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : null,
+          expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        }),
+      });
+      for (const file of selectedFiles) {
+        const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", {
+          method: "POST",
+          body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }),
+        });
+        const uploaded = await fetch(upload.uploadURL, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+        if (!uploaded.ok) throw new Error(`Could not upload ${file.name}`);
+        await api(`/communities/${detail.community.id}/announcements/${announcement.id}/attachments`, {
+          method: "POST",
+          body: JSON.stringify({ objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }),
+        });
+      }
+      setTitle("");
+      setBody("");
+      setAudienceType("company");
+      setDepartmentId("");
+      setLocationId("");
+      setTeamId("");
+      setRecipientId("");
+      setRequiresAcknowledgement(false);
+      setScheduledAt("");
+      setExpiresAt("");
+      setFiles([]);
+      setNotice("Announcement created.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create announcement");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const openAnnouncement = async (announcementId: number) => {
+    setSelectedId(announcementId);
+    try {
+      await api(`/communities/${detail.community.id}/announcements/${announcementId}/read`, { method: "POST" });
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not mark announcement as read");
+    }
+  };
+  const acknowledge = async (announcementId: number) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/announcements/${announcementId}/acknowledge`, { method: "POST" });
+      setNotice("Announcement acknowledged.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not acknowledge announcement");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const selected = detail.announcements.find((announcement) => announcement.id === selectedId) ?? null;
+  const audienceLabel: Record<string, string> = { company: "Company-wide", department: "Department", location: "Location", team: "Team", individual: "Individual" };
+  return <section className="space-y-5">
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">communications</p><h2 className="mt-2 font-mono text-xl font-bold">Announcements</h2><p className="mt-1 text-sm text-muted-foreground">Keep every location aligned with targeted, trackable updates.</p></div><span className="font-mono text-[10px] text-muted-foreground">{detail.announcements.length} history record{detail.announcements.length === 1 ? "" : "s"}</span></div>
+    {detail.canManage && <form onSubmit={createAnnouncement} className="rounded-xl border border-border bg-card p-5">
+      <h3 className="font-mono text-sm font-bold">create announcement</h3>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Announcement title" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs md:col-span-2" />
+        <textarea required value={body} onChange={(event) => setBody(event.target.value)} placeholder="Write the announcement…" className="min-h-24 rounded border border-input bg-background px-3 py-2 font-mono text-xs md:col-span-2" />
+        <select value={audienceType} onChange={(event) => setAudienceType(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="company">Company-wide</option><option value="department">Department</option><option value="location">Location</option><option value="team">Team</option><option value="individual">Individual</option></select>
+        {audienceType === "department" && <select required value={departmentId} onChange={(event) => setDepartmentId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose department</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
+        {audienceType === "location" && <select required value={locationId} onChange={(event) => setLocationId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose location</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
+        {audienceType === "team" && <select required value={teamId} onChange={(event) => setTeamId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose team</option>{detail.teams.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
+        {audienceType === "individual" && <select required value={recipientId} onChange={(event) => setRecipientId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select>}
+        <label className="flex items-center gap-2 rounded border border-border px-3 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={requiresAcknowledgement} onChange={(event) => setRequiresAcknowledgement(event.target.checked)} /> required acknowledgment</label>
+        <input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" aria-label="Schedule announcement" />
+        <input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" aria-label="Announcement expiration" />
+        <input type="file" multiple onChange={(event) => setFiles(Array.from(event.target.files ?? []))} className="h-9 min-w-0 rounded border border-input bg-background px-2 py-1.5 font-mono text-[10px] md:col-span-2" />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-3 font-mono text-[9px] text-muted-foreground"><span>Schedule and expiration are optional.</span>{files.length > 0 && <span>{files.length} attachment{files.length === 1 ? "" : "s"} selected</span>}</div>
+      <button disabled={working} className="mt-4 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">publish announcement</button>
+    </form>}
+    <div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
+      <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">announcement history</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Audience, schedule, receipts, and acknowledgement state</p></div><div className="divide-y divide-border">{detail.announcements.map((announcement) => <button key={announcement.id} onClick={() => void openAnnouncement(announcement.id)} className={`block w-full px-5 py-4 text-left hover:bg-muted/40 ${selectedId === announcement.id ? "bg-muted/40" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs font-bold">{announcement.title}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{announcement.body}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{audienceLabel[announcement.audienceType] ?? announcement.audienceType}</span></div><div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>{announcement.status}</span><span>{announcement.readCount} read</span>{announcement.requiresAcknowledgement && <span>{announcement.acknowledgementCount} acknowledged</span>}{announcement.scheduledAt && <span>scheduled {new Date(announcement.scheduledAt).toLocaleString()}</span>}{announcement.expiresAt && <span>expires {new Date(announcement.expiresAt).toLocaleDateString()}</span>}</div></button>)}{detail.announcements.length === 0 && <EmptyAdminState label="No announcements yet." />}</div></section>
+      <section className="rounded-xl border border-border bg-card">{!selected ? <div className="p-6"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">announcement details</p><p className="mt-3 text-sm text-muted-foreground">Select an announcement to view its full history and receipts.</p></div> : <div className="p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="font-mono text-sm font-bold">{selected.title}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{selected.body}</p></div>{selected.requiresAcknowledgement && <span className={`shrink-0 rounded px-2 py-1 font-mono text-[9px] uppercase ${selected.acknowledgedAt ? "bg-chart-4/10 text-chart-4" : "bg-primary/10 text-primary"}`}>{selected.acknowledgedAt ? "acknowledged" : "acknowledgment required"}</span>}</div><p className="mt-4 font-mono text-[10px] text-muted-foreground">Published by {selected.author} · {new Date(selected.createdAt).toLocaleString()} · {selected.readCount} read receipt{selected.readCount === 1 ? "" : "s"}{selected.requiresAcknowledgement ? ` · ${selected.acknowledgementCount} acknowledgements` : ""}</p><div className="mt-5 space-y-2">{selected.attachments.map((attachment) => <a key={attachment.id} href={`/api/communities/${detail.community.id}/announcements/${selected.id}/attachments/${attachment.id}`} target="_blank" rel="noreferrer" className="block rounded border border-border/70 px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{attachment.fileName}<span className="ml-2 text-[9px] text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)} KB</span></a>)}</div>{selected.requiresAcknowledgement && !selected.acknowledgedAt && <button disabled={working} onClick={() => void acknowledge(selected.id)} className="mt-5 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge announcement</button>}</div>}</section>
+    </div>
+  </section>;
+}
 
 function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [title, setTitle] = useState("");
@@ -1774,6 +1908,7 @@ function CommunityConsole() {
               <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
+             <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              {detail.canManage && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
            </div>}
