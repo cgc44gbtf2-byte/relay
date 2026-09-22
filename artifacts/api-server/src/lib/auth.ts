@@ -1,4 +1,4 @@
-import { getAuth } from "@clerk/express";
+import { clerkClient, getAuth } from "@clerk/express";
 import type { Request, Response, NextFunction } from "express";
 import { eq } from "drizzle-orm";
 import { db, usersTable, type User } from "@workspace/db";
@@ -54,4 +54,11 @@ export async function ensureProfile(userId: string): Promise<User> {
 export function getUserId(req: AuthenticatedRequest): string {
   if (!req.userId) throw new Error("Missing authenticated user");
   return req.userId;
+}
+
+export async function verifiedEmailAddressesForUser(userId: string): Promise<string[]> {
+  const user = await clerkClient.users.getUser(userId);
+  return user.emailAddresses
+    .filter((emailAddress) => emailAddress.verification?.status === "verified")
+    .map((emailAddress) => emailAddress.emailAddress.trim().toLowerCase());
 }

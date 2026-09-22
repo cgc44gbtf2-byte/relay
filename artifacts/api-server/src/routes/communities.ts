@@ -37,7 +37,13 @@ import {
   workspaceTaskAttachmentsTable,
 } from "@workspace/db";
 import { signedObjectUrlForPath } from "./storage";
-import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
+import {
+  ensureProfile,
+  getUserId,
+  requireAuth,
+  verifiedEmailAddressesForUser,
+  type AuthenticatedRequest,
+} from "../lib/auth";
 import {
   communityForId,
   ensurePermissionCatalog,
@@ -1059,6 +1065,17 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
   if (invitation.expiresAt <= new Date()) {
     await db.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, invitation.id));
     res.status(410).json({ error: "This invitation has expired. Ask a workspace manager to resend it." });
+    return;
+  }
+  let verifiedEmails: string[];
+  try {
+    verifiedEmails = await verifiedEmailAddressesForUser(userId);
+  } catch {
+    res.status(503).json({ error: "We could not verify your account email. Please try again." });
+    return;
+  }
+  if (!verifiedEmails.includes(invitation.email.trim().toLowerCase())) {
+    res.status(403).json({ error: "Sign in with the verified email address that received this invitation." });
     return;
   }
   const now = new Date();
