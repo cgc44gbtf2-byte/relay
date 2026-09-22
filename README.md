@@ -246,8 +246,11 @@ Authenticated API tests require a separate disposable `TEST_DATABASE_URL`. Test 
 
 ## Ownership and license diligence
 
-- [IP ownership register](docs/ip-ownership-register.md) — source, brand, domain, schema, documentation, and custom-system transfer checklist
-- [Third-party license inventory](docs/third-party-licenses.md) — dependency screening and acquisition blockers
+- [IP ownership register](docs/IP-OWNERSHIP.md) — source, brand, domain, schema, documentation, and custom-system transfer checklist
+- [Dependency inventory](docs/DEPENDENCY-INVENTORY.md) — exact installed direct and transitive package versions
+- [Third-party license inventory](docs/THIRD-PARTY-LICENSES.md) — dependency screening and acquisition blockers
+- [License compliance report](docs/LICENSE-COMPLIANCE.md) — obligations, unresolved terms, and readiness status
+- `pnpm run audit:inventory` — regenerate the installed dependency inventory
 - `pnpm run audit:licenses` — fail the workspace when installed dependencies report unknown or unapproved licenses
 
 ## Design Principles
