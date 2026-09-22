@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, asc, desc, eq, lte } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   adminAuditLogsTable,
@@ -38,6 +38,7 @@ import {
   permissionsForUser,
   type PermissionKey,
 } from "../lib/permissions";
+import { createNotification, createNotifications } from "../lib/notifications";
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
@@ -64,6 +65,19 @@ async function writeCommunityAudit(actorId: string, action: string, communityId:
     targetId: String(communityId),
     targetLabel: `community:${communityId}`,
     details,
+  });
+  const managers = await db.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
+    eq(userRolesTable.communityId, communityId),
+    inArray(userRolesTable.role, ["workspace_owner", "workspace_admin", "community_admin", "department_admin"]),
+  ));
+  await createNotifications(managers.map((manager) => manager.userId), {
+    type: "administrative_action",
+    category: "administrative_action",
+    body: details ? `${action.replaceAll("_", " ")}: ${details}` : action.replaceAll("_", " "),
+    communityId,
+    entityType: "community",
+    entityId: communityId,
+    actionUrl: `/communities/${communityId}`,
   });
 }
 
@@ -136,13 +150,15 @@ async function activateDueAnnouncements(communityId: number): Promise<void> {
       .where(and(eq(serverAnnouncementsTable.id, announcement.id), eq(serverAnnouncementsTable.status, "scheduled"))).returning();
     if (!activated) continue;
     const recipients = await announcementRecipients(announcement, communityId);
-    if (recipients.length) {
-      await db.insert(notificationsTable).values(recipients.map((recipient) => ({
-        userId: recipient.userId,
-        type: "community_announcement",
-        body: `${announcement.title}: ${announcement.body}`,
-      })));
-    }
+    await createNotifications(recipients.map((recipient) => recipient.userId), {
+      type: "community_announcement",
+      category: "announcement",
+      body: `${announcement.title}: ${announcement.body}`,
+      communityId,
+      entityType: "announcement",
+      entityId: announcement.id,
+      actionUrl: `/communities/${communityId}`,
+    });
   }
 }
 
@@ -501,6 +517,18 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
   const [task] = await db.insert(workspaceTasksTable).values({
     communityId, title, description, assignedTo, departmentId, locationId, priority, dueDate, createdBy: userId,
   }).returning();
+  if (assignedTo) {
+    await createNotification({
+      userId: assignedTo,
+      type: "task_assigned",
+      category: "task_assigned",
+      body: `You were assigned the task “${title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: task.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  }
   await writeCommunityAudit(userId, "created_workspace_task", communityId, title);
   res.status(201).json({ ...task, comments: [], attachments: [] });
 });
@@ -544,6 +572,18 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
     ...(dueDate === undefined ? {} : { dueDate }),
     updatedAt: new Date(),
   }).where(eq(workspaceTasksTable.id, taskId)).returning();
+  if (updated.assignedTo && updated.assignedTo !== current.assignedTo) {
+    await createNotification({
+      userId: updated.assignedTo,
+      type: "task_assigned",
+      category: "task_assigned",
+      body: `You were assigned the task “${updated.title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: updated.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  }
   await writeCommunityAudit(userId, "updated_workspace_task", communityId, `${taskId}${status ? ` → ${status}` : ""}`);
   res.json({ ...updated, comments: [], attachments: [] });
 });
@@ -766,6 +806,17 @@ router.post("/communities/:communityId/policies", requireAuth, async (req: Authe
   const [policy] = await db.insert(workspacePoliciesTable).values({
     communityId, title, body, version: (previous?.version ?? 0) + 1, createdBy: userId,
   }).returning();
+  const policyMembers = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .where(eq(communityMembersTable.communityId, communityId));
+  await createNotifications(policyMembers.map((member) => member.userId), {
+    type: "document_acknowledgement",
+    category: "document_acknowledgement",
+    body: `New document requires your acknowledgement: ${title}.`,
+    communityId,
+    entityType: "workspace_policy",
+    entityId: policy.id,
+    actionUrl: `/communities/${communityId}`,
+  });
   await writeCommunityAudit(userId, "published_workspace_policy", communityId, title);
   res.status(201).json(policy);
 });
@@ -774,7 +825,7 @@ router.post("/communities/:communityId/policies/:policyId/acknowledge", requireA
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
   const policyId = Number(param(req, "policyId"));
-  const [policy] = await db.select({ id: workspacePoliciesTable.id }).from(workspacePoliciesTable)
+  const [policy] = await db.select({ id: workspacePoliciesTable.id, title: workspacePoliciesTable.title, createdBy: workspacePoliciesTable.createdBy }).from(workspacePoliciesTable)
     .where(and(eq(workspacePoliciesTable.id, policyId), eq(workspacePoliciesTable.communityId, communityId)));
   if (!policy) {
     res.status(404).json({ error: "Policy not found." });
@@ -788,6 +839,19 @@ router.post("/communities/:communityId/policies/:policyId/acknowledge", requireA
   }
   const [acknowledgement] = await db.insert(policyAcknowledgementsTable).values({ policyId, userId })
     .onConflictDoUpdate({ target: [policyAcknowledgementsTable.policyId, policyAcknowledgementsTable.userId], set: { acknowledgedAt: new Date() } }).returning();
+  if (policy.createdBy !== userId) {
+    const [acknowledger] = await db.select({ displayName: usersTable.displayName }).from(usersTable).where(eq(usersTable.clerkId, userId)).limit(1);
+    await createNotification({
+      userId: policy.createdBy,
+      type: "document_acknowledgement",
+      category: "document_acknowledgement",
+      body: `${acknowledger?.displayName ?? "An employee"} acknowledged “${policy.title}”.`,
+      communityId,
+      entityType: "workspace_policy",
+      entityId: policyId,
+      actionUrl: `/communities/${communityId}`,
+    });
+  }
   res.json(acknowledgement);
 });
 
@@ -1019,11 +1083,15 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
           ? await db.select({ userId: teamMembersTable.userId }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!)))
           : recipientId ? [{ userId: recipientId }] : [];
   if (recipients.length && !isScheduled) {
-    await db.insert(notificationsTable).values(recipients.map((recipient) => ({
-      userId: recipient.userId,
+    await createNotifications(recipients.map((recipient) => recipient.userId), {
       type: "community_announcement",
+      category: "announcement",
       body: `${title}: ${body}`,
-    })));
+      communityId,
+      entityType: "announcement",
+      entityId: announcement.id,
+      actionUrl: `/communities/${communityId}`,
+    });
   }
   await writeCommunityAudit(userId, isScheduled ? "scheduled_community_announcement" : "published_community_announcement", communityId, title);
   res.status(201).json(announcement);

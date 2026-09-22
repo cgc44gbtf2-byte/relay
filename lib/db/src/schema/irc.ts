@@ -378,7 +378,12 @@ export const notificationsTable = pgTable("irc_notifications", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => usersTable.clerkId),
   type: text("type").notNull(),
+  category: text("category").notNull().default("general"),
   body: text("body").notNull(),
+  communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
+  entityType: text("entity_type"),
+  entityId: text("entity_id"),
+  actionUrl: text("action_url"),
   readAt: timestamp("read_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -49,6 +49,18 @@ import { ErrorBoundary } from "@/components/error-boundary";
 
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+const notificationCategoryLabels: Record<Notification["category"], string> = {
+  direct_message: "Direct messages",
+  mention: "Mentions",
+  task_assigned: "Tasks assigned",
+  task_deadline: "Task deadlines",
+  announcement: "Announcements",
+  document_acknowledgement: "Document acknowledgments",
+  join_request: "Join requests",
+  report: "Reports",
+  administrative_action: "Administrative actions",
+  general: "Other",
+};
 const clerkPubKey = publishableKeyFromHost(
   window.location.hostname,
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
@@ -92,7 +104,18 @@ type ChatMessage = {
 };
 type Member = Profile & { role: string; mutedUntil?: string | null };
 type JoinRequest = { id: number; status: string; createdAt: string; user: Profile };
-type Notification = { id: number; type: string; body: string; readAt?: string | null; createdAt: string };
+type Notification = {
+  id: number;
+  type: string;
+  category: "direct_message" | "mention" | "task_assigned" | "task_deadline" | "announcement" | "document_acknowledgement" | "join_request" | "report" | "administrative_action" | "general";
+  body: string;
+  communityId?: number | null;
+  entityType?: string | null;
+  entityId?: string | null;
+  actionUrl?: string | null;
+  readAt?: string | null;
+  createdAt: string;
+};
 type AppConfig = {
   siteName: string;
   landingEyebrow: string;
@@ -279,6 +302,7 @@ function ChatApp() {
   const [userSearch, setUserSearch] = useState("");
   const [userResults, setUserResults] = useState<Profile[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notificationFilter, setNotificationFilter] = useState<"all" | Notification["category"]>("all");
   const [panel, setPanel] = useState<"notifications" | "profile" | "search" | null>(null);
   const [showMembers, setShowMembers] = useState(true);
   const [newChannelOpen, setNewChannelOpen] = useState(false);
@@ -354,6 +378,9 @@ function ChatApp() {
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
+  const visibleNotifications = notificationFilter === "all"
+    ? notifications
+    : notifications.filter((notification) => notification.category === notificationFilter);
 
   useEffect(() => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) {
@@ -537,7 +564,11 @@ function ChatApp() {
     setPanel("search");
   };
   const markRead = async (notice: Notification) => {
-    if (!notice.readAt) { await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" }); setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item)); }
+    if (!notice.readAt) {
+      await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
+      setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
+    }
+    if (notice.actionUrl) window.location.href = `${basePath}${notice.actionUrl}`;
   };
   const editTopic = async () => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
@@ -651,7 +682,7 @@ function ChatApp() {
         </div>
       </main>
 
-      {panel === "notifications" && <Overlay title="Notifications" onClose={() => setPanel(null)}><div className="space-y-2">{notifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : notifications.map((notice) => <button key={notice.id} onClick={() => markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}</span></span></button>)}</div></Overlay>}
+      {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
       {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
       {panel === "search" && <Overlay title={`Search results for “${search}”`} onClose={() => setPanel(null)}><div className="space-y-4">{searchResults.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No messages found.</p> : searchResults.map((message) => <div key={message.id} className="border-b border-border pb-3"><div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span className="text-secondary-foreground">{message.sender?.displayName}</span><span>{timeLabel(message.createdAt)}</span></div><p className="mt-1 text-sm">{message.body}</p></div>)}</div></Overlay>}

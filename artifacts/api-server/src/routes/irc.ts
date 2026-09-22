@@ -9,6 +9,7 @@ import {
   inArray,
   isNull,
   lte,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -29,6 +30,7 @@ import {
   moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
+  workspaceTasksTable,
   usersTable,
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
@@ -36,6 +38,7 @@ import { wsHub } from "../lib/ws";
 import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
 import { hasPermission } from "../lib/permissions";
+import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
 
 const router: IRouter = Router();
 
@@ -169,13 +172,13 @@ async function notifyMentionedUsers(body: string, senderId: string, channelId: n
     .where(inArray(usersTable.username, [...new Set(names)]));
   const recipients = mentioned.filter((user) => user.clerkId !== senderId);
   if (recipients.length === 0) return;
-  await db.insert(notificationsTable).values(
-    recipients.map((user) => ({
-      userId: user.clerkId,
-      type: "mention",
-      body: channelId ? "You were mentioned in a channel." : "You were mentioned.",
-    })),
-  );
+  await createNotifications(recipients.map((user) => user.clerkId), {
+    type: "mention",
+    category: "mention",
+    body: channelId ? "You were mentioned in a channel." : "You were mentioned.",
+    entityType: channelId ? "channel" : null,
+    entityId: channelId,
+  });
 }
 
 async function publicUser(userId: string) {
@@ -183,6 +186,33 @@ async function publicUser(userId: string) {
   return user
     ? { id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status }
     : null;
+}
+
+async function ensureTaskDeadlineNotifications(userId: string): Promise<void> {
+  const dueBy = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const tasks = await db.select({
+    id: workspaceTasksTable.id,
+    title: workspaceTasksTable.title,
+    dueDate: workspaceTasksTable.dueDate,
+    communityId: workspaceTasksTable.communityId,
+  }).from(workspaceTasksTable).where(and(
+    eq(workspaceTasksTable.assignedTo, userId),
+    lte(workspaceTasksTable.dueDate, dueBy),
+    notInArray(workspaceTasksTable.status, ["completed", "cancelled"]),
+  ));
+  for (const task of tasks) {
+    if (await hasNotificationForEntity(userId, "task_deadline", "workspace_task", task.id)) continue;
+    await createNotification({
+      userId,
+      type: "task_deadline",
+      category: "task_deadline",
+      body: `Task deadline: ${task.title} is due ${task.dueDate ? new Date(task.dueDate).toLocaleString() : "soon"}.`,
+      communityId: task.communityId,
+      entityType: "workspace_task",
+      entityId: task.id,
+      actionUrl: `/communities/${task.communityId}`,
+    });
+  }
 }
 
 async function messageView(message: typeof messagesTable.$inferSelect, viewerId?: string) {
@@ -460,10 +490,14 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
       : await db.insert(channelJoinRequestsTable)
         .values({ channelId: channel.id, userId, status: "pending" })
         .returning();
-    await db.insert(notificationsTable).values({
+    await createNotification({
       userId: channel.ownerId,
       type: "channel_join_request",
+      category: "join_request",
       body: `Someone requested access to ${channel.name}.`,
+      entityType: "channel_join_request",
+      entityId: request.id,
+      actionUrl: `/`,
     });
     res.status(202).json({ ok: true, status: request.status });
     return;
@@ -540,9 +574,9 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
   }
   if (decision === "approve") {
     await db.insert(channelMembersTable).values({ channelId: channel.id, userId: request.userId }).onConflictDoNothing();
-    await db.insert(notificationsTable).values({ userId: request.userId, type: "channel_join_approved", body: `Your request to join ${channel.name} was approved.` });
+    await createNotification({ userId: request.userId, type: "channel_join_approved", category: "join_request", body: `Your request to join ${channel.name} was approved.`, entityType: "channel", entityId: channel.id });
   } else {
-    await db.insert(notificationsTable).values({ userId: request.userId, type: "channel_join_rejected", body: `Your request to join ${channel.name} was declined.` });
+    await createNotification({ userId: request.userId, type: "channel_join_rejected", category: "join_request", body: `Your request to join ${channel.name} was declined.`, entityType: "channel", entityId: channel.id });
   }
   res.json({ ok: true, status: request.status });
 });
@@ -568,7 +602,7 @@ router.post("/channels/:channelId/invites", requireAuth, async (req: Authenticat
     target: [channelInvitesTable.channelId, channelInvitesTable.userId],
     set: { invitedBy: userId, createdAt: new Date() },
   });
-  await db.insert(notificationsTable).values({ userId: target.clerkId, type: "channel_invite", body: `You were invited to ${channel.name}.` });
+  await createNotification({ userId: target.clerkId, type: "channel_invite", category: "join_request", body: `You were invited to ${channel.name}.`, entityType: "channel", entityId: channel.id });
   res.status(201).json({ ok: true });
 });
 
@@ -992,7 +1026,14 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
     return;
   }
   const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), body }).returning();
-  await db.insert(notificationsTable).values({ userId: recipientId, type: "direct_message", body: "You have a new direct message." });
+  await createNotification({
+    userId: recipientId,
+    type: "direct_message",
+    category: "direct_message",
+    body: "You have a new direct message.",
+    entityType: "message",
+    entityId: message.id,
+  });
   const view = await messageView(message);
   wsHub.broadcastUser(senderId, { type: "dm", message: view });
   wsHub.broadcastUser(recipientId, { type: "dm", message: view });
@@ -1024,8 +1065,10 @@ router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, re
 });
 
 router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
-  const rows = await db.select().from(notificationsTable).where(eq(notificationsTable.userId, getUserId(req))).orderBy(desc(notificationsTable.createdAt)).limit(50);
-  res.json(rows);
+  const userId = getUserId(req);
+  await ensureTaskDeadlineNotifications(userId);
+  const rows = await db.select().from(notificationsTable).where(eq(notificationsTable.userId, userId)).orderBy(desc(notificationsTable.createdAt)).limit(100);
+  res.json(rows.map((row) => ({ ...row, category: categoryForNotification(row.type, row.category) })));
 });
 
 router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
