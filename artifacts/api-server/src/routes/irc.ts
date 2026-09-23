@@ -529,7 +529,7 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     const category = await db.query.categoriesTable.findFirst({
       where: eq(categoriesTable.id, categoryId),
     });
-    if (!category || (communityId !== null && category.communityId !== communityId)) {
+    if (!category || category.communityId !== communityId) {
       res.status(400).json({ error: "Category must be valid." });
       return;
     }

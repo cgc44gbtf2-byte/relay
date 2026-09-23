@@ -8,15 +8,18 @@ import {
   communitiesTable,
   communityMembersTable,
   db,
+  departmentsTable,
   documentDownloadsTable,
   documentFoldersTable,
   documentVersionsTable,
   messagesTable,
+  locationsTable,
   pool,
   usersTable,
   userRolesTable,
   teamMembersTable,
   workspaceObjectDeletionJobsTable,
+  workspaceTasksTable,
 } from "@workspace/db";
 import { assertDeletionEligibleUser, finalizePendingAccountDeletion } from "./account-deletion";
 import { exactCommunityOwner } from "./destructive-policy";
@@ -439,6 +442,72 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       await db.delete(businessDocumentsTable).where(
         inArray(businessDocumentsTable.id, [documentA.id, documentB.id]),
       );
+    }
+  });
+
+  test("task organization references stay in their workspace and detach on deletion", async () => {
+    const [foreignCommunity] = await db.insert(communitiesTable).values({
+      name: `Foreign task organization ${suffix}`,
+      slug: `foreign-task-organization-${suffix}`,
+      ownerId: ids.owner,
+      plan: "paid_workspace",
+    }).returning({ id: communitiesTable.id });
+    let taskId: number | undefined;
+    try {
+      const [foreignDepartment] = await db.insert(departmentsTable).values({
+        communityId: foreignCommunity.id,
+        name: "Foreign department",
+      }).returning({ id: departmentsTable.id });
+      const [foreignLocation] = await db.insert(locationsTable).values({
+        communityId: foreignCommunity.id,
+        name: "Foreign location",
+      }).returning({ id: locationsTable.id });
+      await assert.rejects(
+        () => db.insert(workspaceTasksTable).values({
+          communityId,
+          title: "Cross-workspace task",
+          departmentId: foreignDepartment.id,
+          locationId: foreignLocation.id,
+          createdBy: ids.owner,
+        }),
+        (error: unknown) => {
+          const code = typeof error === "object" && error !== null && "cause" in error
+            ? (error as { cause?: { code?: unknown } }).cause?.code
+            : undefined;
+          return code === "23503";
+        },
+      );
+
+      const [department] = await db.insert(departmentsTable).values({
+        communityId,
+        name: "Home department",
+      }).returning({ id: departmentsTable.id });
+      const [location] = await db.insert(locationsTable).values({
+        communityId,
+        name: "Home location",
+      }).returning({ id: locationsTable.id });
+      const [task] = await db.insert(workspaceTasksTable).values({
+        communityId,
+        title: "Scoped task",
+        departmentId: department.id,
+        locationId: location.id,
+        createdBy: ids.owner,
+      }).returning({ id: workspaceTasksTable.id });
+      taskId = task.id;
+      await db.delete(departmentsTable).where(eq(departmentsTable.id, department.id));
+      await db.delete(locationsTable).where(eq(locationsTable.id, location.id));
+      assert.deepEqual(
+        await db.select({
+          departmentId: workspaceTasksTable.departmentId,
+          locationId: workspaceTasksTable.locationId,
+        }).from(workspaceTasksTable).where(eq(workspaceTasksTable.id, task.id)),
+        [{ departmentId: null, locationId: null }],
+      );
+    } finally {
+      if (taskId !== undefined) {
+        await db.delete(workspaceTasksTable).where(eq(workspaceTasksTable.id, taskId));
+      }
+      await db.delete(communitiesTable).where(eq(communitiesTable.id, foreignCommunity.id));
     }
   });
 

@@ -3299,6 +3299,64 @@ describe("admin access controls", () => {
     }
   });
 
+  test("prevents global channels from using a workspace category", async () => {
+    let communityId: number | null = null;
+    let channelId: number | null = null;
+    const rejectedName = `#foreign-category-${randomUUID().slice(0, 8)}`;
+    try {
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true)
+         RETURNING id`,
+        ["Channel Scope Workspace", `channel-scope-${randomUUID()}`, adminSession.userId],
+      );
+      communityId = community.rows[0]?.id ?? null;
+      assert.ok(communityId);
+      const category = await pool.query<{ id: number }>(
+        `INSERT INTO irc_categories (name, owner_id, community_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [`category-${randomUUID().slice(0, 8)}`, adminSession.userId, communityId],
+      );
+      const categoryId = category.rows[0]?.id;
+      assert.ok(categoryId);
+
+      const rejected = await apiRequest(adminSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: rejectedName, categoryId }),
+      });
+      assert.equal(rejected.status, 400, JSON.stringify(rejected));
+      assert.deepEqual(rejected.body, { error: "Category must be valid." });
+      assert.equal(
+        (await pool.query("SELECT 1 FROM irc_channels WHERE name = $1", [rejectedName])).rowCount,
+        0,
+      );
+
+      const accepted = await apiRequest(adminSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `#scoped-category-${randomUUID().slice(0, 8)}`,
+          categoryId,
+          communityId,
+        }),
+      });
+      assert.equal(accepted.status, 201, JSON.stringify(accepted));
+      assert.ok(accepted.body && typeof accepted.body === "object");
+      channelId = (accepted.body as { id?: unknown }).id as number;
+      assert.equal(typeof channelId, "number");
+    } finally {
+      if (channelId !== null) {
+        await pool.query("DELETE FROM irc_channel_members WHERE channel_id = $1", [channelId]);
+        await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      }
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("lets organization managers assign employees without crossing workspace boundaries", async () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");

@@ -147,6 +147,7 @@ export const departmentsTable = pgTable("irc_departments", {
 }, (table) => [
   index("irc_departments_community_idx").on(table.communityId),
   index("irc_departments_community_name_idx").on(table.communityId, table.name),
+  uniqueIndex("irc_departments_id_community_uidx").on(table.id, table.communityId),
 ]);
 
 export const locationsTable = pgTable("irc_locations", {
@@ -161,6 +162,7 @@ export const locationsTable = pgTable("irc_locations", {
 }, (table) => [
   index("irc_locations_community_idx").on(table.communityId),
   index("irc_locations_community_name_idx").on(table.communityId, table.name),
+  uniqueIndex("irc_locations_id_community_uidx").on(table.id, table.communityId),
 ]);
 
 export const teamsTable = pgTable("irc_teams", {
@@ -341,6 +343,16 @@ export const workspaceTasksTable = pgTable("irc_workspace_tasks", {
 }, (table) => [
   index("irc_workspace_tasks_community_updated_idx").on(table.communityId, table.updatedAt),
   index("irc_workspace_tasks_community_status_due_idx").on(table.communityId, table.status, table.dueDate),
+  foreignKey({
+    columns: [table.departmentId, table.communityId],
+    foreignColumns: [departmentsTable.id, departmentsTable.communityId],
+    name: "irc_workspace_tasks_department_tenant_fk",
+  }),
+  foreignKey({
+    columns: [table.locationId, table.communityId],
+    foreignColumns: [locationsTable.id, locationsTable.communityId],
+    name: "irc_workspace_tasks_location_tenant_fk",
+  }),
 ]);
 
 export const workspaceTaskCommentsTable = pgTable("irc_workspace_task_comments", {
