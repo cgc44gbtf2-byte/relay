@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Bell,
@@ -43,7 +43,8 @@ import {
 } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
-import { Route, Router as WouterRouter, Switch, Redirect, useLocation } from "wouter";
+import { mergeRefreshedMessages, upsertMessage } from "./message-state";
+import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
 
@@ -53,6 +54,7 @@ const notificationCategoryLabels: Record<Notification["category"], string> = {
   direct_message: "Direct messages",
   mention: "Mentions",
   task_assigned: "Tasks assigned",
+  task_updated: "Task updates",
   task_deadline: "Task deadlines",
   announcement: "Announcements",
   document_acknowledgement: "Document acknowledgments",
@@ -96,6 +98,7 @@ type ChatMessage = {
   body: string;
   kind: string;
   createdAt: string;
+  replyToId?: string | null;
   sender: Profile | null;
   recipientId?: string | null;
   deletedAt?: string | null;
@@ -107,7 +110,7 @@ type JoinRequest = { id: number; status: string; createdAt: string; user: Profil
 type Notification = {
   id: number;
   type: string;
-  category: "direct_message" | "mention" | "task_assigned" | "task_deadline" | "announcement" | "document_acknowledgement" | "join_request" | "report" | "administrative_action" | "general";
+  category: "direct_message" | "mention" | "task_assigned" | "task_updated" | "task_deadline" | "announcement" | "document_acknowledgement" | "join_request" | "report" | "administrative_action" | "general";
   body: string;
   communityId?: number | null;
   entityType?: string | null;
@@ -305,19 +308,77 @@ function PreviewMessage({ name, text, color }: { name: string; text: string; col
   return <div className="flex gap-3"><div className="flex h-8 w-8 items-center justify-center rounded-md font-mono text-[10px] font-bold text-background" style={{ backgroundColor: color }}>{initials(name)}</div><div><div className="font-mono text-xs font-bold" style={{ color }}>{name} <span className="ml-2 text-[10px] font-normal text-muted-foreground">03:14 PM</span></div><p className="mt-1 text-sm text-foreground/85">{text}</p></div></div>;
 }
 
+const MessageRow = memo(function MessageRow({
+  message,
+  currentUserId,
+  onDelete,
+  onToggleReaction,
+}: {
+  message: ChatMessage;
+  currentUserId: string;
+  onDelete: (message: ChatMessage) => void;
+  onToggleReaction: (message: ChatMessage, emoji: string) => void;
+}) {
+  return <div className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}>
+    <Avatar user={message.sender} size="sm" />
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span>
+        <span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>
+        {message.sender?.id === currentUserId && message.kind !== "deleted" && <button onClick={() => onDelete(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}
+      </div>
+      <p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>
+      {message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}
+      {message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => {
+        const reaction = message.reactions?.find((item) => item.emoji === emoji);
+        return <button key={emoji} onClick={() => onToggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>;
+      })}</div>}
+    </div>
+  </div>;
+});
+
 function useRoomData(channelId: number | null, activeDm: Profile | null, onMissingChannel?: (channelId: number) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasOlder, setHasOlder] = useState(false);
   const onMissingChannelRef = useRef(onMissingChannel);
   const messageRefreshRef = useRef(0);
+  const messagesRef = useRef(messages);
+  const messageVersionRef = useRef(0);
+  const changedMessagesRef = useRef(new Map<string, { version: number; message: ChatMessage }>());
+  const roomKey = activeDm ? `dm:${activeDm.id}` : channelId ? `channel:${channelId}` : "none";
+  const roomKeyRef = useRef(roomKey);
   onMissingChannelRef.current = onMissingChannel;
+  messagesRef.current = messages;
+
+  const updateMessages = useCallback((updater: ChatMessage[] | ((items: ChatMessage[]) => ChatMessage[])) => {
+    setMessages((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      const currentById = new Map(current.map((message) => [message.id, message]));
+      const version = messageVersionRef.current + 1;
+      let changed = false;
+      for (const message of next) {
+        if (currentById.get(message.id) !== message) {
+          changedMessagesRef.current.set(message.id, { version, message });
+          changed = true;
+        }
+      }
+      if (changed) messageVersionRef.current = version;
+      return next;
+    });
+  }, []);
 
   const refreshMessages = useCallback(async (showLoading = false) => {
     const refreshId = ++messageRefreshRef.current;
+    const refreshRoomKey = roomKey;
+    const startVersion = messageVersionRef.current;
+    const messagesAtStart = messagesRef.current;
     if (showLoading) setLoading(true);
     if (!channelId && !activeDm) {
       setMessages([]);
+      setHasOlder(false);
       if (showLoading) setLoading(false);
       return;
     }
@@ -326,7 +387,24 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       : api<{ messages: ChatMessage[] }>(`/channels/${channelId}/messages`);
     try {
       const data = await promise;
-      if (refreshId === messageRefreshRef.current) setMessages(data.messages);
+      if (refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) {
+        const changedDuringRefresh = [...changedMessagesRef.current.values()]
+          .filter(({ version }) => version > startVersion)
+          .map(({ message }) => message);
+        const preservedHistory = activeDm
+          ? messagesAtStart.filter((message) => !data.messages.some(({ id }) => id === message.id))
+          : [];
+        setMessages(mergeRefreshedMessages(
+          data.messages,
+          changedDuringRefresh,
+          preservedHistory,
+          activeDm ? Number.POSITIVE_INFINITY : 100,
+        ));
+        for (const [id, change] of changedMessagesRef.current) {
+          if (change.version <= startVersion) changedMessagesRef.current.delete(id);
+        }
+        setHasOlder(Boolean(activeDm && data.messages.length === 100));
+      }
     } catch (error) {
       if (refreshId !== messageRefreshRef.current) return;
       setMessages([]);
@@ -334,11 +412,35 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     } finally {
       if (showLoading && refreshId === messageRefreshRef.current) setLoading(false);
     }
-  }, [activeDm, channelId]);
+  }, [activeDm, channelId, roomKey]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!activeDm || loadingOlder || !hasOlder || messages.length === 0) return;
+    const paginationRoomKey = roomKey;
+    setLoadingOlder(true);
+    try {
+      const cursor = encodeURIComponent(messages[0].createdAt);
+      const data = await api<{ messages: ChatMessage[] }>(`/dm/${activeDm.id}/messages?before=${cursor}`);
+      if (roomKeyRef.current !== paginationRoomKey) return;
+      updateMessages((items) => {
+        const existing = new Set(items.map((item) => item.id));
+        return [...data.messages.filter((item) => !existing.has(item.id)), ...items];
+      });
+      setHasOlder(data.messages.length === 100);
+    } finally {
+      if (roomKeyRef.current === paginationRoomKey) setLoadingOlder(false);
+    }
+  }, [activeDm, hasOlder, loadingOlder, messages, roomKey, updateMessages]);
 
   useEffect(() => {
+    roomKeyRef.current = roomKey;
+    messageVersionRef.current = 0;
+    changedMessagesRef.current.clear();
+    messagesRef.current = [];
     setMessages([]);
     setMembers([]);
+    setHasOlder(false);
+    setLoadingOlder(false);
     if (!channelId && !activeDm) {
       setLoading(false);
       return;
@@ -355,19 +457,21 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       });
     }
     return () => { cancelled = true; };
-  }, [channelId, activeDm, refreshMessages]);
-  return { messages, setMessages, members, setMembers, loading, refreshMessages };
+  }, [channelId, activeDm, refreshMessages, roomKey]);
+  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, loadOlderMessages, refreshMessages };
 }
 
 function ChatApp() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const [, setLocation] = useLocation();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [currentChannelId, setCurrentChannelId] = useState<number | null>(null);
   const [activeDm, setActiveDm] = useState<Profile | null>(null);
   const [draft, setDraft] = useState("");
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ChatMessage[]>([]);
@@ -447,6 +551,7 @@ function ChatApp() {
   };
 
   const room = useRoomData(currentChannelId, activeDm, recoverFromMissingChannel);
+  const setRoomMessages = room.setMessages;
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
@@ -474,25 +579,41 @@ function ChatApp() {
   useEffect(() => {
     let cancelled = false;
     let socket: WebSocket | null = null;
-    api<{ ticket: string }>("/ws-ticket").then(({ ticket }) => {
-      if (cancelled) return;
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
-      socket = connectedSocket;
-      connectedSocket.onopen = () => {
-        setConnection("live");
-        setWs(connectedSocket);
-        if (currentChannelId && !activeDm) {
-          connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
-        }
-      };
-      connectedSocket.onclose = () => setConnection("offline");
-      connectedSocket.onerror = () => setConnection("offline");
-      connectedSocket.onmessage = (event) => {
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    const connect = async () => {
+      try {
+        const { ticket } = await api<{ ticket: string }>("/ws-ticket");
+        if (cancelled) return;
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+        socket = connectedSocket;
+        connectedSocket.onopen = () => {
+          reconnectAttempt = 0;
+          setConnection("live");
+          setWs(connectedSocket);
+          if (currentChannelId && !activeDm) {
+            connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
+          }
+          if (currentChannelId || activeDm) void room.refreshMessages();
+        };
+        connectedSocket.onclose = () => {
+          if (cancelled) return;
+          setConnection("offline");
+          setWs((current) => current === connectedSocket ? null : current);
+          const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
+          reconnectAttempt += 1;
+          reconnectTimer = window.setTimeout(() => void connect(), delay);
+        };
+        connectedSocket.onerror = () => setConnection("offline");
+        connectedSocket.onmessage = (event) => {
         try {
-           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; reactions?: ChatMessage["reactions"] };
-          if (data.type === "message" && data.message?.channelId === currentChannelId) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
-          if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
+           if (cancelled) return;
+           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
+           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => upsertMessage(items, data.message!));
+           if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
+           if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
+          if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
@@ -518,22 +639,32 @@ function ChatApp() {
            if (data.type === "reaction" && data.messageId && data.reactions) {
              room.setMessages((items) => items.map((item) => item.id === data.messageId ? { ...item, reactions: data.reactions } : item));
            }
-          if (data.type === "presence" && currentChannelId) {
-            api<Member[]>(`/channels/${currentChannelId}/members`).then(room.setMembers).catch(() => undefined);
+           if (data.type === "presence" && currentChannelIdRef.current && !activeDmIdRef.current) {
+             api<Member[]>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
             const presenceUser = "user" in data && data.user ? (data.user as Profile).displayName : "Someone";
-            room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelId }]);
+             room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelIdRef.current }]);
           }
         } catch { /* ignore malformed frames */ }
-      };
-    }).catch(() => setConnection("offline"));
+        };
+      } catch {
+        if (cancelled) return;
+        setConnection("offline");
+        const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(() => void connect(), delay);
+      }
+    };
+    void connect();
     return () => {
       cancelled = true;
-      if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
-        if (socket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
-          socket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      const closingSocket = socket;
+      if (closingSocket?.readyState === WebSocket.OPEN || closingSocket?.readyState === WebSocket.CONNECTING) {
+        if (closingSocket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
+          closingSocket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
         }
-        socket.close();
-        setWs((current) => current === socket ? null : current);
+        closingSocket.close();
+        setWs((current) => current === closingSocket ? null : current);
       }
     };
   }, [currentChannelId, activeDm, room.refreshMessages]);
@@ -567,7 +698,10 @@ function ChatApp() {
     if (!activeDm && channelId === null) return;
     setDraft("");
     try {
-      const sent = activeDm ? await api<ChatMessage>(`/dm/${activeDm.id}/messages`, { method: "POST", body: JSON.stringify({ body }) }) : await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
+      const sent = activeDm
+        ? await api<ChatMessage>(`/dm/${activeDm.id}/messages`, { method: "POST", body: JSON.stringify({ body, replyToId: replyingTo?.id ?? null }) })
+        : await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body, replyToId: replyingTo?.id ?? null }) });
+      setReplyingTo(null);
       if (activeDmIdRef.current === dmId && currentChannelIdRef.current === channelId) {
         room.setMessages((items) => items.some((item) => item.id === sent.id) ? items : [...items, sent]);
       }
@@ -581,6 +715,9 @@ function ChatApp() {
       }
     }
   };
+  useEffect(() => {
+    setReplyingTo(null);
+  }, [currentChannelId, activeDm?.id]);
   const sendTyping = (value: string) => {
     setDraft(value);
     if (ws?.readyState === WebSocket.OPEN && currentChannelId && !activeDm) {
@@ -636,10 +773,17 @@ function ChatApp() {
   };
   const markRead = async (notice: Notification) => {
     if (!notice.readAt) {
-      await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
-      setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
+      try {
+        await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
+        setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
+      } catch {
+        // Opening the notification should still work if marking it read fails.
+      }
     }
-    if (notice.actionUrl) window.location.href = `${basePath}${notice.actionUrl}`;
+    setPanel(null);
+    if (notice.actionUrl?.startsWith("/")) {
+      setLocation(notice.actionUrl);
+    }
   };
   const editTopic = async () => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
@@ -659,35 +803,53 @@ function ChatApp() {
       }
     }
   };
-  const deleteMessage = async (message: ChatMessage) => {
+  const deleteMessage = useCallback(async (message: ChatMessage) => {
     try {
       const deleted = await api<ChatMessage>(`/messages/${message.id}`, { method: "DELETE" });
-      room.setMessages((items) => items.map((item) => item.id === deleted.id ? deleted : item));
+      setRoomMessages((items) => items.map((item) => item.id === deleted.id ? deleted : item));
     } catch (error) { window.alert(error instanceof Error ? error.message : "Message could not be deleted"); }
-  };
-  const toggleReaction = async (message: ChatMessage, emoji: string) => {
+  }, [setRoomMessages]);
+  const toggleReaction = useCallback(async (message: ChatMessage, emoji: string) => {
     const current = message.reactions?.find((reaction) => reaction.emoji === emoji);
     try {
       const reactions = current?.reacted
         ? await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions/${encodeURIComponent(emoji)}`, { method: "DELETE" })
         : await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) });
-      room.setMessages((items) => items.map((item) => item.id === message.id ? { ...item, reactions } : item));
+      setRoomMessages((items) => items.map((item) => item.id === message.id ? { ...item, reactions } : item));
     } catch (error) { window.alert(error instanceof Error ? error.message : "Reaction could not be changed"); }
-  };
+  }, [setRoomMessages]);
   const sendAttachment = async (file: File) => {
     const channelId = currentChannelId;
     if (channelId === null || activeDm) return;
+    if (file.size < 1 || file.size > 10_000_000) {
+      window.alert("Files must be smaller than 10 MB.");
+      return;
+    }
     setUploading(true);
+    let sentMessageId: string | null = null;
     try {
       const sent = await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body: file.name }) });
+      sentMessageId = sent.id;
       const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type || "application/octet-stream" }) });
       const uploaded = await fetch(upload.uploadURL, { method: "PUT", body: file, headers: { "content-type": file.type || "application/octet-stream" } });
       if (!uploaded.ok) throw new Error("File upload failed");
       const attachment = await api<NonNullable<ChatMessage["attachments"]>[number]>(`/messages/${sent.id}/attachments`, { method: "POST", body: JSON.stringify({ objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }) });
       if (currentChannelIdRef.current === channelId) {
-        room.setMessages((items) => [...items, { ...sent, attachments: [attachment] }]);
+        room.setMessages((items) => {
+          const updated = { ...sent, attachments: [attachment] };
+          return items.some((item) => item.id === sent.id)
+            ? items.map((item) => item.id === sent.id ? updated : item)
+            : [...items, updated];
+        });
       }
     } catch (error) {
+      if (sentMessageId) {
+        try {
+          await api(`/messages/${sentMessageId}`, { method: "DELETE" });
+        } catch {
+          // Preserve the original upload error if cleanup also fails.
+        }
+      }
       if (isMissingChannelError(error)) {
         await recoverFromMissingChannel(channelId);
       } else {
@@ -744,16 +906,18 @@ function ChatApp() {
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{room.messages.map((message) => <div key={message.id} className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}><Avatar user={message.sender} size="sm" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-baseline gap-2"><span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span><span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>{message.sender?.id === profile.id && message.kind !== "deleted" && <button onClick={() => deleteMessage(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}</div><p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>{message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}{message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => { const reaction = message.reactions?.find((item) => item.emoji === emoji); return <button key={emoji} onClick={() => toggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>; })}</div>}</div></div>)}</div>}
+              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="mx-auto block rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
+              {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}
               {Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>
              <div className="border-t border-border bg-card/70 px-3 pb-4 pt-3 sm:px-6"><form onSubmit={sendMessage} className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary"><input ref={fileInputRef} type="file" accept="image/*,text/*,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void sendAttachment(file); }} /><button type="button" onClick={() => fileInputRef.current?.click()} disabled={!currentChannelId || Boolean(activeDm) || uploading} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-40" aria-label="Share a file"><Paperclip className="h-4 w-4" /></button><textarea disabled={!activeDm && !currentChannelId} value={draft} onChange={(event) => sendTyping(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} maxLength={500} placeholder={activeDm ? `message @${activeDm.username}` : currentChannel?.name ? `message ${currentChannel.name}` : "Select a channel to message"} className="max-h-28 min-h-[28px] flex-1 resize-none bg-transparent px-2 py-1 font-mono text-xs outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed" /><button type="submit" disabled={!draft.trim() || uploading || (!activeDm && !currentChannelId)} className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground disabled:opacity-40"><MessageCircle className="h-4 w-4" /></button></form><div className="mt-2 flex justify-between px-1 font-mono text-[9px] text-muted-foreground"><span><b>enter</b> send · <b>shift + enter</b> new line · <b>paperclip</b> share</span><span className={connection === "live" ? "text-chart-4" : "text-primary"}>● {uploading ? "uploading" : connection}</span></div></div>
-          </section>
+             {replyingTo && <div className="border-t border-border bg-primary/5 px-3 py-2 sm:px-6"><div className="flex items-center justify-between gap-3"><p className="min-w-0 truncate font-mono text-[10px] text-primary">Replying to {replyingTo.sender?.displayName ?? "unknown sender"}: {replyingTo.body}</p><button type="button" onClick={() => setReplyingTo(null)} className="shrink-0 font-mono text-[10px] text-muted-foreground hover:text-foreground">cancel</button></div></div>}
+           </section>
           {showMembers && !activeDm && <aside className="hidden w-[285px] shrink-0 border-l border-border bg-card/70 lg:flex lg:flex-col"><div className="border-b border-border px-4 py-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">in the room</p><p className="mt-1 font-mono text-lg font-bold">{room.members.length} <span className="text-xs font-normal text-muted-foreground">people</span></p></div><div className="flex-1 overflow-y-auto p-3">{room.members.map((member) => <div key={member.id} className="group rounded-md px-2 py-2 hover:bg-muted"><div className="flex items-center gap-2"><Avatar user={member} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName} {member.status === "online" ? <span className="ml-1 text-chart-4">●</span> : <span className="ml-1 text-muted-foreground">○</span>}</p><p className="font-mono text-[9px] text-muted-foreground">@{member.username} · {member.role}</p></div><button onClick={() => setActiveDm(member)} className="rounded p-1 text-muted-foreground hover:text-primary" aria-label={`Message ${member.displayName}`}><MessageCircle className="h-3.5 w-3.5" /></button></div>{member.id !== profile.id && <div className="mt-2 hidden gap-1 group-hover:flex"><button onClick={() => blockUser(member)} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-accent hover:text-accent">block</button>{actorRole === "owner" && member.role === "member" && <button onClick={() => moderate(member, "moderator")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-secondary-foreground hover:text-secondary-foreground">mod</button>}{["owner", "moderator"].includes(actorRole ?? "") && member.role === "member" && <><button onClick={() => moderate(member, "mute")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">mute</button><button onClick={() => moderate(member, "kick")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">kick</button><button onClick={() => moderate(member, "ban")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-destructive hover:text-destructive">ban</button></>}</div>}</div>)}</div></aside>}
         </div>
       </main>
 
-      {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
+      {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_updated", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
       {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
       {panel === "search" && <Overlay title={`Search results for “${search}”`} onClose={() => setPanel(null)}><div className="space-y-4">{searchResults.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No messages found.</p> : searchResults.map((message) => <div key={message.id} className="border-b border-border pb-3"><div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span className="text-secondary-foreground">{message.sender?.displayName}</span><span>{timeLabel(message.createdAt)}</span></div><p className="mt-1 text-sm">{message.body}</p></div>)}</div></Overlay>}
@@ -1293,6 +1457,7 @@ type CommunitySummary = {
   id: number;
   name: string;
   slug: string;
+  plan: "free_community" | "paid_workspace";
   description: string;
   rules: string;
   businessType: string;
@@ -1306,6 +1471,20 @@ type CommunitySummary = {
   isPrivate: boolean;
   joined: boolean;
   canManage: boolean;
+};
+type OnboardingCommunity = {
+  id: number;
+  name: string;
+  slug: string;
+  plan: "free_community" | "paid_workspace";
+  onboardingStep: number;
+  joined: boolean;
+  canManage: boolean;
+};
+type OnboardingState = {
+  nextStep: "create" | "configure" | "invite" | "start";
+  ownerCommunity: OnboardingCommunity | null;
+  communities: OnboardingCommunity[];
 };
 type CommunityDetail = {
   community: CommunitySummary;
@@ -1337,7 +1516,8 @@ type CommunityDetail = {
   departments: Array<{ id: number; name: string; description: string; managerId: string | null; status: string }>;
   locations: Array<{ id: number; name: string; code: string; address: string; timezone: string; status: string }>;
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
-  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
+  employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; teamIds: number[]; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
+  teamMemberships: Array<{ teamId: number; userId: string; role: string; status: string; joinedAt: string; endedAt: string | null }>;
   invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; acceptedAt?: string | null }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
   tasks: Array<{
@@ -1357,6 +1537,7 @@ type CommunityDetail = {
     attachments: Array<{ id: number; taskId: number; uploaderId: string; objectPath: string; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
   }>;
   canManage: boolean;
+  canManageOrganization: boolean;
 };
 
 type BusinessDashboardPayload = {
@@ -1431,6 +1612,9 @@ function auditActionLabel(action: string): string {
     updated_community_category: "updated",
     updated_community_settings: "updated",
     updated_employee_status: "updated",
+    assigned_employee_organization: "assigned",
+    assigned_employee_team: "assigned",
+    removed_employee_team: "removed",
     updated_workspace_task: "updated",
     uploaded_document_version: "uploaded",
     commented_on_workspace_task: "commented on",
@@ -1617,6 +1801,10 @@ function DocumentCenter({ detail, working, setWorking, setNotice, setError }: { 
   </section>;
 }
 
+function AdminDeleteButton({ label, working, onDelete }: { label: string; working: boolean; onDelete: () => void }) {
+  return <button type="button" disabled={working} onClick={onDelete} className="inline-flex items-center gap-1 rounded border border-destructive/40 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-50"><Trash2 className="h-3 w-3" />{label}</button>;
+}
+
 function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -1725,7 +1913,7 @@ function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, 
       <button disabled={working} className="mt-4 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">publish announcement</button>
     </form>}
     <div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
-      <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">announcement history</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Audience, schedule, receipts, and acknowledgement state</p></div><div className="divide-y divide-border">{detail.announcements.map((announcement) => <button key={announcement.id} onClick={() => void openAnnouncement(announcement.id)} className={`block w-full px-5 py-4 text-left hover:bg-muted/40 ${selectedId === announcement.id ? "bg-muted/40" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs font-bold">{announcement.title}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{announcement.body}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{audienceLabel[announcement.audienceType] ?? announcement.audienceType}</span></div><div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>{announcement.status}</span><span>{announcement.readCount} read</span>{announcement.requiresAcknowledgement && <span>{announcement.acknowledgementCount} acknowledged</span>}{announcement.scheduledAt && <span>scheduled {new Date(announcement.scheduledAt).toLocaleString()}</span>}{announcement.expiresAt && <span>expires {new Date(announcement.expiresAt).toLocaleDateString()}</span>}</div></button>)}{detail.announcements.length === 0 && <EmptyAdminState label="No announcements yet." />}</div></section>
+      <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">announcement history</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Audience, schedule, receipts, and acknowledgement state</p></div><div className="divide-y divide-border">{detail.announcements.map((announcement) => <button key={announcement.id} onClick={() => void openAnnouncement(announcement.id)} className={`block w-full px-5 py-4 text-left hover:bg-muted/40 ${selectedId === announcement.id ? "bg-muted/40" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs font-bold">{announcement.title}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{announcement.body}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{audienceLabel[announcement.audienceType] ?? announcement.audienceType}</span></div><div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>by {announcement.author}</span><span>{announcement.status}</span><span>{announcement.readCount} read</span>{announcement.requiresAcknowledgement && <span>{announcement.acknowledgementCount} acknowledged</span>}{announcement.scheduledAt && <span>scheduled {new Date(announcement.scheduledAt).toLocaleString()}</span>}{announcement.expiresAt && <span>expires {new Date(announcement.expiresAt).toLocaleDateString()}</span>}</div></button>)}{detail.announcements.length === 0 && <EmptyAdminState label="No announcements yet." />}</div></section>
       <section className="rounded-xl border border-border bg-card">{!selected ? <div className="p-6"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">announcement details</p><p className="mt-3 text-sm text-muted-foreground">Select an announcement to view its full history and receipts.</p></div> : <div className="p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="font-mono text-sm font-bold">{selected.title}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{selected.body}</p></div>{selected.requiresAcknowledgement && <span className={`shrink-0 rounded px-2 py-1 font-mono text-[9px] uppercase ${selected.acknowledgedAt ? "bg-chart-4/10 text-chart-4" : "bg-primary/10 text-primary"}`}>{selected.acknowledgedAt ? "acknowledged" : "acknowledgment required"}</span>}</div><p className="mt-4 font-mono text-[10px] text-muted-foreground">Published by {selected.author} · {new Date(selected.createdAt).toLocaleString()} · {selected.readCount} read receipt{selected.readCount === 1 ? "" : "s"}{selected.requiresAcknowledgement ? ` · ${selected.acknowledgementCount} acknowledgements` : ""}</p><div className="mt-5 space-y-2">{selected.attachments.map((attachment) => <a key={attachment.id} href={`/api/communities/${detail.community.id}/announcements/${selected.id}/attachments/${attachment.id}`} target="_blank" rel="noreferrer" className="block rounded border border-border/70 px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{attachment.fileName}<span className="ml-2 text-[9px] text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)} KB</span></a>)}</div>{selected.requiresAcknowledgement && !selected.acknowledgedAt && <button disabled={working} onClick={() => void acknowledge(selected.id)} className="mt-5 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge announcement</button>}</div>}</section>
     </div>
   </section>;
@@ -1882,7 +2070,7 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
   const [location, setLocation] = useState("");
   const [team, setTeam] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("employee");
+  const [inviteRole, setInviteRole] = useState("member");
   const [inviteToken, setInviteToken] = useState("");
   const [ownershipTarget, setOwnershipTarget] = useState("");
   const [policyTitle, setPolicyTitle] = useState("");
@@ -1908,6 +2096,36 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update employee status");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const updateOrganization = async (employeeId: string, body: { departmentId?: number | null; locationId?: number | null; managerId?: string | null }) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/employees/${employeeId}/organization`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setNotice("Employee organization assignment updated.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update employee organization");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const updateTeamMembership = async (teamId: number, employeeId: string, assigned: boolean) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/teams/${teamId}/members/${employeeId}`, {
+        method: assigned ? "PUT" : "DELETE",
+        ...(assigned ? { body: JSON.stringify({ role: "member", status: "active" }) } : {}),
+      });
+      setNotice(assigned ? "Employee added to team." : "Employee removed from team.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update team membership");
     } finally {
       setWorking(false);
     }
@@ -2002,7 +2220,36 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
        <section className="rounded-xl border border-border bg-card">
          <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
-         <div className="divide-y divide-border">{filteredEmployees.map((employee) => { const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name; const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name; const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member"; const online = employee.presenceStatus === "online"; return <div key={employee.userId} className="flex flex-wrap items-center gap-3 px-5 py-4"><div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{employee.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p></div><div className="flex flex-wrap items-center gap-2"><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>{detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}{detail.canManage && employee.employmentStatus !== "terminated" && <button disabled={working} onClick={() => void offboardEmployee(employee.userId, employee.displayName)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">offboard</button>}</div></div>; })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
+          <div className="divide-y divide-border">{filteredEmployees.map((employee) => {
+            const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name;
+            const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name;
+            const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member";
+            const online = employee.presenceStatus === "online";
+            const employeeTeams = detail.teams.filter((item) => employee.teamIds.includes(item.id));
+            const eligibleManagers = detail.employees.filter((item) => item.userId !== employee.userId && item.employmentStatus === "active");
+            return <div key={employee.userId} className="px-5 py-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className={`h-2 w-2 shrink-0 rounded-full ${online ? "bg-chart-4" : "bg-muted-foreground/40"}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs font-bold">{employee.displayName}</p>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Teams: {employeeTeams.map((item) => item.name).join(", ") || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>
+                  <span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{employee.employmentStatus}</span>
+                  {detail.canManage && <select disabled={working} value={employee.employmentStatus} onChange={(event) => void updateEmployee(employee.userId, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="onboarding">onboarding</option><option value="active">active</option><option value="leave">leave</option><option value="offboarding">offboarding</option><option value="terminated">terminated</option></select>}
+                  {detail.canManage && employee.employmentStatus !== "terminated" && <button disabled={working} onClick={() => void offboardEmployee(employee.userId, employee.displayName)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">offboard</button>}
+                </div>
+              </div>
+              {detail.canManageOrganization && employee.employmentStatus !== "terminated" && <div className="mt-4 grid gap-2 rounded-lg border border-primary/15 bg-primary/5 p-3 sm:grid-cols-3">
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Department</span><select disabled={working} value={employee.departmentId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { departmentId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Location</span><select disabled={working} value={employee.locationId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { locationId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Manager</span><select disabled={working} value={employee.managerId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { managerId: event.target.value || null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{eligibleManagers.map((item) => <option key={item.userId} value={item.userId}>{item.displayName}</option>)}</select></label>
+                <div className="sm:col-span-3"><span className="font-mono text-[9px] uppercase text-muted-foreground">Teams</span><div className="mt-2 flex flex-wrap gap-2">{detail.teams.length === 0 ? <span className="font-mono text-[10px] text-muted-foreground">Create a team first.</span> : detail.teams.map((item) => <label key={item.id} className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"><input type="checkbox" disabled={working} checked={employee.teamIds.includes(item.id)} onChange={(event) => void updateTeamMembership(item.id, employee.userId, event.target.checked)} />{item.name}</label>)}</div></div>
+              </div>}
+            </div>;
+          })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
       </section>
       {detail.canManage && <div className="space-y-5">
         <form onSubmit={createInvitation} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><div className="mt-4 grid gap-2"><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="employee">Employee</option><option value="contractor">Contractor</option><option value="member">Member</option></select></div><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button>{inviteToken && <div className="mt-4 rounded border border-primary/30 bg-primary/5 p-3"><p className="font-mono text-[9px] uppercase tracking-wider text-primary">one-time invitation token</p><code className="mt-2 block break-all text-[10px] text-foreground">{inviteToken}</code><p className="mt-2 text-[10px] leading-4 text-muted-foreground">Share this token securely. The recipient must be signed in with the invited email address before joining the private workspace.</p></div>}<div className="mt-4 space-y-2 border-t border-border pt-4">{detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2"><div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>{invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}</div>)}</div></form>
@@ -2149,7 +2396,7 @@ function DeveloperConsole() {
           <div className="mb-7"><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">/{section}</p><h1 className="mt-2 font-mono text-2xl font-bold sm:text-3xl">{section === "overview" ? "The application, under your control." : section === "content" ? "Edit the public experience." : "Move updates from draft to published."}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{section === "overview" ? "Keep product content, releases, and platform operations in separate owner-only workspaces." : section === "content" ? "Change landing-page messaging and send platform-wide announcements." : "Track release notes and review state before marking an application update as published."}</p></div>
           {section === "overview" && <div className="grid gap-5 xl:grid-cols-2"><div className="grid gap-3 sm:grid-cols-3 xl:col-span-2"><div className="rounded-lg border border-border bg-card p-4"><Zap className="h-4 w-4 text-primary" /><p className="mt-5 font-mono text-2xl font-bold">{published?.version ?? "none"}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">published release</p></div><div className="rounded-lg border border-border bg-card p-4"><Save className="h-4 w-4 text-primary" /><p className="mt-5 font-mono text-2xl font-bold">{releases.filter((item) => item.status === "draft").length}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">drafts</p></div><div className="rounded-lg border border-border bg-card p-4"><Radio className="h-4 w-4 text-primary" /><p className="mt-5 truncate font-mono text-2xl font-bold">{config.networkStatusLabel}</p><p className="mt-1 font-mono text-[10px] uppercase text-muted-foreground">landing status</p></div></div><section className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">full owner access</p><h2 className="mt-3 font-mono text-lg font-bold">Build, edit, and operate Relay.</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Use this studio for the public experience and release workflow. Use the operations control room for accounts, roles, channels, audit history, and system health.</p><a href={`${basePath}/admin`} className="mt-5 inline-flex rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">open operations control room</a></section><section className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">current release</p><h2 className="mt-3 font-mono text-lg font-bold">{published ? `${published.version} · ${published.title}` : "No published release yet"}</h2><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{published?.notes || "Create a release draft when you are ready to record an application update."}</p></section></div>}
           {section === "content" && <div className="grid gap-5 xl:grid-cols-2"><form onSubmit={saveContent} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">landing page content</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Stored in the database and used by the public landing page.</p><div className="mt-5 space-y-3">{([["siteName", "site name"], ["landingEyebrow", "eyebrow"], ["networkStatusLabel", "network status"]] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">{label}</span><input value={draft[key]} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label>)}<label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">headline</span><textarea value={draft.landingTitle} onChange={(event) => setDraft({ ...draft, landingTitle: event.target.value })} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={draft.landingDescription} onChange={(event) => setDraft({ ...draft, landingDescription: event.target.value })} className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-4 flex items-center gap-2 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Save className="h-3.5 w-3.5" />save public content</button></form><form onSubmit={sendAnnouncement} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">platform announcement</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Send a notification to every account.</p><textarea required value={announcement} onChange={(event) => setAnnouncement(event.target.value)} className="mt-5 min-h-36 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="Write the update for everyone…" /><button disabled={working} className="mt-4 flex items-center gap-2 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Megaphone className="h-3.5 w-3.5" />send announcement</button></form></div>}
-            {section === "releases" && <div className="space-y-5"><form onSubmit={createRelease} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">create release draft</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Record the update, review it, then publish its release state.</p><div className="mt-5 grid gap-3 sm:grid-cols-[150px_1fr]"><input required value={releaseDraft.version} onChange={(event) => setReleaseDraft({ ...releaseDraft, version: event.target.value })} placeholder="v0.2.0" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /><input required value={releaseDraft.title} onChange={(event) => setReleaseDraft({ ...releaseDraft, title: event.target.value })} placeholder="Release title" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /></div><textarea value={releaseDraft.notes} onChange={(event) => setReleaseDraft({ ...releaseDraft, notes: event.target.value })} placeholder="What changed?" className="mt-3 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save release draft</button></form><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">release history</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{releases.length} tracked updates</p></div><button type="button" disabled={working} onClick={() => void loadReleases()} className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50"><RefreshCw className="h-3 w-3" />refresh</button></div><div className="divide-y divide-border">{releases.map((release) => <div key={release.id} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-sm font-bold">{release.version} · {release.title}</p><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{release.notes || "No release notes."}</p>{release.status === "published" && release.announcementId && <div className="mt-4 rounded-md border border-primary/20 bg-primary/5 p-3"><p className="font-mono text-[9px] uppercase tracking-[.14em] text-primary">announcement draft ready</p><p className="mt-1 font-mono text-xs">Release {release.version}: {release.title}</p><p className="mt-1 text-[11px] leading-5 text-muted-foreground">{release.notes || `Release ${release.version} is ready for announcement review.`}</p><button disabled={working} onClick={() => void publishReleaseAnnouncement(release)} className="mt-3 rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">publish announcement</button></div>}</div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{release.status}</span></div><div className="mt-4 flex flex-wrap gap-2">{release.status === "draft" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "review")} className="rounded border border-primary/30 px-2.5 py-1.5 font-mono text-[9px] text-primary">send for review</button>}{release.status === "review" && <><button disabled={working} onClick={() => void changeReleaseStatus(release, "draft")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground">return to draft</button><button disabled={working} onClick={() => void changeReleaseStatus(release, "published")} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground">publish update</button></>}{release.status === "published" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "archived")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50">archive</button>}</div></div>)}{releases.length === 0 && <div className="p-6 font-mono text-xs text-muted-foreground">No releases have been recorded.</div>}</div></section></div>}
+             {section === "releases" && <div className="space-y-5"><form onSubmit={createRelease} className="rounded-lg border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">create release draft</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Record the update, review it, then publish its release state.</p><div className="mt-5 grid gap-3 sm:grid-cols-[150px_1fr]"><input required value={releaseDraft.version} onChange={(event) => setReleaseDraft({ ...releaseDraft, version: event.target.value })} placeholder="v0.2.0" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /><input required value={releaseDraft.title} onChange={(event) => setReleaseDraft({ ...releaseDraft, title: event.target.value })} placeholder="Release title" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-xs" /></div><textarea value={releaseDraft.notes} onChange={(event) => setReleaseDraft({ ...releaseDraft, notes: event.target.value })} placeholder="What changed?" className="mt-3 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save release draft</button></form><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">release history</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{releases.length} tracked updates</p></div><button type="button" disabled={working} onClick={() => void loadReleases()} className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50"><RefreshCw className="h-3 w-3" />refresh</button></div><div className="divide-y divide-border">{releases.map((release) => <div key={release.id} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-sm font-bold">{release.version} · {release.title}</p><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{release.notes || "No release notes."}</p>{release.status === "published" && <div className={`mt-4 rounded-md border p-3 ${release.announcementId ? "border-primary/20 bg-primary/5" : "border-destructive/30 bg-destructive/10"}`}><p className={`font-mono text-[9px] uppercase tracking-[.14em] ${release.announcementId ? "text-primary" : "text-destructive"}`}>{release.announcementId ? "announcement draft ready" : "announcement missing"}</p><p className="mt-1 font-mono text-xs">Release {release.version}: {release.title}</p><p className="mt-1 text-[11px] leading-5 text-muted-foreground">{release.announcementId ? (release.notes || `Release ${release.version} is ready for announcement review.`) : "The linked announcement is missing. Recreate it to keep this release visible to the company."}</p><button disabled={working} onClick={() => void publishReleaseAnnouncement(release)} className="mt-3 rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">{release.announcementId ? "publish announcement" : "recreate and publish announcement"}</button></div>}</div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{release.status}</span></div><div className="mt-4 flex flex-wrap gap-2">{release.status === "draft" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "review")} className="rounded border border-primary/30 px-2.5 py-1.5 font-mono text-[9px] text-primary">send for review</button>}{release.status === "review" && <><button disabled={working} onClick={() => void changeReleaseStatus(release, "draft")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground">return to draft</button><button disabled={working} onClick={() => void changeReleaseStatus(release, "published")} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground">publish update</button></>}{release.status === "published" && <button disabled={working} onClick={() => void changeReleaseStatus(release, "archived")} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50">archive</button>}</div></div>)}{releases.length === 0 && <div className="p-6 font-mono text-xs text-muted-foreground">No releases have been recorded.</div>}</div></section></div>}
         </section>
       </main>
     </div>
@@ -2168,8 +2415,8 @@ function InvitationAcceptance() {
     setError("");
     try {
       await api(`/communities/${Number(communityId)}/invitations/accept`, { method: "POST", body: JSON.stringify({ token }) });
-      setNotice("Invitation accepted. Your employee profile is ready for onboarding.");
-      window.setTimeout(() => { window.location.assign(`${basePath}/communities`); }, 500);
+      setNotice("Invitation accepted. Your employee profile is ready.");
+      window.setTimeout(() => { window.location.assign(`${basePath}/chat`); }, 500);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not accept invitation");
     } finally {
@@ -2179,7 +2426,176 @@ function InvitationAcceptance() {
   return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-5 py-10 text-foreground"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-7"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><p className="mt-10 font-mono text-[10px] uppercase tracking-[.18em] text-primary">workspace invitation</p><h1 className="mt-2 font-mono text-2xl font-bold">Join a business workspace.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use the workspace number and one-time token while signed in with the verified email address that received the invitation.</p>{error && <p className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}{notice && <p className="mt-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace number</span><input required inputMode="numeric" value={communityId} onChange={(event) => setCommunityId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="42" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">invitation token</span><input required value={token} onChange={(event) => setToken(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="paste the one-time token" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "accepting…" : "accept invitation"}</button></form></div></div>;
 }
 
+function ChatGate() {
+  const [state, setState] = useState<OnboardingState | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api<OnboardingState>("/onboarding").then(setState).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "Could not load your workspace");
+    });
+  }, []);
+  if (error) {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
+  }
+  if (!state) {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">checking your Relay setup…</div>;
+  }
+  if (state.nextStep !== "start") return <Redirect to="/onboarding" />;
+  return <ChatApp />;
+}
+
+function OnboardingPage() {
+  const [state, setState] = useState<OnboardingState | null>(null);
+  const [community, setCommunity] = useState<CommunitySummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [rules, setRules] = useState("");
+  const [services, setServices] = useState("");
+  const [serviceArea, setServiceArea] = useState("");
+  const [businessHours, setBusinessHours] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [inviteEmails, setInviteEmails] = useState("");
+  const [inviteRole, setInviteRole] = useState("employee");
+  const [inviteTokens, setInviteTokens] = useState<Array<{ email: string; token: string }>>([]);
+
+  const refresh = async () => {
+    const next = await api<OnboardingState>("/onboarding");
+    setState(next);
+    if (!next.ownerCommunity) {
+      setCommunity(null);
+      setError("Relay could not provision your free community. Please try again.");
+      return;
+    }
+    setCommunity({
+      ...next.ownerCommunity,
+      description: "",
+      rules: "",
+      businessType: "community",
+      services: "",
+      serviceArea: "",
+      businessHours: "",
+      contactEmail: "",
+      contactPhone: "",
+      status: "active",
+      isPrivate: false,
+    });
+    setName(next.ownerCommunity.name);
+  };
+
+  useEffect(() => {
+    refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load onboarding")).finally(() => setLoading(false));
+  }, []);
+
+  const createCommunity = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    setError("");
+    try {
+      await api<CommunitySummary>("/communities", {
+        method: "POST",
+        body: JSON.stringify({ name, description, rules, services, serviceArea, businessHours, contactEmail, contactPhone, isPrivate: true, onboarding: true }),
+      });
+      setNotice("Your workspace is ready. Add the details your team needs.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create your workspace");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const configureCommunity = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!community) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/communities/${community.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, description, rules, services, serviceArea, businessHours, contactEmail, contactPhone }),
+      });
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 2 }) });
+      setNotice("Workspace details saved. Invite your first people.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save workspace details");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const finishOnboarding = async () => {
+    if (!community) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
+      window.location.assign(`${basePath}/chat`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not finish onboarding");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const invitePeople = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!community) return;
+    const emails = inviteEmails.split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter(Boolean);
+    if (emails.length === 0) {
+      await finishOnboarding();
+      return;
+    }
+    setWorking(true);
+    setError("");
+    try {
+      const created: Array<{ email: string; token: string }> = [];
+      for (const email of emails) {
+        const invitation = await api<{ invitationToken: string }>(`/communities/${community.id}/invitations`, {
+          method: "POST",
+          body: JSON.stringify({ email, role: inviteRole }),
+        });
+        created.push({ email, token: invitation.invitationToken });
+      }
+      setInviteTokens(created);
+      setInviteEmails("");
+      await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
+      setNotice("Invitations created. Share each one-time token with its recipient.");
+      setState((current) => current ? { ...current, nextStep: "start" } : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create every invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">preparing your Relay setup…</div>;
+  if (state?.nextStep === "start") {
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-8"><CheckCircle2 className="h-8 w-8 text-chart-4" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">setup complete</p><h1 className="mt-2 font-mono text-3xl font-bold">Your Relay is ready.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Your workspace has starter rooms and your first invitations are ready to share.</p>{inviteTokens.length > 0 && <div className="mt-6 space-y-2">{inviteTokens.map((item) => <div key={`${item.email}-${item.token}`} className="rounded-lg border border-border bg-background p-3 font-mono text-xs"><p className="text-muted-foreground">{item.email}</p><p className="mt-1 break-all text-primary">{item.token}</p></div>)}</div>}<button onClick={() => window.location.assign(`${basePath}/chat`)} className="mt-7 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground">start using Relay</button></div></div>;
+  }
+  const step = state?.nextStep ?? "create";
+  return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10">
+    <main className="mx-auto max-w-3xl">
+      <div className="flex items-center justify-between gap-4"><div><p className="font-mono text-sm font-bold">relay / free community</p><p className="mt-1 font-mono text-[9px] uppercase tracking-[.18em] text-muted-foreground">your community is ready automatically</p></div><a href={`${basePath}/`} className="font-mono text-[10px] text-muted-foreground hover:text-primary">relay home</a></div>
+      <div className="mt-10 rounded-lg border border-primary/30 bg-primary/10 p-4"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">free community</p><p className="mt-2 text-sm leading-6 text-muted-foreground">Relay created <span className="font-semibold text-foreground">{community?.name ?? "your community"}</span> with welcome and general rooms. No workspace setup is required.</p></div>
+      {error && <div className="mt-6 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}</div>}
+      {notice && <div className="mt-6 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}</div>}
+      {!community && <div className="mt-8 rounded-2xl border border-border bg-card p-6 font-mono text-sm text-muted-foreground">Preparing your free community…</div>}
+      {community && step === "configure" && <form onSubmit={configureCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 02 / configure</p><h1 className="mt-2 font-mono text-3xl font-bold">Make it useful on day one.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Add the context people need before they join. You can change any of this later.</p><div className="mt-7 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace name</span><input required value={name} onChange={(event) => setName(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services or focus</span><input value={services} onChange={(event) => setServices(event.target.value)} placeholder="Operations, design, support" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={serviceArea} onChange={(event) => setServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={businessHours} onChange={(event) => setBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">rules and expectations</span><textarea value={rules} onChange={(event) => setRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "saving…" : "save and invite people"}</button></form>}
+      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">optional / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter email addresses to create member invitations. You can also skip this and start using your free community right away.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create member invitations" : "skip and start using Relay"}</button></form>}
+    </main>
+  </div>;
+}
+
 function CommunityConsole() {
+  const [, routeParams] = useRoute<{ id?: string }>("/communities/:id");
+  const parsedCommunityId = routeParams?.id ? Number(routeParams.id) : NaN;
+  const requestedCommunityId = Number.isSafeInteger(parsedCommunityId) && parsedCommunityId > 0 ? parsedCommunityId : null;
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [communities, setCommunities] = useState<CommunitySummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -2224,7 +2640,7 @@ function CommunityConsole() {
     ]);
     setPermissions(nextPermissions);
     setCommunities(nextCommunities);
-    setSelectedId((current) => current ?? nextCommunities[0]?.id ?? null);
+    setSelectedId((current) => current ?? requestedCommunityId ?? nextCommunities[0]?.id ?? null);
   };
   const loadDetail = async (id: number) => {
     const next = await api<CommunityDetail>(`/communities/${id}?view=summary`);
@@ -2242,7 +2658,7 @@ function CommunityConsole() {
   };
   useEffect(() => {
     loadCommunities().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load communities")).finally(() => setLoading(false));
-  }, []);
+  }, [requestedCommunityId]);
   useEffect(() => {
     if (selectedId === null) {
       setDetail(null);
@@ -2371,6 +2787,20 @@ function CommunityConsole() {
       setWorking(false);
     }
   };
+  const deleteCommunityResource = async (resource: "categories" | "channels" | "announcements", id: number, label: string) => {
+    if (!detail || !window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/communities/${detail.community.id}/${resource}/${id}`, { method: "DELETE" });
+      setNotice(`${label} deleted.`);
+      await loadDetail(detail.community.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `Could not delete ${label}`);
+    } finally {
+      setWorking(false);
+    }
+  };
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading communities…</div>;
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
@@ -2403,7 +2833,8 @@ function CommunityConsole() {
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
-             {detail.canManage && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
+             {(detail.canManage || detail.canManageOrganization) && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
+             {detail.canManage && <section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace resources</h2><p className="mt-1 text-xs text-muted-foreground">Deleting a category unassigns its channels. Deleting a channel removes its members, requests, messages, and invitations.</p></div><Trash2 className="h-5 w-5 text-destructive" /></div><div className="mt-5 grid gap-5 xl:grid-cols-3"><div><p className="font-mono text-[10px] uppercase text-muted-foreground">categories</p><div className="mt-2 space-y-2">{detail.categories.map((category) => <div key={category.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{category.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("categories", category.id, `category “${category.name}”`)} /></div>)}{detail.categories.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No categories.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">channels</p><div className="mt-2 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("channels", channel.id, `channel “${channel.name}”`)} /></div>)}{detail.channels.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No channels.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">announcements</p><div className="mt-2 space-y-2">{detail.announcements.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{item.title}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("announcements", item.id, `announcement “${item.title}”`)} /></div>)}{detail.announcements.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No announcements.</p>}</div></div></div></section>}
            </div>}
         </section>
       </main>
@@ -2413,7 +2844,7 @@ function CommunityConsole() {
 }
 
 function AuthRoutes() {
-  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatApp /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
+  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities/:id"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={Landing} /></Switch>;
 }
 
 function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
