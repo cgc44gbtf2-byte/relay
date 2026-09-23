@@ -28,6 +28,25 @@ export function upsertMessage<T extends TimestampedMessage>(messages: T[], incom
   return [...messages, incoming].sort(compareMessages);
 }
 
+export function upsertBoundedMessageGroup<T extends TimestampedMessage>(
+  messages: T[],
+  incoming: T,
+  belongsToBoundedGroup: (message: T) => boolean,
+  maxGroupLength: number,
+): T[] {
+  const next = upsertMessage(messages, incoming);
+  let messagesToDrop = next.filter(belongsToBoundedGroup).length - Math.max(0, maxGroupLength);
+  if (messagesToDrop <= 0) return next;
+
+  return next.filter((message) => {
+    if (messagesToDrop > 0 && belongsToBoundedGroup(message)) {
+      messagesToDrop -= 1;
+      return false;
+    }
+    return true;
+  });
+}
+
 export function mergeRefreshedMessages<T extends TimestampedMessage>(
   refreshed: T[],
   messagesChangedDuringRefresh: T[],
