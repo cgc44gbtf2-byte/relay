@@ -3,11 +3,14 @@ import { after, before, describe, test } from "node:test";
 import { and, eq } from "drizzle-orm";
 import {
   businessDocumentsTable,
+  categoriesTable,
+  channelsTable,
   communitiesTable,
   communityMembersTable,
   db,
   documentFoldersTable,
   documentVersionsTable,
+  messagesTable,
   pool,
   usersTable,
   userRolesTable,
@@ -291,6 +294,91 @@ describe("destructive lifecycle PostgreSQL integration", () => {
         await db.delete(documentFoldersTable).where(eq(documentFoldersTable.id, homeParentId));
       }
       await db.delete(communitiesTable).where(eq(communitiesTable.id, foreignCommunity.id));
+    }
+  });
+
+  test("message replies require an existing parent and survive parent deletion", async () => {
+    await assert.rejects(
+      () => db.insert(messagesTable).values({
+        senderId: ids.owner,
+        recipientId: ids.target,
+        threadKey: [ids.owner, ids.target].sort().join(":"),
+        replyToId: "00000000-0000-4000-8000-000000000000",
+        body: "Missing parent",
+      }),
+      (error: unknown) => {
+        const code = typeof error === "object" && error !== null && "cause" in error
+          ? (error as { cause?: { code?: unknown } }).cause?.code
+          : undefined;
+        return code === "23503";
+      },
+    );
+    const threadKey = [ids.owner, ids.target].sort().join(":");
+    const [parent] = await db.insert(messagesTable).values({
+      senderId: ids.owner,
+      recipientId: ids.target,
+      threadKey,
+      body: "Parent message",
+    }).returning({ id: messagesTable.id });
+    const [reply] = await db.insert(messagesTable).values({
+      senderId: ids.target,
+      recipientId: ids.owner,
+      threadKey,
+      replyToId: parent.id,
+      body: "Reply message",
+    }).returning({ id: messagesTable.id });
+    try {
+      await db.delete(messagesTable).where(eq(messagesTable.id, parent.id));
+      assert.deepEqual(
+        await db.select({
+          id: messagesTable.id,
+          replyToId: messagesTable.replyToId,
+          body: messagesTable.body,
+        }).from(messagesTable).where(eq(messagesTable.id, reply.id)),
+        [{ id: reply.id, replyToId: null, body: "Reply message" }],
+      );
+    } finally {
+      await db.delete(messagesTable).where(eq(messagesTable.id, reply.id));
+    }
+  });
+
+  test("channel categories must exist and deleting one preserves the channel", async () => {
+    await assert.rejects(
+      () => db.insert(channelsTable).values({
+        name: `missing-category-${suffix}`,
+        ownerId: ids.owner,
+        communityId,
+        categoryId: 2_147_483_647,
+      }),
+      (error: unknown) => {
+        const code = typeof error === "object" && error !== null && "cause" in error
+          ? (error as { cause?: { code?: unknown } }).cause?.code
+          : undefined;
+        return code === "23503";
+      },
+    );
+    const [category] = await db.insert(categoriesTable).values({
+      name: `Category ${suffix}`,
+      ownerId: ids.owner,
+      communityId,
+    }).returning({ id: categoriesTable.id });
+    const [channel] = await db.insert(channelsTable).values({
+      name: `category-channel-${suffix}`,
+      ownerId: ids.owner,
+      communityId,
+      categoryId: category.id,
+    }).returning({ id: channelsTable.id });
+    try {
+      await db.delete(categoriesTable).where(eq(categoriesTable.id, category.id));
+      assert.deepEqual(
+        await db.select({
+          id: channelsTable.id,
+          categoryId: channelsTable.categoryId,
+        }).from(channelsTable).where(eq(channelsTable.id, channel.id)),
+        [{ id: channel.id, categoryId: null }],
+      );
+    } finally {
+      await db.delete(channelsTable).where(eq(channelsTable.id, channel.id));
     }
   });
 

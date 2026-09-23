@@ -378,6 +378,11 @@ export const channelsTable = pgTable(
   (table) => [
     uniqueIndex("irc_channels_community_category_name_idx").on(table.communityId, table.categoryId, table.name),
     index("irc_channels_community_name_idx").on(table.communityId, table.name),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categoriesTable.id],
+      name: "irc_channels_category_id_fk",
+    }).onDelete("set null"),
   ],
 );
 
@@ -473,6 +478,11 @@ export const messagesTable = pgTable("irc_messages", {
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
   index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
   index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt, table.id),
+  foreignKey({
+    columns: [table.replyToId],
+    foreignColumns: [table.id],
+    name: "irc_messages_reply_to_id_fk",
+  }).onDelete("set null"),
 ]);
 
 export const messageAttachmentsTable = pgTable("irc_message_attachments", {
