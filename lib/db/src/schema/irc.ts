@@ -9,6 +9,7 @@ import {
   timestamp,
   uuid,
   index,
+  unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -167,7 +168,7 @@ export const departmentsTable = pgTable("irc_departments", {
 }, (table) => [
   index("irc_departments_community_idx").on(table.communityId),
   index("irc_departments_community_name_idx").on(table.communityId, table.name),
-  uniqueIndex("irc_departments_id_community_uidx").on(table.id, table.communityId),
+  unique("irc_departments_id_community_uidx").on(table.id, table.communityId),
 ]);
 
 export const locationsTable = pgTable("irc_locations", {
@@ -182,7 +183,7 @@ export const locationsTable = pgTable("irc_locations", {
 }, (table) => [
   index("irc_locations_community_idx").on(table.communityId),
   index("irc_locations_community_name_idx").on(table.communityId, table.name),
-  uniqueIndex("irc_locations_id_community_uidx").on(table.id, table.communityId),
+  unique("irc_locations_id_community_uidx").on(table.id, table.communityId),
 ]);
 
 export const teamsTable = pgTable("irc_teams", {
@@ -275,7 +276,7 @@ export const documentFoldersTable = pgTable("irc_document_folders", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_document_folders_community_idx").on(table.communityId),
-  uniqueIndex("irc_document_folders_id_community_uidx").on(table.id, table.communityId),
+  unique("irc_document_folders_id_community_uidx").on(table.id, table.communityId),
   foreignKey({
     columns: [table.parentId, table.communityId],
     foreignColumns: [table.id, table.communityId],
@@ -313,7 +314,7 @@ export const documentVersionsTable = pgTable("irc_document_versions", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("irc_document_versions_document_version_uidx").on(table.documentId, table.version),
-  uniqueIndex("irc_document_versions_id_document_id_uidx").on(table.id, table.documentId),
+  unique("irc_document_versions_id_document_id_uidx").on(table.id, table.documentId),
 ]);
 
 export const documentPermissionsTable = pgTable("irc_document_permissions", {

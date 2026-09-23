@@ -21,3 +21,4 @@
 - [Clerk test-account switching](clerk-test-account-switching.md) — development Clerk may be single-session; preserve safe owner return without persisting sign-in tickets.
 - [Clerk test identity limits](clerk-test-identity-limits.md) — authenticated suites and strict cleanup must tolerate management API rate limits without leaking users.
 - [Public channel destinations](public-channel-destinations.md) — owner-directed public-channel moves target only public communities the owner owns, never arbitrary communities or business workspaces.
+- [Drizzle referenced unique indexes](drizzle-referenced-unique-indexes.md) — composite keys used by foreign keys should be unique constraints, not standalone indexes, to avoid phantom push conflicts.
