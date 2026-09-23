@@ -1855,6 +1855,11 @@ function TestAccountsPanel({ detail, setError, setNotice }: { detail: CommunityD
       }
       const { ticket } = await api<{ ticket: string }>(`/communities/${detail.community.id}/test-accounts/${role}/login`, { method: "POST", body: "{}" });
       if (!client || !setActive) throw new Error("Clerk sign-in is unavailable.");
+      writeTestAccountReturnContext({
+        ownerSessionId: session.id,
+        ownerUserId: session.user.id,
+        workspaceId: detail.community.id,
+      });
       let result;
       try {
         result = await client.signIn.create({ strategy: "ticket", ticket });
@@ -1866,14 +1871,10 @@ function TestAccountsPanel({ detail, setError, setNotice }: { detail: CommunityD
       if (result.status !== "complete" || !result.createdSessionId) {
         throw new Error(`Test account sign-in did not complete (${result.status}).`);
       }
-      writeTestAccountReturnContext({
-        ownerSessionId: session.id,
-        ownerUserId: session.user.id,
-        workspaceId: detail.community.id,
-      });
       await setActive({ session: result.createdSessionId });
       window.location.assign(`${basePath}/chat`);
     } catch (reason) {
+      clearTestAccountReturnContext();
       setError(reason instanceof Error ? reason.message : "Could not sign in to test account");
       setWorking(false);
     }

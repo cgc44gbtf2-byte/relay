@@ -23,7 +23,7 @@ function isValidContext(value: unknown, now: number): value is TestAccountReturn
 
 export function writeTestAccountReturnContext(
   context: Omit<TestAccountReturnContext, "version" | "savedAt">,
-  storage: Storage = window.sessionStorage,
+  storage: Storage = window.localStorage,
   now = Date.now(),
 ): void {
   storage.setItem(TEST_ACCOUNT_RETURN_CONTEXT_KEY, JSON.stringify({
@@ -34,7 +34,7 @@ export function writeTestAccountReturnContext(
 }
 
 export function readTestAccountReturnContext(
-  storage: Storage = window.sessionStorage,
+  storage: Storage = window.localStorage,
   now = Date.now(),
 ): TestAccountReturnContext | null {
   const raw = storage.getItem(TEST_ACCOUNT_RETURN_CONTEXT_KEY);
@@ -49,6 +49,6 @@ export function readTestAccountReturnContext(
   return null;
 }
 
-export function clearTestAccountReturnContext(storage: Storage = window.sessionStorage): void {
+export function clearTestAccountReturnContext(storage: Storage = window.localStorage): void {
   storage.removeItem(TEST_ACCOUNT_RETURN_CONTEXT_KEY);
 }
