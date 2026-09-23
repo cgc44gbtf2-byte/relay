@@ -3357,6 +3357,44 @@ describe("admin access controls", () => {
     }
   });
 
+  test("lets channel owners and platform admins delete channels", async () => {
+    const ownerSession = await createTestSession("channel_delete_owner");
+    const channelIds: number[] = [];
+    try {
+      const profile = await apiRequest(ownerSession, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+      for (const suffix of ["owner", "admin"]) {
+        const created = await apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `#delete-${suffix}-${randomUUID().slice(0, 8)}` }),
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        assert.ok(created.body && typeof created.body === "object");
+        const channelId = (created.body as { id?: unknown }).id as number;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId);
+      }
+
+      const ownerDeleted = await apiRequest(ownerSession, `/channels/${channelIds[0]}`, {
+        method: "DELETE",
+      });
+      assert.equal(ownerDeleted.status, 200, JSON.stringify(ownerDeleted));
+      channelIds.shift();
+
+      const adminDeleted = await apiRequest(adminSession, `/channels/${channelIds[0]}`, {
+        method: "DELETE",
+      });
+      assert.equal(adminDeleted.status, 200, JSON.stringify(adminDeleted));
+      channelIds.shift();
+    } finally {
+      for (const channelId of channelIds) {
+        await pool.query("DELETE FROM irc_channel_members WHERE channel_id = $1", [channelId]);
+        await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      }
+    }
+  });
+
   test("lets organization managers assign employees without crossing workspace boundaries", async () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");

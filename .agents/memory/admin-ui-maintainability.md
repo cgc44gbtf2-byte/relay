@@ -14,3 +14,9 @@ Platform account controls should suspend and restore accounts rather than delete
 **Why:** Suspension is reversible, preserves audit and message history, and can be enforced centrally for every authenticated API request.
 
 **How to apply:** Treat account suspension as an access-state mutation with an audit event; do not add destructive account deletion to routine admin controls without a separate retention decision.
+
+Admin controls must call an endpoint whose authorization model matches the actor shown the control.
+
+**Why:** Platform-wide visibility does not imply exact workspace ownership. Showing an action that invokes an owner-only route creates predictable 403 failures and misleading destructive UI.
+
+**How to apply:** Prefer a manager/admin-capable endpoint for controls intentionally available to platform operators. Otherwise expose the required ownership fact and render an explicit owner-only state.

@@ -217,6 +217,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         description: categoriesTable.description,
         communityId: categoriesTable.communityId,
         communityName: communitiesTable.name,
+        communityOwnerId: communitiesTable.ownerId,
       })
       .from(categoriesTable)
       .leftJoin(communitiesTable, eq(communitiesTable.id, categoriesTable.communityId))

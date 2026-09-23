@@ -46,6 +46,7 @@ import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
 import { logger } from "../lib/logger";
 import { isValidQuery } from "../lib/validation";
+import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
 
 const router: IRouter = Router();
 
@@ -1088,6 +1089,23 @@ router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequ
     await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channel.id));
     await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channel.id));
     await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channel.id));
+    const channelMessages = await tx.select({ id: messagesTable.id }).from(messagesTable)
+      .where(eq(messagesTable.channelId, channel.id));
+    let cleanupPendingCount = 0;
+    if (channelMessages.length) {
+      const messageIds = channelMessages.map((message) => message.id);
+      const attachments = await tx.select({ objectPath: messageAttachmentsTable.objectPath })
+        .from(messageAttachmentsTable)
+        .where(inArray(messageAttachmentsTable.messageId, messageIds));
+      cleanupPendingCount = new Set(attachments.map(({ objectPath }) => objectPath)).size;
+      await enqueueObjectDeletionJobs(
+        tx,
+        attachments.map(({ objectPath }) => objectPath),
+        `channel:${channel.id}`,
+      );
+      await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, messageIds));
+      await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, messageIds));
+    }
     await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channel.id));
     await tx.delete(messagesTable).where(eq(messagesTable.channelId, channel.id));
     const [deleted] = await tx
@@ -1095,7 +1113,7 @@ router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequ
       .where(eq(channelsTable.id, channel.id))
       .returning({ id: channelsTable.id });
     return deleted
-      ? { outcome: "deleted", channelId: deleted.id } as const
+      ? { outcome: "deleted", channelId: deleted.id, cleanupPendingCount } as const
       : { outcome: "not_found" } as const;
   });
   if (deletion.outcome === "not_found") {
@@ -1107,7 +1125,11 @@ router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequ
     return;
   }
   wsHub.broadcastChannelRemoved(deletion.channelId);
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    cleanupPending: deletion.cleanupPendingCount > 0,
+    cleanupPendingCount: deletion.cleanupPendingCount,
+  });
 });
 
 router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
