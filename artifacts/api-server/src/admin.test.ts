@@ -3425,9 +3425,14 @@ describe("admin access controls", () => {
   });
 
   test("moves only owner-controlled public channels to the owner's public community", async () => {
+    // Use the sessions created by the suite hook so this test also runs in isolation.
+    const memberSession = secondSession;
+    const adminSession = firstSession;
     const channelIds: number[] = [];
     let categoryId: number | null = null;
     try {
+      await Promise.all([apiRequest(memberSession, "/me"), apiRequest(adminSession, "/me")]);
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId]);
       const ownOnboarding = await apiRequest(memberSession, "/onboarding");
       const foreignOnboarding = await apiRequest(adminSession, "/onboarding");
       assert.equal(ownOnboarding.status, 200, JSON.stringify(ownOnboarding));

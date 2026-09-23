@@ -7,8 +7,6 @@ The API integration test runner intentionally refuses to start without a dedicat
 
 **Why:** Admin access tests create and remove external Clerk users and database profiles, so running them against an unspecified or shared database would risk contaminating persistent data.
 
-**How to apply:** This Replit project cannot provision or expose the required disposable database, so treat the full stateful API integration suite as unavailable here. Continue using type checking, builds, test compilation, and the web test suite; do not make the unavailable database a prerequisite for progress.
+**How to apply:** A truly isolated local PostgreSQL cluster under `/tmp` can satisfy the test-database requirement without touching the app database. Keep it running in a background shell task: a server started inside a one-off shell command stops when that command ends. Use its own socket directory because the system socket directory may not exist, and bootstrap it with the container user rather than assuming a `postgres` role. Run tests with the app's database URL absent and verify the test connection points to the disposable database before schema setup or destructive tests. Stop the cluster afterward and confirm test profiles were removed.
 
-When provisioning PostgreSQL locally in this environment, pass an explicit temporary socket directory because `/run/postgresql` may not exist.
-
-The local PostgreSQL binaries may use the container user as the bootstrap role rather than `postgres`, and this `initdb` version does not accept `--no-password`; use an explicit role with trust authentication when creating a disposable cluster.
+On a fresh local cluster, schema push can try to create composite foreign keys before their referenced composite unique indexes. Bootstrap those indexes in the disposable database first, then retry schema push. Do not apply this workaround to a shared or production database.
