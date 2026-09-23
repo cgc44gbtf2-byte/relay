@@ -654,28 +654,67 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
     res.status(400).json({ error: "Invalid join-request decision." });
     return;
   }
-  if (!(await canReviewJoinRequests(channel.id, userId))) {
+  const review = await db.transaction(async (tx) => {
+    const [request] = await tx
+      .select()
+      .from(channelJoinRequestsTable)
+      .where(and(
+        eq(channelJoinRequestsTable.id, requestId),
+        eq(channelJoinRequestsTable.channelId, channel.id),
+        eq(channelJoinRequestsTable.status, "pending"),
+      ))
+      .for("update");
+    if (!request) {
+      return { outcome: "not_found" } as const;
+    }
+    const [reviewer] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, channel.id),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+    if (!reviewer || !["owner", "moderator"].includes(reviewer.role)) {
+      return { outcome: "forbidden" } as const;
+    }
+    const [updatedRequest] = await tx
+      .update(channelJoinRequestsTable)
+      .set({ status: decision === "approve" ? "approved" : "rejected", reviewedAt: new Date(), reviewedBy: userId })
+      .where(and(
+        eq(channelJoinRequestsTable.id, requestId),
+        eq(channelJoinRequestsTable.channelId, channel.id),
+        eq(channelJoinRequestsTable.status, "pending"),
+      ))
+      .returning();
+    if (!updatedRequest) {
+      return { outcome: "not_found" } as const;
+    }
+    if (decision === "approve") {
+      await tx
+        .insert(channelMembersTable)
+        .values({ channelId: channel.id, userId: updatedRequest.userId })
+        .onConflictDoNothing();
+    }
+    return { outcome: "updated", request: updatedRequest } as const;
+  });
+  if (review.outcome === "forbidden") {
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
   }
-  const [request] = await db
-    .update(channelJoinRequestsTable)
-    .set({ status: decision === "approve" ? "approved" : "rejected", reviewedAt: new Date(), reviewedBy: userId })
-    .where(and(
-      eq(channelJoinRequestsTable.id, requestId),
-      eq(channelJoinRequestsTable.channelId, channel.id),
-      eq(channelJoinRequestsTable.status, "pending"),
-    ))
-    .returning();
-  if (!request) {
+  if (review.outcome === "not_found") {
     res.status(404).json({ error: "Join request not found." });
     return;
   }
+  const { request } = review;
   if (decision === "approve") {
-    await db.insert(channelMembersTable).values({ channelId: channel.id, userId: request.userId }).onConflictDoNothing();
-    await createNotification({ userId: request.userId, type: "channel_join_approved", category: "join_request", body: `Your request to join ${channel.name} was approved.`, entityType: "channel", entityId: channel.id });
+    void createNotification({ userId: request.userId, type: "channel_join_approved", category: "join_request", body: `Your request to join ${channel.name} was approved.`, entityType: "channel", entityId: channel.id }).catch((error: unknown) => {
+      logger.warn({ err: error, requestId: request.id }, "Join-request approval notification failed.");
+    });
   } else {
-    await createNotification({ userId: request.userId, type: "channel_join_rejected", category: "join_request", body: `Your request to join ${channel.name} was declined.`, entityType: "channel", entityId: channel.id });
+    void createNotification({ userId: request.userId, type: "channel_join_rejected", category: "join_request", body: `Your request to join ${channel.name} was declined.`, entityType: "channel", entityId: channel.id }).catch((error: unknown) => {
+      logger.warn({ err: error, requestId: request.id }, "Join-request rejection notification failed.");
+    });
   }
   res.json({ ok: true, status: request.status });
 });
@@ -1038,21 +1077,50 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }
-  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
+  if (action !== "moderator" && !(await isChannelOwnerOrModerator(channel.id, userId))) {
     res.status(403).json({ error: "You do not have moderation permissions." });
     return;
   }
   if (action === "moderator") {
-    const [actorMembership, targetMembership, actorCanManageChannel] = await Promise.all([
-      membership(channel.id, userId),
-      membership(channel.id, targetUserId),
-      hasPermission(userId, "manage_channel", { channelId: channel.id }),
-    ]);
-    if (!canPromoteChannelModerator({
-      actorRole: actorMembership?.role ?? null,
-      actorCanManageChannel,
-      targetRole: targetMembership?.role ?? null,
-    })) {
+    const promoted = await db.transaction(async (tx) => {
+      const promotionUserIds = [...new Set([userId, targetUserId])].sort();
+      const lockedMemberships = await tx
+        .select()
+        .from(channelMembersTable)
+        .where(and(
+          eq(channelMembersTable.channelId, channel.id),
+          inArray(channelMembersTable.userId, promotionUserIds),
+        ))
+        .orderBy(channelMembersTable.userId)
+        .for("update");
+      const actorMembership = lockedMemberships.find((member) => member.userId === userId);
+      const targetMembership = lockedMemberships.find((member) => member.userId === targetUserId);
+      const actorCanManageChannel = await hasPermission(
+        userId,
+        "manage_channel",
+        { channelId: channel.id },
+        tx,
+        true,
+      );
+      if (!canPromoteChannelModerator({
+        actorRole: actorMembership?.role ?? null,
+        actorCanManageChannel,
+        targetRole: targetMembership?.role ?? null,
+      })) {
+        return false;
+      }
+      const [updated] = await tx
+        .update(channelMembersTable)
+        .set({ role: "moderator" })
+        .where(and(
+          eq(channelMembersTable.channelId, channel.id),
+          eq(channelMembersTable.userId, targetUserId),
+          eq(channelMembersTable.role, "member"),
+        ))
+        .returning({ userId: channelMembersTable.userId });
+      return Boolean(updated);
+    }, { isolationLevel: "serializable" });
+    if (!promoted) {
       res.status(403).json({
         error: "Only channel owners or channel managers can promote current members.",
       });
@@ -1071,8 +1139,6 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     wsHub.revokeChannelAccess(channel.id, targetUserId);
   } else if (action === "unban") {
     await db.delete(channelBansTable).where(and(eq(channelBansTable.channelId, channel.id), eq(channelBansTable.userId, targetUserId)));
-  } else {
-    await db.update(channelMembersTable).set({ role: "moderator" }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
   }
   await db.insert(moderationActionsTable).values({
     actorId: userId,

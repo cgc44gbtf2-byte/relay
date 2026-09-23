@@ -270,17 +270,18 @@ export type PermissionScope = {
 };
 
 type Assignment = typeof userRolesTable.$inferSelect;
+type PermissionDatabase = Pick<typeof db, "select">;
 
-async function scopeFor(scope: PermissionScope): Promise<PermissionScope> {
+async function scopeFor(scope: PermissionScope, database: PermissionDatabase): Promise<PermissionScope> {
   if (scope.channelId !== undefined) {
-    const [channel] = await db
+    const [channel] = await database
       .select({ communityId: channelsTable.communityId, categoryId: channelsTable.categoryId })
       .from(channelsTable)
       .where(eq(channelsTable.id, scope.channelId));
     if (channel) return { ...scope, communityId: scope.communityId ?? channel.communityId ?? undefined, categoryId: scope.categoryId ?? channel.categoryId ?? undefined };
   }
   if (scope.categoryId !== undefined && scope.communityId === undefined) {
-    const [category] = await db
+    const [category] = await database
       .select({ communityId: categoriesTable.communityId })
       .from(categoriesTable)
       .where(eq(categoriesTable.id, scope.categoryId));
@@ -316,18 +317,29 @@ export async function hasPermission(
   userId: string,
   permission: PermissionKey,
   rawScope: PermissionScope = {},
+  database: PermissionDatabase = db,
+  lockAuthorizationRows = false,
 ): Promise<boolean> {
-  const [user] = await db.select({ role: usersTable.role }).from(usersTable).where(eq(usersTable.clerkId, userId));
+  const userQuery = database
+    .select({ role: usersTable.role })
+    .from(usersTable)
+    .where(eq(usersTable.clerkId, userId));
+  const [user] = lockAuthorizationRows
+    ? await userQuery.for("update")
+    : await userQuery;
   if (!user) return false;
   if (user.role === "admin") return true;
 
-  const scope = await scopeFor(rawScope);
+  const scope = await scopeFor(rawScope, database);
   if (["platform_moderator", "moderator"].includes(user.role) && roleAllows(user.role, permission)) return true;
 
-  const assignments = await db
+  const assignmentsQuery = database
     .select()
     .from(userRolesTable)
     .where(eq(userRolesTable.userId, userId));
+  const assignments = lockAuthorizationRows
+    ? await assignmentsQuery.for("update")
+    : await assignmentsQuery;
 
   if (PRIMARY_ROLES.includes(user.role as PrimaryRole) && roleAllows(user.role, permission)) {
     const primaryAssignment = assignments.find((assignment) => assignment.role === user.role);
@@ -349,7 +361,7 @@ export async function hasPermission(
     ),
   ];
   if (!customRoleNames.length) return false;
-  const customRoleMatches = await db
+  const customRoleMatchesQuery = database
     .select({ role: rolePermissionsTable.role })
     .from(rolePermissionsTable)
     .innerJoin(
@@ -360,6 +372,9 @@ export async function hasPermission(
       inArray(rolePermissionsTable.role, customRoleNames),
       eq(permissionDefinitionsTable.key, permission),
     ));
+  const customRoleMatches = lockAuthorizationRows
+    ? await customRoleMatchesQuery.for("update")
+    : await customRoleMatchesQuery;
   return customRoleMatches.length > 0;
 }
 
