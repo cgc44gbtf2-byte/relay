@@ -29,6 +29,32 @@ describe("message state", () => {
     expect(messages.find(({ id }) => id === "message-0500")?.reactions).toBe(3);
   });
 
+  it("reconciles delayed send responses without duplicates or chronology drift", () => {
+    let messages = [
+      { ...message(10), body: "realtime copy" },
+      message(11),
+    ];
+
+    messages = upsertMessage(messages, {
+      ...message(10),
+      body: "authoritative response",
+      reactions: 2,
+    });
+    messages = upsertMessage(messages, message(9));
+
+    expect(messages.map(({ id }) => id)).toEqual([
+      "message-0009",
+      "message-0010",
+      "message-0011",
+    ]);
+    expect(messages.filter(({ id }) => id === "message-0010")).toEqual([
+      expect.objectContaining({
+        body: "authoritative response",
+        reactions: 2,
+      }),
+    ]);
+  });
+
   it("does not let reconnect history erase newer realtime frames", () => {
     const refreshed = [message(1), message(2)];
     const current = [
