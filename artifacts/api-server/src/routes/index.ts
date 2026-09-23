@@ -7,6 +7,7 @@ import storageRouter from "./storage";
 import communitiesRouter from "./communities";
 import developerRouter from "./developer";
 import testAccountsRouter from "./test-accounts";
+import communityUpgradesRouter from "./community-upgrades";
 import { requireAuth, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
 import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
@@ -21,6 +22,7 @@ router.use(storageRouter);
 router.use(communitiesRouter);
 router.use(developerRouter);
 router.use(testAccountsRouter);
+router.use(communityUpgradesRouter);
 router.get("/ws-ticket", requireAuth, (req: AuthenticatedRequest, res) => {
   const sessionId = getAuth(req).sessionId;
   if (!sessionId) {

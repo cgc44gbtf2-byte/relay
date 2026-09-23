@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import assert from "node:assert/strict";
-import { after, before, describe, test } from "node:test";
+import { after, before, describe, mock, test } from "node:test";
 import { clerkClient } from "@clerk/express";
 import { WebSocket } from "ws";
 import { pool } from "@workspace/db";
@@ -1002,6 +1002,107 @@ describe("admin access controls", () => {
     const status = await apiRequest(adminSession, "/admin/status");
     assert.equal(status.status, 200, JSON.stringify(status));
     assert.equal((status.body as { isAdmin?: unknown }).isAdmin, true);
+  });
+
+  test("sends one admin DM alert for a pending upgrade without granting a slot", async () => {
+    const getUserMock = mock.method(clerkClient.users, "getUser", async () => ({
+      emailAddresses: [{ emailAddress: "confirmed@example.invalid", verification: { status: "verified" } }],
+    }) as unknown as Awaited<ReturnType<typeof clerkClient.users.getUser>>);
+    let requestId: number | null = null;
+    try {
+      const request = await apiRequest(memberSession, "/community-upgrades/request", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(request.status, 201, JSON.stringify(request));
+      requestId = (request.body as { id: number }).id;
+      const duplicate = await apiRequest(memberSession, "/community-upgrades/request", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(duplicate.status, 200);
+      assert.equal((duplicate.body as { id: number }).id, requestId);
+      const messages = await pool.query<{ body: string }>(
+        "SELECT body FROM irc_messages WHERE sender_id = $1 AND recipient_id = $2 AND body LIKE $3",
+        [memberSession.userId, adminSession.userId, `Public community upgrade #${requestId} pending.%`],
+      );
+      assert.equal(messages.rows.length, 1);
+      assert.match(messages.rows[0].body, /confirmed@example\.invalid/);
+      const alerts = await pool.query(
+        "SELECT id FROM irc_notifications WHERE user_id = $1 AND entity_type = 'community_upgrade_request' AND entity_id = $2",
+        [adminSession.userId, String(requestId)],
+      );
+      assert.equal(alerts.rows.length, 1);
+      const status = await apiRequest(memberSession, "/community-upgrades/status");
+      assert.equal((status.body as { approvedSlots: number }).approvedSlots, 0);
+      assert.equal((await apiRequest(memberSession, "/public-communities", {
+        method: "POST", headers: { "content-type": "application/json" }, body: '{"name":"Too early"}',
+      })).status, 403);
+    } finally {
+      getUserMock.mock.restore();
+      if (requestId !== null) {
+        await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(requestId)]);
+        await pool.query(
+          "DELETE FROM irc_messages WHERE sender_id = $1 AND recipient_id = $2 AND body LIKE $3",
+          [memberSession.userId, adminSession.userId, `Public community upgrade #${requestId} pending.%`],
+        );
+        await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
+      }
+    }
+  });
+
+  test("keeps community upgrade pending until an admin approves and limits creation to one slot", async () => {
+    const post = (session: TestSession, path: string, body: object) => apiRequest(session, path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const seeded = await pool.query<{ id: number }>(
+      `INSERT INTO irc_community_upgrade_requests (user_id, email, display_name, status)
+       VALUES ($1, 'test@example.invalid', 'Test requester', 'pending') RETURNING id`,
+      [memberSession.userId],
+    );
+    const requestId = seeded.rows[0].id;
+    let communityId: number | null = null;
+    try {
+      const status = await apiRequest(memberSession, "/community-upgrades/status");
+      assert.equal(status.status, 200);
+      assert.equal((status.body as { pendingRequest?: { id: number } }).pendingRequest?.id, requestId);
+      assert.equal((status.body as { approvedSlots?: number }).approvedSlots, 0);
+      assert.equal((await post(memberSession, "/public-communities", { name: "Too early" })).status, 403);
+      assert.equal((await post(memberSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "paid-1234" })).status, 403);
+      assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "" })).status, 400);
+      const approved = await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
+        paymentReference: `test-${randomUUID()}`,
+      });
+      assert.equal(approved.status, 200, JSON.stringify(approved));
+      assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
+        paymentReference: `test-${randomUUID()}`,
+      })).status, 409);
+      const attempts = await Promise.all([
+        post(memberSession, "/public-communities", { name: "Extra community A" }),
+        post(memberSession, "/public-communities", { name: "Extra community B" }),
+      ]);
+      assert.deepEqual(attempts.map((response) => response.status).sort(), [201, 403]);
+      communityId = (attempts.find((response) => response.status === 201)?.body as { id: number }).id;
+      const after = await apiRequest(memberSession, "/community-upgrades/status");
+      assert.equal((after.body as { approvedSlots: number; usedSlots: number }).approvedSlots, 1);
+      assert.equal((after.body as { approvedSlots: number; usedSlots: number }).usedSlots, 1);
+    } finally {
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_channel_members WHERE channel_id IN (SELECT id FROM irc_channels WHERE community_id = $1)", [communityId]);
+        await pool.query("DELETE FROM irc_channels WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_categories WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_user_roles WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_community_members WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+      await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(requestId)]);
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'approved_community_upgrade'", [String(requestId)]);
+      await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
+    }
   });
 
   test("records a successful role change in admin activity", async () => {

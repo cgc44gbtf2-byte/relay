@@ -405,7 +405,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   );
   const communityNames = new Map(communities.map((community) => [community.id, community.name]));
   const publicCommunityIds = new Set(communities
-    .filter((community) => !community.isPrivate && community.plan === "free_community")
+    .filter((community) => !community.isPrivate && ["free_community", "purchased_community"].includes(community.plan))
     .map((community) => community.id));
   const membershipIds = new Set(
     memberships.map((membership) => membership.communityId),
@@ -576,7 +576,7 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     ...channel, passwordHash: undefined, joined: true, accessStatus: "member", memberCount: 1,
     communityName: sourceCommunity?.name ?? "Public network",
     canMovePublicSpace: !isPrivate && (communityId === null
-      || (sourceCommunity?.isPrivate === false && sourceCommunity.plan === "free_community")),
+      || (sourceCommunity?.isPrivate === false && ["free_community", "purchased_community"].includes(sourceCommunity.plan))),
   });
 });
 
@@ -1035,13 +1035,13 @@ router.get("/channels/:channelId/public-spaces", requireAuth, async (req: Authen
   }
   const source = channel.communityId === null ? null : (await db.select().from(communitiesTable)
     .where(eq(communitiesTable.id, channel.communityId)))[0];
-  if (channel.isPrivate || (source && (source.isPrivate || source.plan !== "free_community"))) {
+  if (channel.isPrivate || (source && (source.isPrivate || !["free_community", "purchased_community"].includes(source.plan)))) {
     res.status(400).json({ error: "Only channels in public communities or the public network can move between public spaces." });
     return;
   }
   const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name })
     .from(communitiesTable)
-    .where(and(eq(communitiesTable.ownerId, userId), eq(communitiesTable.plan, "free_community"),
+    .where(and(eq(communitiesTable.ownerId, userId), inArray(communitiesTable.plan, ["free_community", "purchased_community"]),
       eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active")));
   res.json(owned.filter((community) => community.id !== channel.communityId));
 });
@@ -1072,12 +1072,12 @@ router.patch("/channels/:channelId/public-space", requireAuth, async (req: Authe
         .orderBy(asc(communitiesTable.id)).for("share")
       : [];
     const source = communities.find((item) => item.id === channel.communityId);
-    if (channel.communityId !== null && (!source || source.isPrivate || source.plan !== "free_community")) {
+    if (channel.communityId !== null && (!source || source.isPrivate || !["free_community", "purchased_community"].includes(source.plan))) {
       return { outcome: "not_public" } as const;
     }
     const destination = communities.find((item) => item.id === destinationId);
     if (!destination || destination.ownerId !== userId
-      || destination.isPrivate || destination.plan !== "free_community" || destination.status !== "active") {
+      || destination.isPrivate || !["free_community", "purchased_community"].includes(destination.plan) || destination.status !== "active") {
       return { outcome: "invalid_destination" } as const;
     }
     const [updated] = await tx.update(channelsTable)

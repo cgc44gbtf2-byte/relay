@@ -370,7 +370,7 @@ router.get("/onboarding", requireAuth, async (req: AuthenticatedRequest, res): P
       .innerJoin(communitiesTable, eq(communitiesTable.id, communityMembersTable.communityId))
       .where(and(
         eq(communityMembersTable.userId, userId),
-        eq(communitiesTable.plan, "free_community"),
+        inArray(communitiesTable.plan, ["free_community", "purchased_community"]),
       ))
       .orderBy(desc(communitiesTable.createdAt)),
   ]);
