@@ -716,7 +716,7 @@ function ChatApp() {
         : await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body, replyToId: replyingTo?.id ?? null }) });
       setReplyingTo(null);
       if (activeDmIdRef.current === dmId && currentChannelIdRef.current === channelId) {
-        room.setMessages((items) => items.some((item) => item.id === sent.id) ? items : [...items, sent]);
+        room.setMessages((items) => upsertMessage(items, sent));
       }
     } catch (error) {
       if (channelId !== null && isMissingChannelError(error)) {
