@@ -11,6 +11,12 @@ Web IRC is a browser-based Internet Relay Chat client for joining rooms, seeing 
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
 
+## Git workflow
+
+- `main` is the stable branch and must remain unchanged during Phase 1 reliability and optimization work.
+- All ongoing changes must be committed to `development`.
+- Merge `development` into `main` only after Phase 1 and the remaining reliability and optimization tasks are complete and verified.
+
 ### Authenticated API regression tests
 
 The admin access regression suite must use a separate disposable PostgreSQL database. In
