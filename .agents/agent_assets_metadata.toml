@@ -28,3 +28,17 @@ mtime_ms = 1790041253154
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/15c819c6-6dbb-4cd8-a2bd-92162dd7fb78/258166e7-8054-45c4-a1a3-5e852e2d1109"
 storage_version_token = "1790041258259310"
 content_type = "image/jpeg"
+
+[[outputs]]
+id = "33Law6TqpNSmDFGopFzZ5"
+uri = "file://attached_assets/relay-technical-product-audit-2026-09-23.md"
+type = "text"
+title = "Relay Technical and Product Audit"
+description = "Read-only audit covering architecture, database, API, authorization, WebSockets, frontend, business functionality, UX, security, performance, testing, dependencies, scalability, and release readiness."
+logical_id = "e9211cc4-9307-4888-a18a-01a5cd3134e1"
+content_hash = "sha256:90e0225934cbd4cb936b36a2b54c12462e91cd51708ae149076aba8e5a774cd4"
+size = 41303
+mtime_ms = 1790130592800
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/e9211cc4-9307-4888-a18a-01a5cd3134e1/e7dba427-ba01-420d-9236-2f1d9a348602"
+storage_version_token = "1790130593379983"
+content_type = "text/markdown"

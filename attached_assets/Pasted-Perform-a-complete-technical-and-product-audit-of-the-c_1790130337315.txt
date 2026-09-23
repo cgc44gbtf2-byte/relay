@@ -1,0 +1,651 @@
+Perform a complete technical and product audit of the current Relay application.
+
+IMPORTANT:
+- DO NOT modify code.
+- DO NOT refactor anything.
+- DO NOT optimize anything.
+- DO NOT create new features.
+- DO NOT delete anything.
+- This is an INFORMATION-GATHERING audit only.
+- Inspect the actual current codebase, database schema, routes, components, configuration, and workflows.
+- Do not assume a feature exists just because documentation says it exists.
+- Clearly distinguish between IMPLEMENTED, PARTIALLY IMPLEMENTED, and DOCUMENTED/BUT-NOT-VERIFIED.
+- Give concrete evidence from the codebase wherever possible.
+
+PRODUCT:
+
+Relay is intended to be a business communication and operations platform.
+
+Current major functionality includes:
+- Business workspaces
+- Employee directory
+- Departments
+- Locations
+- Teams
+- Roles and permissions
+- Channels
+- Direct messaging
+- Real-time WebSockets
+- Tasks
+- Announcements
+- Policies
+- Documents
+- Notifications
+- Business dashboard
+- Activity/audit center
+- Platform administration
+- Developer Studio
+- PostgreSQL persistence
+- Object storage
+
+TECH STACK:
+
+Frontend:
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- Clerk React
+- WebSockets
+- Native Fetch API
+
+Backend:
+- Node.js
+- TypeScript
+- Express
+- Clerk Express
+- WebSocket server
+- REST API
+- Zod
+- Role-based authorization
+
+Database:
+- PostgreSQL
+- Drizzle ORM
+- Drizzle Kit
+
+Infrastructure:
+- Replit
+- Replit Workflows
+- Replit App Storage
+- pnpm monorepo
+
+==================================================
+1. APPLICATION ARCHITECTURE
+==================================================
+
+Document the actual architecture.
+
+Identify:
+
+- Repository structure
+- Applications/packages
+- Frontend entry points
+- Backend entry points
+- Shared packages
+- Database package
+- Authentication architecture
+- API architecture
+- WebSocket architecture
+- File-storage architecture
+- Configuration architecture
+- Environment variable usage
+- Build process
+- Deployment process
+
+Explain how a request flows through the system:
+
+User → Frontend → API → Authorization → Database → Response
+
+And:
+
+User → WebSocket → Authentication → Authorization → Event → Connected clients
+
+Identify architectural weaknesses or areas of technical debt, but do not modify them.
+
+==================================================
+2. DATABASE AUDIT
+==================================================
+
+Inspect the complete PostgreSQL/Drizzle schema.
+
+List all tables/entities and explain their relationships.
+
+Identify:
+
+- Primary keys
+- Foreign keys
+- Unique constraints
+- Indexes
+- Composite indexes
+- Cascading behavior
+- Nullable fields
+- Potentially redundant fields
+- Potentially redundant tables
+- Missing obvious relationships
+- Potentially dangerous relationships
+
+For each major table, estimate whether it can grow rapidly.
+
+Pay particular attention to:
+
+- Users
+- Workspaces
+- Workspace members
+- Employees
+- Departments
+- Locations
+- Teams
+- Channels
+- Channel members
+- Messages
+- Direct messages
+- Tasks
+- Announcements
+- Policies
+- Documents
+- Notifications
+- Audit/activity records
+- Reports
+- Roles
+- Permissions
+
+Identify possible:
+
+- N+1 query risks
+- Unbounded queries
+- Missing indexes
+- Expensive joins
+- Duplicate data
+- Data isolation risks
+
+Do not change the database.
+
+==================================================
+3. API AUDIT
+==================================================
+
+Inventory every API endpoint.
+
+For each endpoint provide:
+
+- HTTP method
+- Route
+- Purpose
+- Authentication requirement
+- Authorization requirement
+- Workspace scope
+- Database operations
+- Pagination
+- Filtering
+- Validation
+- Potential performance concerns
+- Potential security concerns
+
+Identify endpoints that return large or unbounded datasets.
+
+Pay special attention to:
+
+- Workspace details
+- Employee directory
+- Messages
+- Channels
+- Members
+- Tasks
+- Notifications
+- Documents
+- Announcements
+- Audit logs
+- Admin endpoints
+
+Identify duplicate or unnecessary database queries.
+
+==================================================
+4. AUTHENTICATION AND AUTHORIZATION
+==================================================
+
+Audit the actual authorization implementation.
+
+Determine:
+
+- How Clerk authentication is verified
+- Where authentication occurs
+- How users are identified
+- How roles are checked
+- How workspace membership is checked
+- How channel access is checked
+- How custom permissions work
+- How platform-admin permissions work
+- How moderator permissions work
+- How suspended users are handled
+- How private channels are protected
+- How invite-only channels are protected
+
+Look specifically for IDOR/access-control vulnerabilities.
+
+Test conceptually whether changing:
+
+- user IDs
+- workspace IDs
+- channel IDs
+- message IDs
+- task IDs
+- document IDs
+- employee IDs
+
+could allow access to another user's or workspace's data.
+
+Do not exploit anything destructively.
+
+==================================================
+5. WEBSOCKET AUDIT
+==================================================
+
+Inspect the complete WebSocket implementation.
+
+Document:
+
+- Connection flow
+- Authentication
+- Workspace subscriptions
+- Channel subscriptions
+- Message events
+- Presence events
+- Typing events
+- Reaction events
+- Deletion events
+- Notification events
+- Reconnection handling
+- Connection cleanup
+- Error handling
+
+Identify:
+
+- Excessive broadcasts
+- Duplicate events
+- Missing authorization
+- Memory leaks
+- Stale connections
+- Unnecessary presence traffic
+- Unnecessary typing traffic
+- Potential scaling problems
+
+==================================================
+6. FRONTEND AUDIT
+==================================================
+
+Inspect the major React components/pages.
+
+Document:
+
+- Routing
+- State management
+- API communication
+- WebSocket communication
+- Authentication state
+- Permission handling
+- Error handling
+- Loading states
+- Empty states
+- Responsive behavior
+
+Identify components that may have:
+
+- Excessive renders
+- Large data loads
+- Repeated API calls
+- Duplicate state
+- Large lists without pagination/virtualization
+- Unnecessary effects
+- Missing cleanup
+- Complex or duplicated logic
+
+Pay particular attention to:
+
+- Workspace dashboard
+- Employee directory
+- Channel interface
+- Message list
+- Notifications
+- Tasks
+- Announcements
+- Documents
+- Audit center
+- Admin console
+- Developer Studio
+
+==================================================
+7. BUSINESS FUNCTIONALITY AUDIT
+==================================================
+
+Evaluate how complete each business system actually is.
+
+For each feature classify it:
+
+IMPLEMENTED
+PARTIALLY IMPLEMENTED
+DOCUMENTED BUT NOT VERIFIED
+MISSING
+
+Evaluate:
+
+Employee management
+Departments
+Locations
+Teams
+Employee invitations
+Employee status
+Manager relationships
+Workspace roles
+Custom permissions
+Channels
+Tasks
+Announcements
+Policies
+Documents
+Notifications
+Audit center
+Dashboard
+Reports
+Search
+File management
+Moderation
+Workspace management
+
+For each PARTIALLY IMPLEMENTED feature explain what is missing.
+
+==================================================
+8. USER EXPERIENCE AUDIT
+==================================================
+
+Inspect the actual frontend UX.
+
+Evaluate:
+
+- Navigation
+- Information hierarchy
+- Business workspace experience
+- Employee experience
+- Manager experience
+- Workspace admin experience
+- Platform admin experience
+- Mobile responsiveness
+- Desktop responsiveness
+- Loading states
+- Error states
+- Empty states
+- Confirmation flows
+- Destructive actions
+- Accessibility
+- Consistency
+- Discoverability
+
+Do not redesign anything.
+
+Just identify strengths, weaknesses, and inconsistencies.
+
+==================================================
+9. SECURITY AUDIT
+==================================================
+
+Perform a defensive security review.
+
+Inspect:
+
+- Authentication
+- Authorization
+- Input validation
+- Zod schemas
+- File uploads
+- File access
+- API endpoints
+- WebSocket authentication
+- Workspace isolation
+- SQL/ORM usage
+- Secrets handling
+- Environment variables
+- Error responses
+- Rate limiting
+- Abuse controls
+- Administrative operations
+- Audit logging
+
+Identify vulnerabilities and classify them:
+
+CRITICAL
+HIGH
+MEDIUM
+LOW
+INFORMATIONAL
+
+Do not modify anything.
+
+==================================================
+10. PERFORMANCE AUDIT
+==================================================
+
+Inspect actual implementation for performance risks.
+
+Identify:
+
+- Expensive database queries
+- Missing indexes
+- Unbounded queries
+- Large API responses
+- N+1 queries
+- Excessive WebSocket traffic
+- Excessive frontend renders
+- Large bundles
+- Large components
+- Memory leaks
+- Duplicate requests
+- Inefficient serialization
+
+Where possible, provide measurable evidence.
+
+If performance cannot be measured from the current environment, explicitly say so.
+
+Do not invent metrics.
+
+==================================================
+11. TESTING AUDIT
+==================================================
+
+Inventory all tests.
+
+Determine coverage for:
+
+- Authentication
+- Authorization
+- Workspace isolation
+- Channel permissions
+- Employee management
+- Tasks
+- Announcements
+- Documents
+- Notifications
+- WebSockets
+- File access
+- Admin functionality
+- Database operations
+
+Report:
+
+- Existing tests
+- Missing tests
+- Typecheck status
+- Build status
+- Lint status if available
+- Migration status
+- Workflow status
+
+==================================================
+12. DEPENDENCY AUDIT
+==================================================
+
+Inspect package.json files and dependencies.
+
+Identify:
+
+- Major dependencies
+- Development dependencies
+- Unused dependencies
+- Duplicate dependencies
+- Outdated dependencies if version information is available
+- Dependencies with security concerns if known locally
+
+Do not update anything.
+
+==================================================
+13. SCALABILITY AUDIT
+==================================================
+
+Evaluate how Relay would behave as it grows.
+
+Consider hypothetical workspace sizes:
+
+Small:
+25 employees
+
+Medium:
+250 employees
+
+Large:
+2,500 employees
+
+Enterprise:
+25,000+ employees
+
+Evaluate potential scaling bottlenecks involving:
+
+- PostgreSQL
+- API
+- WebSockets
+- Presence
+- Messages
+- Notifications
+- Audit logs
+- Files
+- Search
+- Dashboard queries
+- Admin queries
+
+Do not predict unsupported performance numbers.
+
+Identify architectural bottlenecks instead.
+
+==================================================
+14. RELEASE READINESS
+==================================================
+
+Evaluate the current codebase for Release 1 readiness.
+
+Check:
+
+- Build
+- Typecheck
+- Database
+- Authentication
+- Authorization
+- WebSockets
+- Storage
+- Error handling
+- Security
+- Performance
+- Testing
+- Deployment configuration
+- Environment configuration
+
+Identify anything that should be addressed before Release 1.
+
+==================================================
+15. RELEASE 2 READINESS
+==================================================
+
+After auditing Release 1, identify what technical foundations are already ready for Release 2.
+
+Identify:
+
+- Systems that are mature
+- Systems that need hardening
+- Systems that should be refactored before expansion
+- Potential technical debt
+- Architecture that should remain unchanged
+- Architecture that may need future scaling work
+
+==================================================
+16. PRODUCT POSITIONING
+==================================================
+
+Based ONLY on the actual implementation, describe what Relay currently is.
+
+Do not compare it to competitors yet.
+
+Explain:
+
+- Core product
+- Primary users
+- Main business problem it solves
+- Major workflows supported
+- What makes the product structurally different from a basic chat application
+- What areas are currently strongest
+- What areas are currently weakest
+
+Do not give a marketing rating.
+
+==================================================
+FINAL REPORT
+==================================================
+
+Return a structured report with:
+
+1. Executive Summary
+2. Verified Feature Inventory
+3. Architecture
+4. Database
+5. API
+6. Authentication & Authorization
+7. WebSockets
+8. Frontend
+9. Business Systems
+10. UX
+11. Security Findings
+12. Performance Findings
+13. Testing
+14. Dependencies
+15. Scalability
+16. Release 1 Readiness
+17. Release 2 Readiness
+18. Technical Debt
+19. Missing Capabilities
+20. Recommended Priority Order
+
+For every important finding include:
+
+- Finding
+- Evidence
+- Severity/importance
+- Affected area
+- Why it matters
+- Suggested direction
+
+Do NOT make changes to the application.
+
+At the very end provide a concise:
+
+RELAY AUDIT SNAPSHOT
+
+Architecture:
+Database:
+API:
+WebSockets:
+Frontend:
+Security:
+Performance:
+Testing:
+Scalability:
+Business functionality:
+Release 1 readiness:
+Release 2 readiness:
+
+Again: THIS IS AN AUDIT ONLY. DO NOT MODIFY THE CODEBASE.
