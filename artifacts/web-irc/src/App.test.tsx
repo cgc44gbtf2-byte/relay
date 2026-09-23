@@ -853,6 +853,23 @@ describe("deleted room recovery", () => {
       String(input).match(/^\/api\/messages\/[^/]+$/) && init?.method === "DELETE",
     )).toBe(false);
   });
+
+  it("recovers to another room when the room disappears while sharing a file", async () => {
+    await renderChat({
+      missingRequest: "send",
+      fallbackChannels: [room(2, "#fallback-room")],
+    });
+
+    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+  });
 });
 
 describe("frontend route and document error hardening", () => {
