@@ -4,6 +4,8 @@
 - [Artifact build environment](artifact-build-environment.md) — Vite artifact builds require explicit PORT and BASE_PATH values outside managed workflows.
 - [API cleanup bundling](api-cleanup-bundling.md) — cleanup builds using the pino plugin need an output directory and a separate CLI entry point.
 - [App Storage sidecar](storage-sidecar.md) — use the local signer with normalized object paths when root-level SDK installation is blocked.
+- [Scoped upload authorization](scoped-upload-authorization.md) — workspace-qualified upload URLs must validate the caller against the named resource before signing.
+- [Audit actor deletion](audit-actor-deletion.md) — preserve administrative history by nulling deleted actor references while retaining actor snapshots.
 - [Workspace type declarations](workspace-type-declarations.md) — rebuild referenced library declarations after shared schema changes before checking dependent packages.
 - [Business workspace isolation](business-workspace-isolation.md) — legacy IRC endpoints default global; every business-facing read and interaction needs an explicit workspace check.
 - [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.

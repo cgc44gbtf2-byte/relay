@@ -1594,6 +1594,106 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
+  test("preserves audit history and actor snapshot after the actor account is deleted", async () => {
+    const actorId = `audit_actor_${randomUUID()}`;
+    const username = `audit_actor_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const displayName = "Former Audit Actor";
+    let auditId: number | undefined;
+    try {
+      await pool.query(
+        `INSERT INTO irc_users (clerk_id, username, display_name)
+         VALUES ($1, $2, $3)`,
+        [actorId, username, displayName],
+      );
+      const inserted = await pool.query<{ id: number }>(
+        `INSERT INTO irc_admin_audit_logs
+           (actor_id, actor_display_name, action, target_id, target_label, details)
+         VALUES ($1, $2, 'audit_actor_deleted', 'preserved-target', 'Preserved target', 'Preserved details')
+         RETURNING id`,
+        [actorId, displayName],
+      );
+      auditId = inserted.rows[0]?.id;
+      assert.ok(auditId);
+
+      await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
+
+      const preserved = await pool.query(
+        `SELECT actor_id, actor_display_name, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE id = $1`,
+        [auditId],
+      );
+      assert.deepEqual(preserved.rows, [{
+        actor_id: null,
+        actor_display_name: displayName,
+        action: "audit_actor_deleted",
+        target_id: "preserved-target",
+        target_label: "Preserved target",
+        details: "Preserved details",
+      }]);
+    } finally {
+      if (auditId !== undefined) {
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE id = $1", [auditId]);
+      }
+      await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
+    }
+  });
+
+  test("rejects upload URL claims for another workspace before contacting storage", async () => {
+    const requester = await createTestSession("cross_workspace_upload_requester");
+    const owner = await createTestSession("cross_workspace_upload_owner");
+    let workspaceId: number | undefined;
+    try {
+      await Promise.all([
+        apiRequest(requester, "/me"),
+        apiRequest(owner, "/me"),
+      ]);
+      const workspace = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true)
+         RETURNING id`,
+        [
+          "Protected Upload Workspace",
+          `protected-upload-${randomUUID()}`,
+          owner.userId,
+        ],
+      );
+      workspaceId = workspace.rows[0]?.id;
+      assert.ok(workspaceId);
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, role)
+         VALUES ($1, $2, 'workspace_owner')`,
+        [workspaceId, owner.userId],
+      );
+
+      const response = await apiRequest(
+        requester,
+        "/storage/uploads/request-url",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "private-report.pdf",
+            size: 1024,
+            contentType: "application/pdf",
+            workspaceId,
+            resourceType: "document",
+            resourceId: "new",
+          }),
+        },
+      );
+
+      assert.equal(response.status, 403, JSON.stringify(response));
+      assert.deepEqual(response.body, {
+        error: "You cannot upload files to this workspace resource.",
+      });
+    } finally {
+      if (workspaceId !== undefined) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [workspaceId]);
+      }
+    }
+  });
+
   test("returns 404 without writing audit activity for unknown channel maintenance targets", async () => {
     const unknownChannelId = -1;
     const beforeAudit = await pool.query(

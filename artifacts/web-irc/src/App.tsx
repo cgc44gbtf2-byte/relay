@@ -1927,7 +1927,7 @@ type BusinessDashboardPayload = {
 
 type BusinessActivityEntry = {
   id: number;
-  actorId: string;
+  actorId: string | null;
   actor: string | null;
   action: string;
   departmentId: number | null;

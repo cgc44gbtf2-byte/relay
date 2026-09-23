@@ -940,7 +940,7 @@ router.get("/communities/:communityId/activity", requireAuth, async (req: Authen
     db.select({
       id: adminAuditLogsTable.id,
       actorId: adminAuditLogsTable.actorId,
-      actor: usersTable.displayName,
+      actor: sql<string>`coalesce(${usersTable.displayName}, ${adminAuditLogsTable.actorDisplayName}, 'deleted user')`,
       action: adminAuditLogsTable.action,
       departmentId: adminAuditLogsTable.departmentId,
       locationId: adminAuditLogsTable.locationId,

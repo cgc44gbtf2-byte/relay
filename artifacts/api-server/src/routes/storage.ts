@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { Router, type IRouter } from "express";
+import { and, eq } from "drizzle-orm";
+import {
+  businessDocumentsTable,
+  communityMembersTable,
+  db,
+  serverAnnouncementsTable,
+  workspaceTasksTable,
+} from "@workspace/db";
 import { getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
+import { hasPermission } from "../lib/permissions";
 
 const router: IRouter = Router();
 const SIDECAR_ENDPOINT = "http://127.0.0.1:1106";
@@ -88,6 +97,74 @@ function safePathPart(value: unknown): string | null {
   return /^[a-zA-Z0-9_-]{1,100}$/.test(part) ? part : null;
 }
 
+const scopedUploadResourceTypes = ["document", "task", "announcement"] as const;
+type ScopedUploadResourceType = typeof scopedUploadResourceTypes[number];
+type UploadResourceContext = {
+  workspaceId: number;
+  resourceType: ScopedUploadResourceType;
+  resourceId: number | "new";
+};
+
+export function parseUploadResourceContext(input: {
+  workspaceId?: unknown;
+  resourceType?: unknown;
+  resourceId?: unknown;
+}): UploadResourceContext | null | undefined {
+  const hasAnyContext = input.workspaceId !== undefined
+    || input.resourceType !== undefined
+    || input.resourceId !== undefined;
+  if (!hasAnyContext) return undefined;
+  const workspaceId = Number(input.workspaceId);
+  const resourceType = typeof input.resourceType === "string" ? input.resourceType.trim() : "";
+  const rawResourceId = input.resourceId;
+  const resourceId = rawResourceId === "new" ? "new" : Number(rawResourceId);
+  if (
+    !Number.isSafeInteger(workspaceId)
+    || workspaceId <= 0
+    || !scopedUploadResourceTypes.includes(resourceType as ScopedUploadResourceType)
+    || (resourceId !== "new" && (!Number.isSafeInteger(resourceId) || resourceId <= 0))
+    || (resourceId === "new" && resourceType !== "document")
+  ) return null;
+  return {
+    workspaceId,
+    resourceType: resourceType as ScopedUploadResourceType,
+    resourceId,
+  };
+}
+
+async function canUploadToResource(userId: string, context: UploadResourceContext): Promise<boolean> {
+  if (context.resourceType === "document") {
+    if (!(await hasPermission(userId, "manage_community", { communityId: context.workspaceId }))) return false;
+    if (context.resourceId === "new") return true;
+    const [document] = await db.select({ id: businessDocumentsTable.id }).from(businessDocumentsTable)
+      .where(and(
+        eq(businessDocumentsTable.id, context.resourceId),
+        eq(businessDocumentsTable.communityId, context.workspaceId),
+      ));
+    return Boolean(document);
+  }
+  if (context.resourceId === "new") return false;
+  if (context.resourceType === "task") {
+    const [task] = await db.select({ id: workspaceTasksTable.id }).from(workspaceTasksTable)
+      .innerJoin(communityMembersTable, and(
+        eq(communityMembersTable.communityId, workspaceTasksTable.communityId),
+        eq(communityMembersTable.userId, userId),
+      ))
+      .where(and(
+        eq(workspaceTasksTable.id, context.resourceId),
+        eq(workspaceTasksTable.communityId, context.workspaceId),
+      ));
+    return Boolean(task);
+  }
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
+    .where(and(
+      eq(serverAnnouncementsTable.id, context.resourceId),
+      eq(serverAnnouncementsTable.communityId, context.workspaceId),
+      eq(serverAnnouncementsTable.authorId, userId),
+    ));
+  return Boolean(announcement);
+}
+
 export function uploadObjectPath(input: {
   workspaceId?: unknown;
   resourceType?: unknown;
@@ -119,8 +196,21 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: Authenticat
     res.status(400).json({ error: "Files must have a name and be smaller than 25 MB." });
     return;
   }
+  const context = parseUploadResourceContext(req.body ?? {});
+  if (context === null) {
+    res.status(400).json({ error: "A complete and valid upload resource context is required." });
+    return;
+  }
+  if (context && !(await canUploadToResource(getUserId(req), context))) {
+    res.status(403).json({ error: "You cannot upload files to this workspace resource." });
+    return;
+  }
   try {
-    const objectPath = uploadObjectPath(req.body ?? {});
+    const objectPath = uploadObjectPath(context ? {
+      workspaceId: String(context.workspaceId),
+      resourceType: context.resourceType,
+      resourceId: String(context.resourceId),
+    } : {});
     const uploadURL = await signedObjectUrlForPath(objectPath, "PUT");
     res.json({ uploadURL, objectPath, metadata });
   } catch {

@@ -577,7 +577,7 @@ export const moderationActionsTable = pgTable("irc_moderation_actions", {
 
 export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   id: serial("id").primaryKey(),
-  actorId: text("actor_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  actorId: text("actor_id").references(() => usersTable.clerkId, { onDelete: "set null" }),
   actorDisplayName: text("actor_display_name"),
   communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "set null" }),
   departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
