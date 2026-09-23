@@ -43,7 +43,7 @@ import {
 } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
-import { mergeRefreshedMessages, upsertMessage } from "./message-state";
+import { mergeRefreshedMessages, upsertBoundedMessageGroup, upsertMessage } from "./message-state";
 import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -609,7 +609,7 @@ function ChatApp() {
         connectedSocket.onmessage = (event) => {
         try {
            if (cancelled) return;
-           const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
+           const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
            if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => upsertMessage(items, data.message!));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
@@ -639,10 +639,23 @@ function ChatApp() {
            if (data.type === "reaction" && data.messageId && data.reactions) {
              room.setMessages((items) => items.map((item) => item.id === data.messageId ? { ...item, reactions: data.reactions } : item));
            }
-           if (data.type === "presence" && currentChannelIdRef.current && !activeDmIdRef.current) {
+           if (
+             data.type === "presence"
+             && data.channelId === currentChannelIdRef.current
+             && !activeDmIdRef.current
+           ) {
              api<Member[]>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
-            const presenceUser = "user" in data && data.user ? (data.user as Profile).displayName : "Someone";
-             room.setMessages((items) => [...items, { id: `presence-${Date.now()}`, body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`, kind: "system", createdAt: new Date().toISOString(), sender: null, channelId: currentChannelIdRef.current }]);
+             const presenceUser = data.user?.displayName ?? "Someone";
+             const presenceId = data.eventId
+               ?? `${data.channelId}-${data.user?.id ?? data.userId ?? "unknown"}-${data.action ?? "changed"}`;
+             room.setMessages((items) => upsertBoundedMessageGroup(items, {
+               id: `presence-${presenceId}`,
+               body: `${presenceUser} ${data.action === "join" ? "joined" : "left"} the room`,
+               kind: "system",
+               createdAt: data.occurredAt ?? new Date().toISOString(),
+               sender: null,
+               channelId: currentChannelIdRef.current,
+             }, (message) => message.id.startsWith("presence-"), 20));
           }
         } catch { /* ignore malformed frames */ }
         };
