@@ -499,6 +499,8 @@ function ChatApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [connection, setConnection] = useState("connecting");
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const [bootstrapError, setBootstrapError] = useState("");
   const [channelRefreshError, setChannelRefreshError] = useState("");
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
@@ -568,13 +570,37 @@ function ChatApp() {
   }, [currentChannel?.id, actorRole]);
 
   useEffect(() => {
-    Promise.all([api<Profile>("/me"), api<Channel[]>("/channels"), api<Category[]>("/categories"), api<Notification[]>("/notifications")]).then(([me, list, categoryList, notices]) => {
-      setProfile(me); setChannels(list); setCategories(categoryList); setNotifications(notices);
+    let cancelled = false;
+    setBootstrapError("");
+    Promise.allSettled([
+      api<Profile>("/me"),
+      api<Channel[]>("/channels"),
+      api<Category[]>("/categories"),
+      api<Notification[]>("/notifications"),
+    ]).then(([meResult, channelsResult, categoriesResult, notificationsResult]) => {
+      if (cancelled) return;
+      if (meResult.status === "rejected" || channelsResult.status === "rejected") {
+        setBootstrapError("Relay could not load your workspace.");
+        return;
+      }
+      const me = meResult.value;
+      const list = channelsResult.value;
+      setProfile(me);
+      setChannels(list);
+      setCategories(categoriesResult.status === "fulfilled" ? categoriesResult.value : []);
+      setNotifications(notificationsResult.status === "fulfilled" ? notificationsResult.value : []);
       const first = preferredChannel(list);
       if (first) setCurrentChannelId(first.id);
-      if (first && !first.joined && !first.isPrivate) api(`/channels/${first.id}/join`, { method: "POST", body: "{}" }).then(() => setChannels((items) => items.map((item) => item.id === first.id ? { ...item, joined: true, accessStatus: "member" } : item)));
-    }).catch(() => undefined);
-  }, []);
+      if (first && !first.joined && !first.isPrivate) {
+        api(`/channels/${first.id}/join`, { method: "POST", body: "{}" })
+          .then(() => setChannels((items) => items.map((item) => item.id === first.id ? { ...item, joined: true, accessStatus: "member" } : item)))
+          .catch(() => undefined);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrapAttempt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -881,6 +907,17 @@ function ChatApp() {
     window.alert(`${member.displayName} is now blocked.`);
   };
   const renderChannel = (channel: Channel) => <button key={channel.id} onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)} className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}><span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span><span className="ml-2 text-[10px]">{channel.accessStatus === "pending" ? "…" : channel.memberCount}</span></button>;
+  if (!profile && bootstrapError) {
+    return (
+      <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center font-mono">
+        <p className="text-sm text-muted-foreground">{bootstrapError}</p>
+        <button className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs text-foreground hover:bg-muted" onClick={() => setBootstrapAttempt((attempt) => attempt + 1)}>
+          <RefreshCw className="h-3.5 w-3.5" />
+          retry connection
+        </button>
+      </div>
+    );
+  }
   if (!profile) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">connecting to relay…</div>;
 
   return (

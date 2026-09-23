@@ -100,6 +100,8 @@ function installApi({
   owner = false,
   reconnectedMessages,
   notifications = [],
+  notificationsFailure = false,
+  channelFailureOnce = false,
   uploadFailure = false,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
@@ -115,6 +117,8 @@ function installApi({
     readAt: string | null;
     actionUrl: string | null;
   }>;
+  notificationsFailure?: boolean;
+  channelFailureOnce?: boolean;
   uploadFailure?: boolean;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
@@ -133,7 +137,9 @@ function installApi({
       communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
     });
     if (url === "/api/categories") return jsonResponse([]);
-    if (url === "/api/notifications" && method === "GET") return jsonResponse(notifications);
+    if (url === "/api/notifications" && method === "GET") {
+      return notificationsFailure ? jsonResponse({ error: "notifications unavailable" }, 500) : jsonResponse(notifications);
+    }
     if (url.match(/^\/api\/notifications\/\d+\/read$/) && method === "POST") return jsonResponse({ ok: true });
     if (url === "/api/storage/uploads/request-url" && method === "POST") {
       return jsonResponse({
@@ -147,7 +153,9 @@ function installApi({
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
-      return jsonResponse(channelListCalls === 1 ? [deleted, fallback] : fallbackChannels);
+      if (channelFailureOnce && channelListCalls === 1) return jsonResponse({ error: "channels unavailable" }, 500);
+      const initialCall = channelFailureOnce ? 2 : 1;
+      return jsonResponse(channelListCalls === initialCall ? [deleted, fallback] : fallbackChannels);
     }
     if (url === "/api/channels/1/messages" && method === "GET") {
       historyCalls += 1;
@@ -236,6 +244,32 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(screen.queryByText("stale history")).toBeNull());
     await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
     expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+  });
+
+  it("loads chat when notifications are temporarily unavailable", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notificationsFailure: true,
+    });
+
+    expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+    expect(screen.getByText("stale history")).toBeTruthy();
+  });
+
+  it("shows a retry state when core channel bootstrap fails", async () => {
+    installApi({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      channelFailureOnce: true,
+    });
+    window.history.pushState({}, "", "/chat");
+    render(<App />);
+
+    const retry = await screen.findByRole("button", { name: "retry connection" });
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
   });
 
   it.each([
