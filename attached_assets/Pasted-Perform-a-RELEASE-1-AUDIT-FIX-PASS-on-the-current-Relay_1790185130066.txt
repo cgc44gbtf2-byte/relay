@@ -1,0 +1,712 @@
+Perform a RELEASE 1 AUDIT FIX PASS on the current Relay application.
+
+IMPORTANT:
+- Fix the verified findings from the completed technical/product audit.
+- Do NOT add new product features.
+- Do NOT redesign the UI.
+- Do NOT perform a broad architectural rewrite.
+- Preserve all existing Relay functionality.
+- Preserve existing API behavior wherever possible.
+- Preserve Clerk authentication.
+- Preserve PostgreSQL/Drizzle.
+- Preserve WebSocket functionality.
+- Preserve workspace/business isolation.
+- Make changes incrementally.
+- Test after each major group of changes.
+- Do not weaken an authorization check to make a test pass.
+- Do not remove existing security controls.
+- Do not silently change permission behavior.
+- Do not claim a fix is complete until it has been verified.
+
+PRIMARY OBJECTIVE:
+
+Move Relay from the current audited state toward Release 1 production readiness by addressing the HIGH and important MEDIUM findings identified in the audit.
+
+Priority order:
+
+P0 — Security and tenant isolation
+P1 — Release safety and database integrity
+P2 — Performance and reliability
+P3 — Maintainability and UX hardening
+
+==================================================
+P0 — TENANT ISOLATION AND AUTHORIZATION
+==================================================
+
+This is the highest priority.
+
+Audit every endpoint that accepts:
+
+- communityId
+- workspaceId
+- channelId
+- messageId
+- taskId
+- documentId
+- documentVersionId
+- employeeId
+- memberId
+- categoryId
+- teamId
+- departmentId
+- locationId
+- invitationId
+- attachmentId
+- role assignment IDs
+- user IDs
+
+For every resource lookup, verify the complete ownership/access chain.
+
+Example:
+
+User
+→ Workspace membership
+→ Channel
+→ Message
+→ Attachment
+
+A user must not be able to access the final resource merely because they know its ID.
+
+Implement centralized parent-scoped authorization helpers where practical.
+
+Prefer:
+
+SELECT resource
+WHERE resource.id = requestedId
+AND resource.workspaceId = authorizedWorkspaceId
+
+or an equivalent Drizzle query.
+
+Do NOT:
+
+1. Fetch a global resource.
+2. Check only its ID.
+3. Perform authorization later in application code.
+
+Avoid broad database reads followed by in-memory filtering.
+
+Pay special attention to:
+
+- Messages
+- Channels
+- Attachments
+- Tasks
+- Documents
+- Document versions
+- Employees
+- Teams
+- Departments
+- Locations
+- Invitations
+- Categories
+- Role assignments
+- Announcements
+- Policies
+
+Add negative authorization tests proving that users from Workspace A cannot access or mutate resources belonging to Workspace B.
+
+Test both:
+
+- Read access
+- Write/mutation access
+
+Also test IDs belonging to valid resources in another workspace.
+
+==================================================
+P0 — WEBSOCKET SECURITY FIX
+==================================================
+
+Fix the identified channel deletion broadcast vulnerability.
+
+Current issue:
+
+Channel deletion events can be broadcast to every connected WebSocket client.
+
+Change this so channel deletion events are only sent to clients that were authorized subscribers of the affected channel or otherwise explicitly authorized recipients.
+
+Do NOT broadcast deleted channel IDs globally.
+
+Verify:
+
+- Workspace A users do not receive Workspace B channel deletion events.
+- Users not subscribed to the affected private channel do not receive the event.
+- Authorized subscribers still receive the appropriate event.
+- Existing channel deletion behavior continues working.
+
+Also audit ALL WebSocket events for the same class of problem.
+
+Check:
+
+- message
+- message deletion
+- reaction
+- typing
+- presence
+- channel
+- join
+- moderation
+- notification
+- announcement
+- task
+- workspace events
+
+Every event must be scoped to the correct:
+
+- User
+- Workspace
+- Channel
+- Conversation
+
+Do not rely only on the client to hide unauthorized events.
+
+==================================================
+P0 — CORS SECURITY
+==================================================
+
+Fix credentialed CORS.
+
+Do NOT reflect arbitrary origins while allowing credentials.
+
+Implement an explicit trusted-origin configuration.
+
+Support separate development and production origins.
+
+For example, use an environment variable such as:
+
+TRUSTED_ORIGINS
+
+or an equivalent configuration already appropriate for Relay.
+
+Requirements:
+
+- Known development origin works.
+- Known production origin works.
+- Unknown origins are rejected.
+- Credentials remain supported where required.
+- Do not hard-code secrets.
+- Do not allow wildcard origins with credentials.
+
+Document the configuration.
+
+==================================================
+P1 — DATABASE TENANT INTEGRITY
+==================================================
+
+Audit the Drizzle schema for weak relationships identified in the audit.
+
+Pay particular attention to:
+
+- userRoles.categoryId
+- channels.categoryId
+- documentFolders.parentId
+- messages.replyToId
+- rolePermissions.role
+- workspace-scoped relationships
+- task relationships
+- document relationships
+- employee organization relationships
+
+Where appropriate, add proper foreign keys.
+
+For relationships that require tenant scoping, use appropriate composite constraints or equivalent database-level protections.
+
+Do not blindly add foreign keys where application behavior intentionally allows nullable/deferred relationships.
+
+Review:
+
+- ON DELETE CASCADE
+- ON DELETE SET NULL
+- ON DELETE RESTRICT
+
+for every important business relationship.
+
+Do not allow deletion behavior to accidentally destroy business records.
+
+==================================================
+P1 — AUDIT HISTORY PRESERVATION
+==================================================
+
+The audit identified that adminAuditLogs.actorId can cascade when an account is deleted.
+
+Fix this.
+
+Historical audit records should remain useful even if the actor's account is later deleted.
+
+Prefer preserving:
+
+- actor ID where possible
+- actor display/name snapshot where appropriate
+- action
+- timestamp
+- target
+- workspace
+- metadata
+
+Do not make audit history disappear simply because a user account is deleted.
+
+Verify existing audit functionality continues working.
+
+==================================================
+P1 — ROLE AND PERMISSION INTEGRITY
+==================================================
+
+Audit custom roles and user role assignments.
+
+Ensure:
+
+- Roles cannot reference invalid scopes.
+- Workspace roles cannot accidentally apply to another workspace.
+- Category/channel scopes belong to the same workspace.
+- Platform roles cannot be created through workspace-level operations.
+- Workspace administrators cannot escalate themselves to platform administrators.
+- Users cannot assign permissions they themselves do not possess.
+- Role deletion does not leave invalid assignments.
+- Invalid scope combinations are rejected server-side.
+
+Add negative tests for privilege escalation.
+
+Test:
+
+Member
+→ cannot become Workspace Admin
+
+Workspace Admin
+→ cannot become Platform Admin
+
+Workspace Admin
+→ cannot modify another workspace
+
+Channel moderator
+→ cannot modify unrelated channels
+
+User
+→ cannot assign themselves elevated permissions
+
+==================================================
+P1 — VERSIONED DATABASE MIGRATIONS
+==================================================
+
+The audit found that Relay currently relies on Drizzle push without a versioned migration chain.
+
+Establish a proper versioned Drizzle migration workflow.
+
+Requirements:
+
+- Existing schema must be preserved.
+- Generate migrations from the current schema.
+- Do not destroy existing data.
+- Migrations must be deterministic.
+- Production deployment must be able to apply migrations in order.
+- Document how migrations are generated.
+- Document how migrations are applied.
+- Document rollback/recovery procedures.
+
+Do NOT simply recreate the database.
+
+Before applying anything destructive, stop and inspect the migration.
+
+Verify the resulting schema matches the intended schema.
+
+==================================================
+P1 — DATABASE INDEXES
+==================================================
+
+Review actual query patterns and add only justified indexes.
+
+Prioritize:
+
+- notifications(userId, readAt, createdAt)
+- task assignments/status/due date
+- channel join requests(channelId, status)
+- invitation status/expiry
+- employee user/department/location lookups
+- team membership user lookups
+- policy acknowledgments by user
+- document acknowledgments by user
+- document permissions by user
+- moderation activity by workspace/channel/date
+- audit activity by workspace/date
+- audit activity by actor/action/date
+- message/channel retrieval patterns
+- reverse foreign-key lookup patterns
+
+Do NOT add indexes blindly.
+
+Avoid duplicate or redundant indexes.
+
+Verify indexes against actual query patterns.
+
+==================================================
+P1 — PAGINATION AND UNBOUNDED QUERIES
+==================================================
+
+Find every potentially unbounded collection query.
+
+Prioritize:
+
+- Messages
+- Members
+- Employees
+- Channels
+- Categories
+- Notifications
+- Tasks
+- Documents
+- Announcements
+- Audit logs
+- Moderation logs
+- Invitations
+- Search results
+- Admin lists
+
+Implement safe server-side pagination where missing.
+
+Requirements:
+
+- Reasonable default page size.
+- Maximum page size.
+- Stable ordering.
+- No unlimited client-controlled limits.
+- Correct total/count behavior where required.
+- Preserve existing frontend behavior.
+
+Do not load entire tables into memory.
+
+==================================================
+P2 — QUERY OPTIMIZATION
+==================================================
+
+Replace broad reads followed by JavaScript authorization filtering with database-scoped queries wherever possible.
+
+Audit for:
+
+- N+1 queries
+- Repeated permission lookups
+- Repeated workspace lookups
+- Repeated channel lookups
+- Repeated user lookups
+- Repeated notification checks
+- Repeated task queries
+- Repeated document queries
+
+Use joins or batched queries where appropriate.
+
+Do not sacrifice authorization correctness for query performance.
+
+Use EXPLAIN/EXPLAIN ANALYZE when available.
+
+Document meaningful query improvements.
+
+==================================================
+P2 — WEBSOCKET RELIABILITY
+==================================================
+
+Fix the following audit findings:
+
+1. Expired ticket cleanup
+2. Multi-socket presence correctness
+3. Subscription cleanup
+4. Stale connection cleanup
+5. Event scoping
+6. Event ordering where needed
+
+For presence:
+
+A user should remain online while at least one valid connection remains.
+
+Do not mark a user offline merely because one of several browser/device connections closes.
+
+For tickets:
+
+Ensure expired unused tickets are periodically cleaned up or otherwise bounded.
+
+Do not allow unbounded in-memory growth.
+
+For connections:
+
+Ensure all intervals, subscriptions and listeners are cleaned up.
+
+==================================================
+P2 — STORAGE SECURITY
+==================================================
+
+Audit file upload and download authorization.
+
+Verify:
+
+- Upload URLs cannot be abused across workspaces.
+- Object paths are workspace/resource scoped.
+- Private documents require authorization.
+- Attachments cannot be accessed by changing an attachment ID.
+- Document downloads verify document/workspace/user access.
+- File metadata cannot be used to bypass permissions.
+- File size/type limits are enforced.
+- Upload endpoints have reasonable abuse controls.
+
+Test cross-workspace access.
+
+==================================================
+P2 — API VALIDATION
+==================================================
+
+Audit request validation.
+
+Where appropriate, use existing Zod infrastructure.
+
+Validate:
+
+- IDs
+- Pagination
+- Search
+- Strings
+- Enum values
+- File metadata
+- Dates
+- Status values
+- Role names
+- Permission scopes
+- Workspace identifiers
+
+Reject malformed or excessive values server-side.
+
+Do not rely on frontend validation.
+
+==================================================
+P2 — ABUSE CONTROLS
+==================================================
+
+Review rate limiting/abuse protection for:
+
+- Login-related operations handled by Clerk
+- Search
+- Channel joining
+- Invitations
+- Password-protected channel attempts
+- WebSocket ticket generation
+- File upload URL generation
+- Messages
+- DMs
+- Notifications
+- Administrative actions
+
+Do not introduce aggressive limits that interfere with normal business use.
+
+Use reasonable per-user/per-IP/per-resource controls where appropriate.
+
+==================================================
+P2 — DATA RETENTION
+==================================================
+
+Do not automatically delete existing data.
+
+Instead, establish a documented retention strategy for:
+
+- Messages
+- Notifications
+- Audit logs
+- Moderation actions
+- Document downloads
+- Announcement receipts
+- Task comments
+
+Identify which records should:
+
+- remain indefinitely
+- be archived
+- eventually expire
+
+For high-growth tables, document future partition/archive requirements.
+
+If implementing retention is not necessary for Release 1, document it as technical debt rather than adding destructive behavior.
+
+==================================================
+P2 — CI AND RELEASE SAFETY
+==================================================
+
+Strengthen CI.
+
+The release pipeline should verify:
+
+- TypeScript
+- API tests
+- Web tests
+- API build
+- Web build
+- Database/schema validation
+- Migration validation
+- Security checks where available
+
+Ensure frontend tests and builds are not accidentally omitted.
+
+Do not require a production database for ordinary unit tests.
+
+Where database integration tests require TEST_DATABASE_URL, fail clearly rather than silently skipping.
+
+Add a release validation command if appropriate.
+
+==================================================
+P3 — FRONTEND HARDENING
+==================================================
+
+Do NOT perform a major frontend rewrite.
+
+Make only safe structural improvements where appropriate.
+
+Prioritize:
+
+- Large list handling
+- Search debounce
+- Request cancellation
+- WebSocket cleanup
+- Error state consistency
+- Accessibility labels
+- Icon button labels
+- Focus management
+- Live regions for important errors
+- Better 404 handling
+- Avoiding empty-state masking of actual API failures
+
+Do not change the visual identity of Relay.
+
+Do not redesign the interface.
+
+==================================================
+P3 — CODE QUALITY
+==================================================
+
+Clean up only issues encountered during the audit fixes.
+
+Do not perform a massive refactor.
+
+Avoid unnecessary changes to:
+
+- App.tsx
+- routing
+- shared components
+- API contracts
+
+unless required for a security, correctness, or reliability fix.
+
+Remove only verified dead code.
+
+Do not remove code simply because it is not referenced in one location.
+
+==================================================
+TESTING REQUIREMENTS
+==================================================
+
+After fixes, create or expand tests for:
+
+AUTHORIZATION:
+
+1. Workspace A cannot read Workspace B resources.
+2. Workspace A cannot modify Workspace B resources.
+3. User cannot access private channels without access.
+4. User cannot access private documents without access.
+5. User cannot modify another workspace's tasks.
+6. User cannot modify another workspace's employees.
+7. User cannot modify another workspace's announcements.
+8. User cannot manipulate role scopes across workspaces.
+9. Workspace Admin cannot become Platform Admin.
+10. Members cannot elevate their own permissions.
+
+WEBSOCKETS:
+
+11. Channel deletion only reaches authorized clients.
+12. Private-channel events remain private.
+13. Workspace events remain workspace-scoped.
+14. Multiple connections correctly maintain presence.
+15. Expired tickets are rejected and cleaned up.
+16. Disconnected sockets are cleaned up.
+
+STORAGE:
+
+17. Cross-workspace attachment access fails.
+18. Cross-workspace document download fails.
+19. Unauthorized upload operations fail.
+
+DATABASE:
+
+20. Foreign-key relationships behave correctly.
+21. Audit records survive actor deletion where intended.
+22. Migration creates the expected schema.
+23. Existing data remains intact.
+
+PAGINATION:
+
+24. Large collections are bounded.
+25. Maximum page size is enforced.
+26. Pagination ordering is stable.
+
+CI:
+
+27. Web typecheck passes.
+28. API typecheck passes.
+29. Web tests pass.
+30. API tests pass.
+31. Production build passes.
+32. Database validation passes.
+
+==================================================
+VERIFICATION
+==================================================
+
+After implementation:
+
+1. Run typechecks.
+2. Run web tests.
+3. Run API tests.
+4. Run security/static analysis if available.
+5. Run database/schema validation.
+6. Verify migrations.
+7. Build frontend.
+8. Build API.
+9. Restart workflows.
+10. Check logs for errors.
+11. Verify WebSocket functionality.
+12. Verify authentication.
+13. Verify workspace isolation.
+14. Verify private channels.
+15. Verify file access.
+16. Verify admin permissions.
+
+Do not claim success based only on compilation.
+
+==================================================
+FINAL REPORT
+==================================================
+
+At completion, provide:
+
+RELEASE 1 AUDIT FIX REPORT
+
+1. HIGH issues fixed
+2. MEDIUM issues fixed
+3. Database changes
+4. Authorization changes
+5. WebSocket changes
+6. API changes
+7. Storage/security changes
+8. CI/release changes
+9. Tests added
+10. Tests passed
+11. Build status
+12. Migration status
+13. Remaining technical debt
+14. Issues intentionally not fixed and why
+
+For every fix provide:
+
+- Original issue
+- Change made
+- Files/components affected
+- Verification performed
+- Remaining risk, if any
+
+IMPORTANT:
+
+Do not begin Release 2 feature development.
+
+This task is exclusively for fixing the existing audit findings and preparing Relay's current functionality for a safer Release 1.
+
+If a proposed fix could cause data loss, break an existing API contract, invalidate existing permissions, or require destructive database changes, STOP and report the issue before proceeding.
