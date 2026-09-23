@@ -505,6 +505,7 @@ function ChatApp() {
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
   const channelRefreshRef = useRef<Promise<Channel[]> | null>(null);
+  const userSearchRequestRef = useRef(0);
   const profileRef = useRef<Profile | null>(profile);
   currentChannelIdRef.current = currentChannelId;
   activeDmIdRef.current = activeDm?.id ?? null;
@@ -713,11 +714,27 @@ function ChatApp() {
   }, [currentChannelId, activeDm]);
 
   useEffect(() => {
+    const requestId = ++userSearchRequestRef.current;
+    const query = userSearch.trim();
+    if (query.length < 2) {
+      setUserResults([]);
+      return () => {
+        if (userSearchRequestRef.current === requestId) userSearchRequestRef.current += 1;
+      };
+    }
     const timer = window.setTimeout(() => {
-      if (userSearch.trim().length >= 2) api<Profile[]>(`/users/search?q=${encodeURIComponent(userSearch)}`).then(setUserResults).catch(() => setUserResults([]));
-      else setUserResults([]);
+      api<Profile[]>(`/users/search?q=${encodeURIComponent(query)}`)
+        .then((results) => {
+          if (userSearchRequestRef.current === requestId) setUserResults(results);
+        })
+        .catch(() => {
+          if (userSearchRequestRef.current === requestId) setUserResults([]);
+        });
     }, 250);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (userSearchRequestRef.current === requestId) userSearchRequestRef.current += 1;
+    };
   }, [userSearch]);
 
   const visibleChannels = useMemo(() => channels.filter((channel) => channel.name.includes(filter.toLowerCase())), [channels, filter]);
