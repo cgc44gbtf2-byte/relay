@@ -1,0 +1,618 @@
+# Third-party licenses
+
+**Snapshot date:** 2026-09-22  
+**Source:** installed package metadata and package license files, cross-checked
+with `pnpm licenses list --json`.
+
+This document separates what was verified from what remains unresolved. A
+package with an unknown license is not classified as proprietary, permissive,
+or copyleft.
+
+## License distribution
+
+- **0BSD:** 1
+- **Apache-2.0:** 12
+- **BlueOak-1.0.0:** 2
+- **BSD-2-Clause:** 5
+- **BSD-3-Clause:** 7
+- **CC-BY-4.0:** 1
+- **CC0-1.0:** 1
+- **ISC:** 33
+- **MIT:** 485
+- **MIT AND ISC:** 1
+- **MIT-0:** 2
+- **MPL-2.0:** 2
+- **Python-2.0:** 1
+- **Unknown:** 6
+- **Unlicense:** 2
+
+## Permissive licenses
+
+The installed graph contains packages reporting MIT, MIT-0, Apache-2.0,
+BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, BlueOak-1.0.0, Python-2.0, CC0-1.0,
+Unlicense, CC-BY-4.0, and MIT AND ISC. Their exact package/version rows and
+evidence are in [DEPENDENCY-INVENTORY.md](./DEPENDENCY-INVENTORY.md).
+Permissive does not mean obligation-free: copyright, license, notice, or
+attribution requirements still apply where the license text requires them.
+
+## Copyleft licenses
+
+- `lightningcss@1.32.0` — MPL-2.0; package.json license field
+- `lightningcss-linux-x64-gnu@1.32.0` — MPL-2.0; package.json license field
+
+## Unknown or unverified licenses
+
+- `@replit/connectors-sdk@0.4.3` — no license field or license file found in installed package; no license conclusion is made.
+- `@replit/vite-plugin-cartographer@0.5.21` — no license field or license file found in installed package; no license conclusion is made.
+- `@replit/vite-plugin-dev-banner@0.1.2` — no license field or license file found in installed package; no license conclusion is made.
+- `@replit/vite-plugin-runtime-error-modal@0.0.6` — no license field or license file found in installed package; no license conclusion is made.
+
+### Graph-only optional packages
+
+- `@tailwindcss/oxide-wasm32-wasi@4.3.3` — package appears in the dependency graph but is not installed on the current platform; it is not installed on the current platform, so its license must be verified before building for a platform that selects it.
+- `fsevents@2.3.3` — package appears in the dependency graph but is not installed on the current platform; it is not installed on the current platform, so its license must be verified before building for a platform that selects it.
+
+## Proprietary or commercial dependencies
+
+No installed package reported a proprietary or commercial license in the
+available metadata. Unknown packages are not placed in this category. External
+services and account terms are outside this npm package scan and require their
+own contract review.
+
+## Attribution and notice obligations
+
+- `@asamuzakjp/css-color@7.0.0` — MIT; preserve copyright and license notices
+- `@asamuzakjp/dom-selector@9.2.1` — MIT; preserve copyright and license notices
+- `@babel/code-frame@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/compat-data@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/core@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/generator@7.29.8` — MIT; preserve copyright and license notices
+- `@babel/helper-compilation-targets@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-globals@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-module-imports@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-module-transforms@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-plugin-utils@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-string-parser@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-validator-identifier@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helper-validator-option@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/helpers@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/parser@7.29.8` — MIT; preserve copyright and license notices
+- `@babel/plugin-transform-react-jsx-self@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/plugin-transform-react-jsx-source@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/runtime@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/template@7.29.7` — MIT; preserve copyright and license notices
+- `@babel/traverse@7.29.8` — MIT; preserve copyright and license notices
+- `@babel/types@7.29.8` — MIT; preserve copyright and license notices
+- `@bramus/specificity@2.4.2` — MIT; preserve copyright and license notices
+- `@clerk/backend@3.18.1` — MIT; preserve copyright and license notices
+- `@clerk/express@2.1.69` — MIT; preserve copyright and license notices
+- `@clerk/react@6.16.1` — MIT; preserve copyright and license notices
+- `@clerk/shared@3.48.0` — MIT; preserve copyright and license notices
+- `@clerk/shared@4.33.0` — MIT; preserve copyright and license notices
+- `@clerk/themes@2.4.57` — MIT; preserve copyright and license notices
+- `@commander-js/extra-typings@15.0.0` — MIT; preserve copyright and license notices
+- `@csstools/color-helpers@6.1.1` — MIT-0; preserve copyright and license notices
+- `@csstools/css-calc@3.4.0` — MIT; preserve copyright and license notices
+- `@csstools/css-color-parser@4.2.3` — MIT; preserve copyright and license notices
+- `@csstools/css-parser-algorithms@4.0.0` — MIT; preserve copyright and license notices
+- `@csstools/css-syntax-patches-for-csstree@1.1.14` — MIT-0; preserve copyright and license notices
+- `@csstools/css-tokenizer@4.0.1` — MIT; preserve copyright and license notices
+- `@date-fns/tz@1.5.0` — MIT; preserve copyright and license notices
+- `@drizzle-team/brocli@0.10.2` — Apache-2.0; preserve copyright and license notices
+- `@esbuild-kit/esm-loader@4.23.13` — MIT; preserve copyright and license notices
+- `@esbuild/linux-x64@0.28.2` — MIT; preserve copyright and license notices
+- `@exodus/bytes@1.15.1` — MIT; preserve copyright and license notices
+- `@floating-ui/core@1.8.0` — MIT; preserve copyright and license notices
+- `@floating-ui/dom@1.8.0` — MIT; preserve copyright and license notices
+- `@floating-ui/react-dom@2.1.9` — MIT; preserve copyright and license notices
+- `@floating-ui/utils@0.2.12` — MIT; preserve copyright and license notices
+- `@gerrit0/mini-shiki@3.23.0` — MIT; preserve copyright and license notices
+- `@hookform/resolvers@3.10.0` — MIT; preserve copyright and license notices
+- `@jridgewell/gen-mapping@0.3.13` — MIT; preserve copyright and license notices
+- `@jridgewell/remapping@2.3.5` — MIT; preserve copyright and license notices
+- `@jridgewell/resolve-uri@3.1.2` — MIT; preserve copyright and license notices
+- `@jridgewell/sourcemap-codec@1.6.0` — MIT; preserve copyright and license notices
+- `@jridgewell/trace-mapping@0.3.31` — MIT; preserve copyright and license notices
+- `@napi-rs/lzma-linux-x64-gnu@1.5.1` — MIT; preserve copyright and license notices
+- `@nodelib/fs.scandir@2.1.5` — MIT; preserve copyright and license notices
+- `@nodelib/fs.stat@2.0.5` — MIT; preserve copyright and license notices
+- `@nodelib/fs.walk@1.2.8` — MIT; preserve copyright and license notices
+- `@orval/angular@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/axios@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/core@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/effect@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/fetch@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/hono@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/mcp@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/mock@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/query@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/solid-start@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/swr@8.30.0` — MIT; preserve copyright and license notices
+- `@orval/zod@8.30.0` — MIT; preserve copyright and license notices
+- `@pinojs/redact@0.4.0` — MIT; preserve copyright and license notices
+- `@radix-ui/number@1.1.3` — MIT; preserve copyright and license notices
+- `@radix-ui/primitive@1.1.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-accordion@1.2.20` — MIT; preserve copyright and license notices
+- `@radix-ui/react-alert-dialog@1.1.23` — MIT; preserve copyright and license notices
+- `@radix-ui/react-arrow@1.1.15` — MIT; preserve copyright and license notices
+- `@radix-ui/react-aspect-ratio@1.1.15` — MIT; preserve copyright and license notices
+- `@radix-ui/react-avatar@1.2.6` — MIT; preserve copyright and license notices
+- `@radix-ui/react-checkbox@1.3.11` — MIT; preserve copyright and license notices
+- `@radix-ui/react-collapsible@1.1.20` — MIT; preserve copyright and license notices
+- `@radix-ui/react-collection@1.1.15` — MIT; preserve copyright and license notices
+- `@radix-ui/react-compose-refs@1.1.5` — MIT; preserve copyright and license notices
+- `@radix-ui/react-context@1.2.2` — MIT; preserve copyright and license notices
+- `@radix-ui/react-context-menu@2.3.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-dialog@1.1.23` — MIT; preserve copyright and license notices
+- `@radix-ui/react-direction@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-dismissable-layer@1.1.19` — MIT; preserve copyright and license notices
+- `@radix-ui/react-dropdown-menu@2.1.24` — MIT; preserve copyright and license notices
+- `@radix-ui/react-focus-guards@1.1.6` — MIT; preserve copyright and license notices
+- `@radix-ui/react-focus-scope@1.1.16` — MIT; preserve copyright and license notices
+- `@radix-ui/react-hover-card@1.1.23` — MIT; preserve copyright and license notices
+- `@radix-ui/react-id@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-label@2.1.15` — MIT; preserve copyright and license notices
+- `@radix-ui/react-menu@2.1.24` — MIT; preserve copyright and license notices
+- `@radix-ui/react-menubar@1.1.24` — MIT; preserve copyright and license notices
+- `@radix-ui/react-navigation-menu@1.2.22` — MIT; preserve copyright and license notices
+- `@radix-ui/react-popover@1.1.23` — MIT; preserve copyright and license notices
+- `@radix-ui/react-popper@1.3.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-portal@1.1.17` — MIT; preserve copyright and license notices
+- `@radix-ui/react-presence@1.1.10` — MIT; preserve copyright and license notices
+- `@radix-ui/react-primitive@2.1.10` — MIT; preserve copyright and license notices
+- `@radix-ui/react-progress@1.1.16` — MIT; preserve copyright and license notices
+- `@radix-ui/react-radio-group@1.4.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-roving-focus@1.1.19` — MIT; preserve copyright and license notices
+- `@radix-ui/react-scroll-area@1.2.18` — MIT; preserve copyright and license notices
+- `@radix-ui/react-select@2.3.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-separator@1.1.15` — MIT; preserve copyright and license notices
+- `@radix-ui/react-slider@1.4.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-slot@1.3.3` — MIT; preserve copyright and license notices
+- `@radix-ui/react-switch@1.3.7` — MIT; preserve copyright and license notices
+- `@radix-ui/react-tabs@1.1.21` — MIT; preserve copyright and license notices
+- `@radix-ui/react-toast@1.2.23` — MIT; preserve copyright and license notices
+- `@radix-ui/react-toggle@1.1.18` — MIT; preserve copyright and license notices
+- `@radix-ui/react-toggle-group@1.1.19` — MIT; preserve copyright and license notices
+- `@radix-ui/react-tooltip@1.2.16` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-callback-ref@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-controllable-state@1.2.6` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-effect-event@0.0.5` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-is-hydrated@0.1.3` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-layout-effect@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-previous@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-rect@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-use-size@1.1.4` — MIT; preserve copyright and license notices
+- `@radix-ui/react-visually-hidden@1.2.11` — MIT; preserve copyright and license notices
+- `@radix-ui/rect@1.1.3` — MIT; preserve copyright and license notices
+- `@rolldown/pluginutils@1.0.0-rc.3` — MIT; preserve copyright and license notices
+- `@rollup/rollup-linux-x64-gnu@4.63.1` — MIT; preserve copyright and license notices
+- `@scalar/helpers@0.10.0` — MIT; preserve copyright and license notices
+- `@scalar/helpers@0.11.1` — MIT; preserve copyright and license notices
+- `@scalar/json-magic@0.12.20` — MIT; preserve copyright and license notices
+- `@scalar/json-magic@0.13.2` — MIT; preserve copyright and license notices
+- `@scalar/openapi-parser@0.28.16` — MIT; preserve copyright and license notices
+- `@scalar/openapi-types@0.9.4` — MIT; preserve copyright and license notices
+- `@scalar/openapi-types@0.9.5` — MIT; preserve copyright and license notices
+- `@scalar/openapi-upgrader@0.2.15` — MIT; preserve copyright and license notices
+- `@sec-ant/readable-stream@0.4.1` — MIT; preserve copyright and license notices
+- `@shikijs/engine-oniguruma@3.23.0` — MIT; preserve copyright and license notices
+- `@shikijs/langs@3.23.0` — MIT; preserve copyright and license notices
+- `@shikijs/themes@3.23.0` — MIT; preserve copyright and license notices
+- `@shikijs/types@3.23.0` — MIT; preserve copyright and license notices
+- `@shikijs/vscode-textmate@10.0.2` — MIT; preserve copyright and license notices
+- `@sindresorhus/merge-streams@4.0.0` — MIT; preserve copyright and license notices
+- `@stablelib/base64@1.0.1` — MIT; preserve copyright and license notices
+- `@tabby_ai/hijri-converter@1.0.5` — MIT; preserve copyright and license notices
+- `@tailwindcss/node@4.3.3` — MIT; preserve copyright and license notices
+- `@tailwindcss/oxide@4.3.3` — MIT; preserve copyright and license notices
+- `@tailwindcss/oxide-linux-x64-gnu@4.3.3` — MIT; preserve copyright and license notices
+- `@tailwindcss/typography@0.5.20` — MIT; preserve copyright and license notices
+- `@tailwindcss/vite@4.3.3` — MIT; preserve copyright and license notices
+- `@tanstack/query-core@5.102.8` — MIT; preserve copyright and license notices
+- `@tanstack/react-query@5.102.8` — MIT; preserve copyright and license notices
+- `@testing-library/dom@10.4.2` — MIT; preserve copyright and license notices
+- `@testing-library/react@16.3.3` — MIT; preserve copyright and license notices
+- `@types/aria-query@5.0.4` — MIT; preserve copyright and license notices
+- `@types/babel__core@7.20.5` — MIT; preserve copyright and license notices
+- `@types/babel__generator@7.27.0` — MIT; preserve copyright and license notices
+- `@types/babel__template@7.4.4` — MIT; preserve copyright and license notices
+- `@types/babel__traverse@7.28.0` — MIT; preserve copyright and license notices
+- `@types/body-parser@1.19.6` — MIT; preserve copyright and license notices
+- `@types/chai@5.2.3` — MIT; preserve copyright and license notices
+- `@types/connect@3.4.38` — MIT; preserve copyright and license notices
+- `@types/cookie-parser@1.4.10` — MIT; preserve copyright and license notices
+- `@types/cors@2.8.19` — MIT; preserve copyright and license notices
+- `@types/d3-array@3.2.2` — MIT; preserve copyright and license notices
+- `@types/d3-color@3.1.3` — MIT; preserve copyright and license notices
+- `@types/d3-ease@3.0.2` — MIT; preserve copyright and license notices
+- `@types/d3-interpolate@3.0.4` — MIT; preserve copyright and license notices
+- `@types/d3-path@3.1.1` — MIT; preserve copyright and license notices
+- `@types/d3-scale@4.0.9` — MIT; preserve copyright and license notices
+- `@types/d3-shape@3.2.0` — MIT; preserve copyright and license notices
+- `@types/d3-time@3.0.4` — MIT; preserve copyright and license notices
+- `@types/d3-timer@3.0.2` — MIT; preserve copyright and license notices
+- `@types/deep-eql@4.0.2` — MIT; preserve copyright and license notices
+- `@types/estree@1.0.9` — MIT; preserve copyright and license notices
+- `@types/express@5.0.6` — MIT; preserve copyright and license notices
+- `@types/express-serve-static-core@5.1.3` — MIT; preserve copyright and license notices
+- `@types/hast@3.0.5` — MIT; preserve copyright and license notices
+- `@types/http-errors@2.0.5` — MIT; preserve copyright and license notices
+- `@types/node@25.9.6` — MIT; preserve copyright and license notices
+- `@types/pg@8.23.1` — MIT; preserve copyright and license notices
+- `@types/qs@6.15.1` — MIT; preserve copyright and license notices
+- `@types/range-parser@1.2.7` — MIT; preserve copyright and license notices
+- `@types/react@19.3.0` — MIT; preserve copyright and license notices
+- `@types/react-dom@19.3.0` — MIT; preserve copyright and license notices
+- `@types/send@1.2.1` — MIT; preserve copyright and license notices
+- `@types/serve-static@2.2.0` — MIT; preserve copyright and license notices
+- `@types/unist@3.0.3` — MIT; preserve copyright and license notices
+- `@types/ws@8.18.1` — MIT; preserve copyright and license notices
+- `@vitejs/plugin-react@5.2.0` — MIT; preserve copyright and license notices
+- `@vitest/mocker@5.0.1` — MIT; preserve copyright and license notices
+- `@vitest/spy@5.0.1` — MIT; preserve copyright and license notices
+- `accepts@2.0.0` — MIT; preserve copyright and license notices
+- `acorn@8.18.0` — MIT; preserve copyright and license notices
+- `ajv@8.20.0` — MIT; preserve copyright and license notices
+- `ajv-draft-04@1.0.0` — MIT; preserve copyright and license notices
+- `ajv-formats@3.0.1` — MIT; preserve copyright and license notices
+- `ansi-regex@5.0.1` — MIT; preserve copyright and license notices
+- `ansi-styles@5.2.0` — MIT; preserve copyright and license notices
+- `argparse@2.0.1` — Python-2.0; preserve copyright and license notices
+- `aria-hidden@1.2.6` — MIT; preserve copyright and license notices
+- `aria-query@5.3.0` — Apache-2.0; preserve copyright and license notices
+- `assertion-error@2.0.1` — MIT; preserve copyright and license notices
+- `atomic-sleep@1.0.0` — MIT; preserve copyright and license notices
+- `balanced-match@4.0.4` — MIT; preserve copyright and license notices
+- `baseline-browser-mapping@2.11.21` — Apache-2.0; preserve copyright and license notices
+- `bidi-js@1.1.0` — MIT; preserve copyright and license notices
+- `body-parser@2.3.0` — MIT; preserve copyright and license notices
+- `brace-expansion@5.0.9` — MIT; preserve copyright and license notices
+- `braces@3.0.3` — MIT; preserve copyright and license notices
+- `browserslist@4.28.9` — MIT; preserve copyright and license notices
+- `bytes@3.1.2` — MIT; preserve copyright and license notices
+- `call-bind-apply-helpers@1.0.2` — MIT; preserve copyright and license notices
+- `call-bound@1.0.4` — MIT; preserve copyright and license notices
+- `caniuse-lite@1.0.30001810` — CC-BY-4.0; attribution and license notice
+- `chai@6.2.2` — MIT; preserve copyright and license notices
+- `chokidar@4.0.3` — MIT; preserve copyright and license notices
+- `chokidar@5.0.0` — MIT; preserve copyright and license notices
+- `class-variance-authority@0.7.1` — Apache-2.0; preserve copyright and license notices
+- `clsx@2.1.1` — MIT; preserve copyright and license notices
+- `cmdk@1.1.1` — MIT; preserve copyright and license notices
+- `colorette@2.0.20` — MIT; preserve copyright and license notices
+- `commander@15.0.0` — MIT; preserve copyright and license notices
+- `compare-versions@6.1.1` — MIT; preserve copyright and license notices
+- `content-disposition@1.1.0` — MIT; preserve copyright and license notices
+- `content-type@1.0.5` — MIT; preserve copyright and license notices
+- `content-type@2.1.0` — MIT; preserve copyright and license notices
+- `convert-source-map@2.0.0` — MIT; preserve copyright and license notices
+- `cookie@0.7.2` — MIT; preserve copyright and license notices
+- `cookie-parser@1.4.7` — MIT; preserve copyright and license notices
+- `cookie-signature@1.0.6` — MIT; preserve copyright and license notices
+- `cookie-signature@1.2.2` — MIT; preserve copyright and license notices
+- `cors@2.8.6` — MIT; preserve copyright and license notices
+- `cross-spawn@7.0.6` — MIT; preserve copyright and license notices
+- `css-tree@3.2.1` — MIT; preserve copyright and license notices
+- `cssesc@3.0.0` — MIT; preserve copyright and license notices
+- `csstype@3.1.3` — MIT; preserve copyright and license notices
+- `csstype@3.2.3` — MIT; preserve copyright and license notices
+- `d3-array@3.2.4` — ISC; preserve copyright and license notices
+- `d3-color@3.1.0` — ISC; preserve copyright and license notices
+- `d3-ease@3.0.1` — BSD-3-Clause; preserve copyright and license notices
+- `d3-format@3.1.2` — ISC; preserve copyright and license notices
+- `d3-interpolate@3.0.1` — ISC; preserve copyright and license notices
+- `d3-path@3.1.0` — ISC; preserve copyright and license notices
+- `d3-scale@4.0.2` — ISC; preserve copyright and license notices
+- `d3-shape@3.2.0` — ISC; preserve copyright and license notices
+- `d3-time@3.1.0` — ISC; preserve copyright and license notices
+- `d3-time-format@4.1.0` — ISC; preserve copyright and license notices
+- `d3-timer@3.0.1` — ISC; preserve copyright and license notices
+- `data-urls@7.0.0` — MIT; preserve copyright and license notices
+- `date-fns@3.6.0` — MIT; preserve copyright and license notices
+- `date-fns@4.4.0` — MIT; preserve copyright and license notices
+- `date-fns-jalali@4.1.0-0` — MIT; preserve copyright and license notices
+- `dateformat@4.6.3` — MIT; preserve copyright and license notices
+- `debug@4.4.3` — MIT; preserve copyright and license notices
+- `decimal.js@10.6.0` — MIT; preserve copyright and license notices
+- `decimal.js-light@2.5.1` — MIT; preserve copyright and license notices
+- `depd@2.0.0` — MIT; preserve copyright and license notices
+- `dequal@2.0.3` — MIT; preserve copyright and license notices
+- `detect-libc@2.1.2` — Apache-2.0; preserve copyright and license notices
+- `detect-node-es@1.1.0` — MIT; preserve copyright and license notices
+- `dom-accessibility-api@0.5.16` — MIT; preserve copyright and license notices
+- `dom-helpers@5.2.1` — MIT; preserve copyright and license notices
+- `drizzle-kit@0.31.10` — MIT; preserve copyright and license notices
+- `drizzle-orm@0.45.2` — Apache-2.0; preserve copyright and license notices
+- `drizzle-zod@0.8.3` — Apache-2.0; preserve copyright and license notices
+- `dunder-proto@1.0.1` — MIT; preserve copyright and license notices
+- `ee-first@1.1.1` — MIT; preserve copyright and license notices
+- `electron-to-chromium@1.5.425` — ISC; preserve copyright and license notices
+- `embla-carousel@8.6.0` — MIT; preserve copyright and license notices
+- `embla-carousel-react@8.6.0` — MIT; preserve copyright and license notices
+- `embla-carousel-reactive-utils@8.6.0` — MIT; preserve copyright and license notices
+- `encodeurl@2.0.0` — MIT; preserve copyright and license notices
+- `end-of-stream@1.4.5` — MIT; preserve copyright and license notices
+- `enhanced-resolve@5.24.5` — MIT; preserve copyright and license notices
+- `entities@4.5.0` — BSD-2-Clause; preserve copyright and license notices
+- `entities@8.1.0` — BSD-2-Clause; preserve copyright and license notices
+- `es-define-property@1.0.1` — MIT; preserve copyright and license notices
+- `es-errors@1.3.0` — MIT; preserve copyright and license notices
+- `es-module-lexer@2.3.2` — MIT; preserve copyright and license notices
+- `es-object-atoms@1.1.2` — MIT; preserve copyright and license notices
+- `esbuild@0.28.2` — MIT; preserve copyright and license notices
+- `esbuild-plugin-pino@2.3.3` — MIT; preserve copyright and license notices
+- `escalade@3.2.0` — MIT; preserve copyright and license notices
+- `escape-html@1.0.3` — MIT; preserve copyright and license notices
+- `estree-walker@3.0.3` — MIT; preserve copyright and license notices
+- `esutils@2.0.3` — BSD-2-Clause; preserve copyright and license notices
+- `etag@1.8.1` — MIT; preserve copyright and license notices
+- `eventemitter3@4.0.7` — MIT; preserve copyright and license notices
+- `execa@9.6.1` — MIT; preserve copyright and license notices
+- `expect-type@1.4.0` — Apache-2.0; preserve copyright and license notices
+- `express@5.2.1` — MIT; preserve copyright and license notices
+- `fast-copy@4.1.1` — MIT; preserve copyright and license notices
+- `fast-deep-equal@3.1.3` — MIT; preserve copyright and license notices
+- `fast-equals@5.4.2` — MIT; preserve copyright and license notices
+- `fast-glob@3.3.3` — MIT; preserve copyright and license notices
+- `fast-safe-stringify@2.1.1` — MIT; preserve copyright and license notices
+- `fast-sha256@1.3.0` — Unlicense; record the public-domain dedication/backup license terms
+- `fast-uri@3.1.7` — BSD-3-Clause; preserve copyright and license notices
+- `fastq@1.20.3` — ISC; preserve copyright and license notices
+- `fdir@6.5.0` — MIT; preserve copyright and license notices
+- `figures@6.1.0` — MIT; preserve copyright and license notices
+- `fill-range@7.1.1` — MIT; preserve copyright and license notices
+- `finalhandler@2.1.1` — MIT; preserve copyright and license notices
+- `find-up@8.0.0` — MIT; preserve copyright and license notices
+- `forwarded@0.2.0` — MIT; preserve copyright and license notices
+- `framer-motion@12.43.0` — MIT; preserve copyright and license notices
+- `fresh@2.0.0` — MIT; preserve copyright and license notices
+- `fs-extra@11.4.0` — MIT; preserve copyright and license notices
+- `function-bind@1.1.2` — MIT; preserve copyright and license notices
+- `gensync@1.0.0-beta.2` — MIT; preserve copyright and license notices
+- `get-caller-file@2.0.5` — ISC; preserve copyright and license notices
+- `get-intrinsic@1.3.0` — MIT; preserve copyright and license notices
+- `get-nonce@1.0.1` — MIT; preserve copyright and license notices
+- `get-proto@1.0.1` — MIT; preserve copyright and license notices
+- `get-stream@9.0.1` — MIT; preserve copyright and license notices
+- `get-tsconfig@4.14.3` — MIT; preserve copyright and license notices
+- `glob-parent@5.1.2` — ISC; preserve copyright and license notices
+- `glob-to-regexp@0.4.1` — BSD-2-Clause; preserve copyright and license notices
+- `gopd@1.2.0` — MIT; preserve copyright and license notices
+- `graceful-fs@4.2.11` — ISC; preserve copyright and license notices
+- `has-symbols@1.1.0` — MIT; preserve copyright and license notices
+- `hasown@2.0.4` — MIT; preserve copyright and license notices
+- `help-me@5.0.0` — MIT; preserve copyright and license notices
+- `html-encoding-sniffer@6.0.0` — MIT; preserve copyright and license notices
+- `http-errors@2.0.1` — MIT; preserve copyright and license notices
+- `http-proxy-middleware@4.2.0` — MIT; preserve copyright and license notices
+- `httpxy@0.5.5` — MIT; preserve copyright and license notices
+- `human-signals@8.0.1` — Apache-2.0; preserve copyright and license notices
+- `iconv-lite@0.7.3` — MIT; preserve copyright and license notices
+- `inherits@2.0.4` — ISC; preserve copyright and license notices
+- `input-otp@1.5.0` — MIT; preserve copyright and license notices
+- `internmap@2.0.3` — ISC; preserve copyright and license notices
+- `ipaddr.js@1.9.1` — MIT; preserve copyright and license notices
+- `is-extglob@2.1.1` — MIT; preserve copyright and license notices
+- `is-glob@4.0.3` — MIT; preserve copyright and license notices
+- `is-number@7.0.0` — MIT; preserve copyright and license notices
+- `is-plain-obj@4.1.0` — MIT; preserve copyright and license notices
+- `is-potential-custom-element-name@1.0.1` — MIT; preserve copyright and license notices
+- `is-promise@4.0.0` — MIT; preserve copyright and license notices
+- `is-stream@4.0.1` — MIT; preserve copyright and license notices
+- `is-unicode-supported@2.1.0` — MIT; preserve copyright and license notices
+- `isexe@2.0.0` — ISC; preserve copyright and license notices
+- `jiti@2.7.0` — MIT; preserve copyright and license notices
+- `joycon@3.1.1` — MIT; preserve copyright and license notices
+- `js-cookie@3.0.7` — MIT; preserve copyright and license notices
+- `js-cookie@3.0.8` — MIT; preserve copyright and license notices
+- `js-tokens@4.0.0` — MIT; preserve copyright and license notices
+- `js-yaml@4.3.2` — MIT; preserve copyright and license notices
+- `jsdom@30.1.0` — MIT; preserve copyright and license notices
+- `jsesc@3.1.0` — MIT; preserve copyright and license notices
+- `json-schema-traverse@1.0.0` — MIT; preserve copyright and license notices
+- `json5@2.2.3` — MIT; preserve copyright and license notices
+- `jsonfile@6.2.1` — MIT; preserve copyright and license notices
+- `jsonpointer@5.0.1` — MIT; preserve copyright and license notices
+- `leven@4.1.0` — MIT; preserve copyright and license notices
+- `lightningcss@1.32.0` — MPL-2.0; MPL-2.0 file-level source and notice obligations if Covered Software is distributed or modified
+- `lightningcss-linux-x64-gnu@1.32.0` — MPL-2.0; MPL-2.0 file-level source and notice obligations if Covered Software is distributed or modified
+- `linkify-it@5.0.2` — MIT; preserve copyright and license notices
+- `locate-path@8.0.0` — MIT; preserve copyright and license notices
+- `lodash@4.18.1` — MIT; preserve copyright and license notices
+- `loose-envify@1.4.0` — MIT; preserve copyright and license notices
+- `lru-cache@11.5.3` — BlueOak-1.0.0; preserve copyright and license notices
+- `lru-cache@5.1.1` — ISC; preserve copyright and license notices
+- `lucide-react@0.545.0` — ISC; preserve copyright and license notices
+- `lunr@2.3.9` — MIT; preserve copyright and license notices
+- `lz-string@1.5.0` — MIT; preserve copyright and license notices
+- `magic-string@0.30.21` — MIT; preserve copyright and license notices
+- `magic-string@1.4.1` — MIT; preserve copyright and license notices
+- `markdown-it@14.3.1` — MIT; preserve copyright and license notices
+- `math-intrinsics@1.1.0` — MIT; preserve copyright and license notices
+- `mdn-data@2.27.1` — CC0-1.0; review the license text and retain required notices
+- `mdurl@2.1.0` — MIT; preserve copyright and license notices
+- `media-typer@1.1.1` — MIT; preserve copyright and license notices
+- `merge-descriptors@2.0.0` — MIT; preserve copyright and license notices
+- `merge2@1.4.1` — MIT; preserve copyright and license notices
+- `micromatch@4.0.8` — MIT; preserve copyright and license notices
+- `mime-db@1.54.0` — MIT; preserve copyright and license notices
+- `mime-types@3.0.2` — MIT; preserve copyright and license notices
+- `minimatch@10.2.6` — BlueOak-1.0.0; preserve copyright and license notices
+- `minimist@1.2.8` — MIT; preserve copyright and license notices
+- `modern-screenshot@4.7.0` — MIT; preserve copyright and license notices
+- `motion-dom@12.43.0` — MIT; preserve copyright and license notices
+- `motion-utils@12.39.0` — MIT; preserve copyright and license notices
+- `ms@2.1.3` — MIT; preserve copyright and license notices
+- `nanoid@3.3.18` — MIT; preserve copyright and license notices
+- `negotiator@1.1.0` — MIT; preserve copyright and license notices
+- `next-themes@0.4.6` — MIT; preserve copyright and license notices
+- `node-releases@2.0.55` — MIT; preserve copyright and license notices
+- `npm-run-path@6.0.0` — MIT; preserve copyright and license notices
+- `object-assign@4.1.1` — MIT; preserve copyright and license notices
+- `object-inspect@1.13.4` — MIT; preserve copyright and license notices
+- `obug@2.2.1` — MIT; preserve copyright and license notices
+- `on-exit-leak-free@2.1.2` — MIT; preserve copyright and license notices
+- `on-finished@2.4.1` — MIT; preserve copyright and license notices
+- `once@1.4.0` — ISC; preserve copyright and license notices
+- `orval@8.30.0` — MIT; preserve copyright and license notices
+- `p-limit@4.0.0` — MIT; preserve copyright and license notices
+- `p-locate@6.0.0` — MIT; preserve copyright and license notices
+- `parse-ms@4.0.0` — MIT; preserve copyright and license notices
+- `parse5@8.0.1` — MIT; preserve copyright and license notices
+- `parseurl@1.3.3` — MIT; preserve copyright and license notices
+- `path-key@3.1.1` — MIT; preserve copyright and license notices
+- `path-key@4.0.0` — MIT; preserve copyright and license notices
+- `path-to-regexp@8.4.2` — MIT; preserve copyright and license notices
+- `pathe@2.0.3` — MIT; preserve copyright and license notices
+- `pg@8.23.0` — MIT; preserve copyright and license notices
+- `pg-cloudflare@1.4.0` — MIT; preserve copyright and license notices
+- `pg-connection-string@2.14.0` — MIT; preserve copyright and license notices
+- `pg-int8@1.0.1` — ISC; preserve copyright and license notices
+- `pg-pool@3.14.0` — MIT; preserve copyright and license notices
+- `pg-protocol@1.16.0` — MIT; preserve copyright and license notices
+- `pg-types@2.2.0` — MIT; preserve copyright and license notices
+- `pgpass@1.0.5` — MIT; preserve copyright and license notices
+- `picocolors@1.1.1` — ISC; preserve copyright and license notices
+- `picomatch@2.3.2` — MIT; preserve copyright and license notices
+- `picomatch@4.0.7` — MIT; preserve copyright and license notices
+- `pino@9.14.0` — MIT; preserve copyright and license notices
+- `pino-abstract-transport@2.0.0` — MIT; preserve copyright and license notices
+- `pino-abstract-transport@3.0.0` — MIT; preserve copyright and license notices
+- `pino-http@10.5.0` — MIT; preserve copyright and license notices
+- `pino-pretty@13.1.3` — MIT; preserve copyright and license notices
+- `pino-std-serializers@7.1.0` — MIT; preserve copyright and license notices
+- `postcss@8.5.28` — MIT; preserve copyright and license notices
+- `postcss-selector-parser@6.0.10` — MIT; preserve copyright and license notices
+- `postgres-array@2.0.0` — MIT; preserve copyright and license notices
+- `postgres-bytea@1.0.1` — MIT; preserve copyright and license notices
+- `postgres-date@1.0.7` — MIT; preserve copyright and license notices
+- `postgres-interval@1.2.0` — MIT; preserve copyright and license notices
+- `prettier@3.9.6` — MIT; preserve copyright and license notices
+- `pretty-format@27.5.1` — MIT; preserve copyright and license notices
+- `pretty-ms@9.3.1` — MIT; preserve copyright and license notices
+- `process-warning@5.1.0` — MIT; preserve copyright and license notices
+- `prop-types@15.8.1` — MIT; preserve copyright and license notices
+- `proxy-addr@2.0.7` — MIT; preserve copyright and license notices
+- `pump@3.0.4` — MIT; preserve copyright and license notices
+- `punycode@2.3.1` — MIT; preserve copyright and license notices
+- `punycode.js@2.3.1` — MIT; preserve copyright and license notices
+- `qs@6.16.0` — BSD-3-Clause; preserve copyright and license notices
+- `queue-microtask@1.2.3` — MIT; preserve copyright and license notices
+- `quick-format-unescaped@4.0.4` — MIT; preserve copyright and license notices
+- `range-parser@1.3.0` — MIT; preserve copyright and license notices
+- `raw-body@3.0.2` — MIT; preserve copyright and license notices
+- `react@19.1.0` — MIT; preserve copyright and license notices
+- `react-day-picker@9.14.0` — MIT; preserve copyright and license notices
+- `react-dom@19.1.0` — MIT; preserve copyright and license notices
+- `react-hook-form@7.87.0` — MIT; preserve copyright and license notices
+- `react-icons@5.7.0` — MIT; preserve copyright and license notices
+- `react-is@16.13.1` — MIT; preserve copyright and license notices
+- `react-is@17.0.2` — MIT; preserve copyright and license notices
+- `react-is@18.3.1` — MIT; preserve copyright and license notices
+- `react-refresh@0.18.0` — MIT; preserve copyright and license notices
+- `react-remove-scroll@2.7.2` — MIT; preserve copyright and license notices
+- `react-remove-scroll-bar@2.3.8` — MIT; preserve copyright and license notices
+- `react-resizable-panels@2.1.9` — MIT; preserve copyright and license notices
+- `react-smooth@4.0.4` — MIT; preserve copyright and license notices
+- `react-style-singleton@2.2.3` — MIT; preserve copyright and license notices
+- `react-transition-group@4.4.5` — BSD-3-Clause; preserve copyright and license notices
+- `readdirp@4.1.2` — MIT; preserve copyright and license notices
+- `readdirp@5.1.1` — MIT; preserve copyright and license notices
+- `real-require@0.2.0` — MIT; preserve copyright and license notices
+- `recharts@2.15.4` — MIT; preserve copyright and license notices
+- `recharts-scale@0.4.5` — MIT; preserve copyright and license notices
+- `regexparam@3.0.0` — MIT; preserve copyright and license notices
+- `remeda@2.48.0` — MIT; preserve copyright and license notices
+- `require-from-string@2.0.2` — MIT; preserve copyright and license notices
+- `resolve-pkg-maps@1.0.0` — MIT; preserve copyright and license notices
+- `reusify@1.1.0` — MIT; preserve copyright and license notices
+- `rollup@4.63.1` — MIT; preserve copyright and license notices
+- `router@2.2.0` — MIT; preserve copyright and license notices
+- `run-parallel@1.2.0` — MIT; preserve copyright and license notices
+- `safe-stable-stringify@2.5.0` — MIT; preserve copyright and license notices
+- `safer-buffer@2.1.2` — MIT; preserve copyright and license notices
+- `saxes@6.0.0` — ISC; preserve copyright and license notices
+- `scheduler@0.26.0` — MIT; preserve copyright and license notices
+- `secure-json-parse@4.1.0` — BSD-3-Clause; preserve copyright and license notices
+- `semver@6.3.1` — ISC; preserve copyright and license notices
+- `send@1.2.1` — MIT; preserve copyright and license notices
+- `serve-static@2.2.1` — MIT; preserve copyright and license notices
+- `setprototypeof@1.2.0` — ISC; preserve copyright and license notices
+- `shebang-command@2.0.0` — MIT; preserve copyright and license notices
+- `shebang-regex@3.0.0` — MIT; preserve copyright and license notices
+- `side-channel@1.1.1` — MIT; preserve copyright and license notices
+- `side-channel-list@1.0.1` — MIT; preserve copyright and license notices
+- `side-channel-map@1.0.1` — MIT; preserve copyright and license notices
+- `side-channel-weakmap@1.0.2` — MIT; preserve copyright and license notices
+- `siginfo@2.0.0` — ISC; preserve copyright and license notices
+- `signal-exit@4.1.0` — ISC; preserve copyright and license notices
+- `sonic-boom@4.2.1` — MIT; preserve copyright and license notices
+- `sonner@2.0.8` — MIT; preserve copyright and license notices
+- `source-map-js@1.2.1` — BSD-3-Clause; preserve copyright and license notices
+- `split2@4.2.0` — ISC; preserve copyright and license notices
+- `stackback@0.0.2` — MIT; preserve copyright and license notices
+- `standardwebhooks@1.1.1` — MIT; preserve copyright and license notices
+- `statuses@2.0.2` — MIT; preserve copyright and license notices
+- `std-env@3.10.0` — MIT; preserve copyright and license notices
+- `std-env@4.2.0` — MIT; preserve copyright and license notices
+- `string-argv@0.3.2` — MIT; preserve copyright and license notices
+- `strip-final-newline@4.0.0` — MIT; preserve copyright and license notices
+- `strip-json-comments@5.0.3` — MIT; preserve copyright and license notices
+- `swr@2.3.4` — MIT; preserve copyright and license notices
+- `tailwind-merge@3.6.0` — MIT; preserve copyright and license notices
+- `tailwindcss@4.3.3` — MIT; preserve copyright and license notices
+- `tailwindcss-animate@1.0.7` — MIT; preserve copyright and license notices
+- `tapable@2.3.3` — MIT; preserve copyright and license notices
+- `thread-stream@3.1.0` — MIT; preserve copyright and license notices
+- `tiny-invariant@1.3.3` — MIT; preserve copyright and license notices
+- `tinybench@6.1.4` — MIT; preserve copyright and license notices
+- `tinyexec@1.3.0` — MIT; preserve copyright and license notices
+- `tinyglobby@0.2.17` — MIT; preserve copyright and license notices
+- `tldts@7.4.13` — MIT; preserve copyright and license notices
+- `tldts-core@7.4.13` — MIT; preserve copyright and license notices
+- `to-regex-range@5.0.1` — MIT; preserve copyright and license notices
+- `toidentifier@1.0.1` — MIT; preserve copyright and license notices
+- `tough-cookie@6.0.2` — BSD-3-Clause; preserve copyright and license notices
+- `tr46@6.0.0` — MIT; preserve copyright and license notices
+- `tslib@2.8.1` — 0BSD; preserve copyright and license notices
+- `tsx@4.23.13` — MIT; preserve copyright and license notices
+- `tw-animate-css@1.4.0` — MIT; preserve copyright and license notices
+- `type-is@2.1.0` — MIT; preserve copyright and license notices
+- `typedoc@0.28.20` — Apache-2.0; preserve copyright and license notices
+- `typedoc-plugin-coverage@4.0.3` — MIT; preserve copyright and license notices
+- `typedoc-plugin-markdown@4.13.0` — MIT; preserve copyright and license notices
+- `typescript@5.9.3` — Apache-2.0; preserve copyright and license notices
+- `uc.micro@2.1.0` — MIT; preserve copyright and license notices
+- `undici@8.10.2` — MIT; preserve copyright and license notices
+- `undici-types@7.24.6` — MIT; preserve copyright and license notices
+- `unicorn-magic@0.3.0` — MIT; preserve copyright and license notices
+- `universalify@2.0.1` — MIT; preserve copyright and license notices
+- `unpipe@1.0.0` — MIT; preserve copyright and license notices
+- `update-browserslist-db@1.3.2` — MIT; preserve copyright and license notices
+- `use-callback-ref@1.3.3` — MIT; preserve copyright and license notices
+- `use-sidecar@1.1.3` — MIT; preserve copyright and license notices
+- `use-sync-external-store@1.7.0` — MIT; preserve copyright and license notices
+- `util-deprecate@1.0.2` — MIT; preserve copyright and license notices
+- `vary@1.1.2` — MIT; preserve copyright and license notices
+- `vaul@1.1.2` — MIT; preserve copyright and license notices
+- `victory-vendor@36.9.2` — MIT AND ISC; preserve copyright and license notices
+- `vite@7.3.6` — MIT; preserve copyright and license notices
+- `vitest@5.0.1` — MIT; preserve copyright and license notices
+- `w3c-xmlserializer@5.0.0` — MIT; preserve copyright and license notices
+- `webidl-conversions@8.0.1` — BSD-2-Clause; preserve copyright and license notices
+- `whatwg-mimetype@5.0.0` — MIT; preserve copyright and license notices
+- `whatwg-url@16.0.1` — MIT; preserve copyright and license notices
+- `whatwg-url@17.1.1` — MIT; preserve copyright and license notices
+- `which@2.0.2` — ISC; preserve copyright and license notices
+- `why-is-node-running@2.3.0` — MIT; preserve copyright and license notices
+- `wouter@3.11.0` — Unlicense; record the public-domain dedication/backup license terms
+- `wrappy@1.0.2` — ISC; preserve copyright and license notices
+- `ws@8.21.3` — MIT; preserve copyright and license notices
+- `xml-name-validator@5.0.0` — Apache-2.0; preserve copyright and license notices
+- `xmlchars@2.2.0` — MIT; preserve copyright and license notices
+- `xtend@4.0.2` — MIT; preserve copyright and license notices
+- `yallist@3.1.1` — ISC; preserve copyright and license notices
+- `yaml@2.9.0` — ISC; preserve copyright and license notices
+- `yocto-queue@1.2.2` — MIT; preserve copyright and license notices
+- `yoctocolors@2.2.0` — MIT; preserve copyright and license notices
+- `zod@3.25.76` — MIT; preserve copyright and license notices
