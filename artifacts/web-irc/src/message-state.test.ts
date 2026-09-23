@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeRefreshedMessages, upsertMessage } from "./message-state";
+import { mergeRefreshedMessages, upsertBoundedMessageGroup, upsertMessage } from "./message-state";
 
 type TestMessage = {
   id: string;
@@ -57,5 +57,30 @@ describe("message state", () => {
     expect(merged.some(({ id }) => id === previous[0].id)).toBe(false);
     expect(merged.find(({ id }) => id === "message-0050")?.body).toBe("deleted on server");
     expect(merged.at(-1)?.id).toBe("message-0101");
+  });
+
+  it("bounds transient presence rows without evicting chat history or duplicating frames", () => {
+    const history = Array.from({ length: 100 }, (_, index) => message(index));
+    let messages = history;
+    const isPresence = (item: TestMessage) => item.id.startsWith("presence-");
+
+    for (let index = 0; index < 200; index += 1) {
+      messages = upsertBoundedMessageGroup(messages, {
+        ...message(index + 200),
+        id: `presence-${index}`,
+      }, isPresence, 20);
+    }
+    messages = upsertBoundedMessageGroup(messages, {
+      ...message(399),
+      id: "presence-199",
+      body: "duplicate frame updated",
+    }, isPresence, 20);
+
+    expect(messages).toHaveLength(120);
+    expect(messages.filter(isPresence)).toHaveLength(20);
+    expect(messages.filter((item) => item.id.startsWith("message-"))).toEqual(history);
+    expect(messages.filter((item) => item.id === "presence-199")).toEqual([
+      expect.objectContaining({ body: "duplicate frame updated" }),
+    ]);
   });
 });
