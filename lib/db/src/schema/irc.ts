@@ -291,6 +291,7 @@ export const documentVersionsTable = pgTable("irc_document_versions", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("irc_document_versions_document_version_uidx").on(table.documentId, table.version),
+  uniqueIndex("irc_document_versions_id_document_id_uidx").on(table.id, table.documentId),
 ]);
 
 export const documentPermissionsTable = pgTable("irc_document_permissions", {
@@ -315,6 +316,11 @@ export const documentDownloadsTable = pgTable("irc_document_downloads", {
   downloadedAt: timestamp("downloaded_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_document_downloads_document_idx").on(table.documentId),
+  foreignKey({
+    columns: [table.versionId, table.documentId],
+    foreignColumns: [documentVersionsTable.id, documentVersionsTable.documentId],
+    name: "irc_document_downloads_version_document_fk",
+  }).onDelete("cascade"),
 ]);
 
 export const workspaceTasksTable = pgTable("irc_workspace_tasks", {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   businessDocumentsTable,
   categoriesTable,
@@ -8,6 +8,7 @@ import {
   communitiesTable,
   communityMembersTable,
   db,
+  documentDownloadsTable,
   documentFoldersTable,
   documentVersionsTable,
   messagesTable,
@@ -379,6 +380,65 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       );
     } finally {
       await db.delete(channelsTable).where(eq(channelsTable.id, channel.id));
+    }
+  });
+
+  test("document downloads cannot pair a document with another document's version", async () => {
+    const [documentA, documentB] = await db.insert(businessDocumentsTable).values([{
+      communityId,
+      title: `Download document A ${suffix}`,
+      ownerId: ids.owner,
+    }, {
+      communityId,
+      title: `Download document B ${suffix}`,
+      ownerId: ids.owner,
+    }]).returning({ id: businessDocumentsTable.id });
+    try {
+      const [versionA, versionB] = await db.insert(documentVersionsTable).values([{
+        documentId: documentA.id,
+        version: 1,
+        objectPath: `test/downloads/${suffix}/a`,
+        fileName: "a.txt",
+        contentType: "text/plain",
+        fileSize: 1,
+        uploadedBy: ids.owner,
+      }, {
+        documentId: documentB.id,
+        version: 1,
+        objectPath: `test/downloads/${suffix}/b`,
+        fileName: "b.txt",
+        contentType: "text/plain",
+        fileSize: 1,
+        uploadedBy: ids.owner,
+      }]).returning({ id: documentVersionsTable.id });
+      await assert.rejects(
+        () => db.insert(documentDownloadsTable).values({
+          documentId: documentA.id,
+          versionId: versionB.id,
+          userId: ids.target,
+        }),
+        (error: unknown) => {
+          const code = typeof error === "object" && error !== null && "cause" in error
+            ? (error as { cause?: { code?: unknown } }).cause?.code
+            : undefined;
+          return code === "23503";
+        },
+      );
+      const [download] = await db.insert(documentDownloadsTable).values({
+        documentId: documentA.id,
+        versionId: versionA.id,
+        userId: ids.target,
+      }).returning({ id: documentDownloadsTable.id });
+      await db.delete(documentVersionsTable).where(eq(documentVersionsTable.id, versionA.id));
+      assert.deepEqual(
+        await db.select({ id: documentDownloadsTable.id }).from(documentDownloadsTable)
+          .where(eq(documentDownloadsTable.id, download.id)),
+        [],
+      );
+    } finally {
+      await db.delete(businessDocumentsTable).where(
+        inArray(businessDocumentsTable.id, [documentA.id, documentB.id]),
+      );
     }
   });
 
