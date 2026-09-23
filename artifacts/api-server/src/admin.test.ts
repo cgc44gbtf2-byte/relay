@@ -871,6 +871,27 @@ describe("admin access controls", () => {
     );
   });
 
+  test("does not create duplicate chat identities during concurrent session refreshes", async () => {
+    const session = await createTestSession("profile_bootstrap_race");
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => apiRequest(session, "/me")),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 200, JSON.stringify(response));
+      assert.ok(response.body && typeof response.body === "object");
+      assert.equal((response.body as { id?: unknown }).id, session.userId);
+    }
+
+    const profiles = await pool.query<{ count: string; userId: string }>(
+      `SELECT count(*)::text AS count, min(clerk_id) AS "userId"
+       FROM irc_users
+       WHERE clerk_id = $1`,
+      [session.userId],
+    );
+    assert.deepEqual(profiles.rows, [{ count: "1", userId: session.userId }]);
+  });
+
   test("rejects malformed and expired Clerk credentials across IRC routes without changing user records", async () => {
     const invalidSession = await createTestSession("invalid_irc");
     const profile = await apiRequest(invalidSession, "/me");
