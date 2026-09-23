@@ -343,6 +343,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasOlder, setHasOlder] = useState(false);
+  const [olderMessagesError, setOlderMessagesError] = useState("");
   const onMissingChannelRef = useRef(onMissingChannel);
   const messageRefreshRef = useRef(0);
   const messagesRef = useRef(messages);
@@ -417,6 +418,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const loadOlderMessages = useCallback(async () => {
     if (!activeDm || loadingOlder || !hasOlder || messages.length === 0) return;
     const paginationRoomKey = roomKey;
+    setOlderMessagesError("");
     setLoadingOlder(true);
     try {
       const cursor = encodeURIComponent(messages[0].createdAt);
@@ -427,6 +429,10 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
         return [...data.messages.filter((item) => !existing.has(item.id)), ...items];
       });
       setHasOlder(data.messages.length === 100);
+    } catch {
+      if (roomKeyRef.current === paginationRoomKey) {
+        setOlderMessagesError("Older messages could not be loaded.");
+      }
     } finally {
       if (roomKeyRef.current === paginationRoomKey) setLoadingOlder(false);
     }
@@ -441,6 +447,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     setMembers([]);
     setHasOlder(false);
     setLoadingOlder(false);
+    setOlderMessagesError("");
     if (!channelId && !activeDm) {
       setLoading(false);
       return;
@@ -458,7 +465,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     }
     return () => { cancelled = true; };
   }, [channelId, activeDm, refreshMessages, roomKey]);
-  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, loadOlderMessages, refreshMessages };
+  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, olderMessagesError, loadOlderMessages, refreshMessages };
 }
 
 function ChatApp() {
@@ -1041,7 +1048,7 @@ function ChatApp() {
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="mx-auto block rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
+              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <div className="text-center"><button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>{room.olderMessagesError && <p className="mt-2 font-mono text-[10px] text-destructive">{room.olderMessagesError}</p>}</div>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
               {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}
               {Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>

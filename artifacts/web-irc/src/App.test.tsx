@@ -102,6 +102,7 @@ function installApi({
   notifications = [],
   notificationsFailure = false,
   channelFailureOnce = false,
+  dmPaginationFailureOnce = false,
   uploadFailure = false,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
@@ -119,12 +120,14 @@ function installApi({
   }>;
   notificationsFailure?: boolean;
   channelFailureOnce?: boolean;
+  dmPaginationFailureOnce?: boolean;
   uploadFailure?: boolean;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = room(2, "#fallback-room");
   let channelListCalls = 0;
   let historyCalls = 0;
+  let dmPaginationCalls = 0;
 
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -151,6 +154,30 @@ function installApi({
       return uploadFailure ? jsonResponse({ error: "upload failed" }, 500) : jsonResponse({});
     }
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
+    if (url === "/api/users/search?q=or") return jsonResponse([members()[1]]);
+    if (url.startsWith("/api/dm/user-2/messages?before=") && method === "GET") {
+      dmPaginationCalls += 1;
+      if (dmPaginationFailureOnce && dmPaginationCalls === 1) {
+        return jsonResponse({ error: "older messages unavailable" }, 500);
+      }
+      return jsonResponse({
+        messages: [{
+          ...message(1, "older recovered message", "dm-older-recovered"),
+          channelId: null,
+          recipientId: "user-1",
+        }],
+      });
+    }
+    if (url === "/api/dm/user-2/messages" && method === "GET") {
+      return jsonResponse({
+        messages: Array.from({ length: 100 }, (_, index) => ({
+          ...message(1, `dm message ${index}`, `dm-message-${String(index).padStart(3, "0")}`),
+          channelId: null,
+          recipientId: "user-1",
+          createdAt: new Date(Date.UTC(2026, 8, 21, 12, 0, index)).toISOString(),
+        })),
+      });
+    }
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
       if (channelFailureOnce && channelListCalls === 1) return jsonResponse({ error: "channels unavailable" }, 500);
@@ -313,6 +340,29 @@ describe("deleted room recovery", () => {
     });
     expect(screen.getByText("Alex")).toBeTruthy();
     expect(screen.queryByText("Albert")).toBeNull();
+  });
+
+  it("keeps DM history visible and retryable when older-message loading fails", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      dmPaginationFailureOnce: true,
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+
+    const loadOlder = await screen.findByRole("button", { name: "load older messages" });
+    expect(screen.getByText("dm message 99")).toBeTruthy();
+    fireEvent.click(loadOlder);
+
+    expect(await screen.findByText("Older messages could not be loaded.")).toBeTruthy();
+    expect(screen.getByText("dm message 99")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "load older messages" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "load older messages" }));
+    expect(await screen.findByText("older recovered message")).toBeTruthy();
+    expect(screen.queryByText("Older messages could not be loaded.")).toBeNull();
   });
 
   it.each([
