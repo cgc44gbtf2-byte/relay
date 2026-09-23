@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@clerk/react/internal", () => ({
@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, ownerConfirmationPhrase } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
 
 type Channel = {
   id: number;
@@ -97,6 +97,24 @@ describe("channel category organization", () => {
     rerender(<AdminChannelRoomOrganizer channels={[{ ...channel, categoryId: 31 }]} categories={categories} working={false} onMove={onMove} />);
     fireEvent.click(screen.getByTestId("button-organize-channel"));
     await waitFor(() => expect(onMove).toHaveBeenLastCalledWith(expect.objectContaining({ id: 7 }), null));
+  });
+
+  it("lets a workspace administrator reassign an existing channel without creating one", async () => {
+    const onMove = vi.fn().mockResolvedValue(true);
+    const detail = {
+      community: { id: 13 },
+      channels: [{ id: 7, name: "#team", categoryId: null }],
+      categories: [{ id: 31, name: "Project room" }],
+    } as unknown as ComponentProps<typeof WorkspaceChannelOrganizer>["detail"];
+    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
+    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
+    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith(7, 31));
+    rerender(<WorkspaceChannelOrganizer detail={{ ...detail, channels: [{ ...detail.channels[0], categoryId: 31 }] }} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenLastCalledWith(7, null));
   });
 });
 

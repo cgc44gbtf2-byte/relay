@@ -3424,6 +3424,67 @@ describe("admin access controls", () => {
     }
   });
 
+  test("lets workspace admins organize channels they do not own, only within their workspace", async () => {
+    const managerSession = await createTestSession("channel_organizer");
+    const communityIds: number[] = [];
+    let channelId: number | null = null;
+    try {
+      assert.equal((await apiRequest(managerSession, "/me")).status, 200);
+      for (const name of ["Managed Channel", "Foreign Category"]) {
+        const created = await pool.query<{ id: number }>(
+          `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+           VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+          [name, `organize-${randomUUID()}`, adminSession.userId],
+        );
+        communityIds.push(created.rows[0].id);
+      }
+      const [communityId, foreignCommunityId] = communityIds;
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')`,
+        [communityId, managerSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [managerSession.userId, communityId, adminSession.userId],
+      );
+      const category = await pool.query<{ id: number; community_id: number }>(
+        `INSERT INTO irc_categories (name, owner_id, community_id)
+         VALUES ($1, $2, $3), ($4, $2, $5) RETURNING id, community_id`,
+        [`team-${randomUUID().slice(0, 8)}`, adminSession.userId, communityId,
+          `other-${randomUUID().slice(0, 8)}`, foreignCommunityId],
+      );
+      const ownCategoryId = category.rows.find((row) => row.community_id === communityId)?.id;
+      const foreignCategoryId = category.rows.find((row) => row.community_id === foreignCommunityId)?.id;
+      assert.ok(ownCategoryId && foreignCategoryId);
+      const createdChannel = await pool.query<{ id: number }>(
+        `INSERT INTO irc_channels (name, owner_id, community_id) VALUES ($1, $2, $3) RETURNING id`,
+        [`#managed-${randomUUID().slice(0, 8)}`, adminSession.userId, communityId],
+      );
+      channelId = createdChannel.rows[0].id;
+      const route = `/communities/${communityId}/channels/${channelId}/category`;
+      const patch = (categoryId: unknown): RequestInit => ({
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ categoryId }),
+      });
+      assert.equal((await apiRequest(memberSession, route, patch(ownCategoryId))).status, 403);
+      assert.equal((await apiRequest(managerSession, route, patch(foreignCategoryId))).status, 400);
+      assert.equal((await apiRequest(managerSession, route, patch(undefined))).status, 400);
+      assert.equal((await apiRequest(managerSession, `/communities/${foreignCommunityId}/channels/${channelId}/category`, patch(foreignCategoryId))).status, 403);
+      const assigned = await apiRequest(managerSession, route, patch(ownCategoryId));
+      assert.equal(assigned.status, 200, JSON.stringify(assigned));
+      assert.equal((assigned.body as { categoryId: number }).categoryId, ownCategoryId);
+      assert.equal((assigned.body as { passwordHash?: unknown }).passwordHash, undefined);
+      const unassigned = await apiRequest(managerSession, route, patch(null));
+      assert.equal(unassigned.status, 200, JSON.stringify(unassigned));
+      assert.equal((unassigned.body as { categoryId: null }).categoryId, null);
+    } finally {
+      if (channelId !== null) await removeTestChannels([channelId], [adminSession.userId]);
+      if (communityIds.length) await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+    }
+  });
+
   test("lets channel owners and platform admins delete channels", async () => {
     const ownerSession = await createTestSession("channel_delete_owner");
     const channelIds: number[] = [];

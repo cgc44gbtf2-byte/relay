@@ -2468,6 +2468,60 @@ router.post("/communities/:communityId/channels", requireAuth, async (req: Authe
   res.status(201).json({ ...channel, passwordHash: undefined });
 });
 
+router.patch("/communities/:communityId/channels/:channelId/category", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const channelId = Number(param(req, "channelId"));
+  const categoryId = req.body?.categoryId;
+  if (!Number.isSafeInteger(communityId) || communityId < 1 || !Number.isSafeInteger(channelId) || channelId < 1
+    || (categoryId !== null && (!Number.isSafeInteger(categoryId) || categoryId < 1))) {
+    res.status(400).json({ error: "Choose a valid channel and category or unassigned." });
+    return;
+  }
+  const result = await db.transaction(async (tx) => {
+    if (!(await hasPermission(userId, "manage_community", { communityId }, tx, true))) {
+      return { outcome: "forbidden" } as const;
+    }
+    const [community] = await tx.select({ id: communitiesTable.id }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("share");
+    if (!community) return { outcome: "not_found" } as const;
+    const [channel] = await tx.select({ id: channelsTable.id }).from(channelsTable)
+      .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
+      .for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+    if (categoryId !== null) {
+      const [category] = await tx.select({ id: categoriesTable.id }).from(categoriesTable)
+        .where(and(eq(categoriesTable.id, categoryId), eq(categoriesTable.communityId, communityId)))
+        .for("share");
+      if (!category) return { outcome: "wrong_workspace" } as const;
+    }
+    const [updated] = await tx.update(channelsTable).set({ categoryId })
+      .where(eq(channelsTable.id, channelId)).returning();
+    return { outcome: "updated", updated } as const;
+  });
+  if (result.outcome === "forbidden") {
+    res.status(403).json({ error: "You cannot organize channels in this workspace." });
+    return;
+  }
+  if (result.outcome === "not_found") {
+    res.status(404).json({ error: "Channel not found in this workspace." });
+    return;
+  }
+  if (result.outcome === "wrong_workspace") {
+    res.status(400).json({ error: "Category must belong to this workspace." });
+    return;
+  }
+  await writeCommunityAudit(userId, "moved_community_channel_category", communityId, {
+    resourceType: "channel",
+    resourceId: channelId,
+    resourceLabel: result.updated.name,
+    details: categoryId === null ? "Moved to uncategorized" : `Moved to category ${categoryId}`,
+  });
+  wsHub.broadcastChannel(channelId, { type: "channel", channel: { ...result.updated, passwordHash: undefined } });
+  wsHub.broadcastChannelListChanged();
+  res.json({ ...result.updated, passwordHash: undefined });
+});
+
 router.delete("/communities/:communityId/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
