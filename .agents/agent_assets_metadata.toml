@@ -42,3 +42,17 @@ mtime_ms = 1790130592800
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/e9211cc4-9307-4888-a18a-01a5cd3134e1/e7dba427-ba01-420d-9236-2f1d9a348602"
 storage_version_token = "1790130593379983"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "tjQnml31uR1khdcE2pqSf"
+uri = "file://screenshots/owner-test-accounts-dashboard.jpg"
+type = "image"
+title = "Owner Dashboard — Test Accounts"
+description = "Representative snapshot of the owner-only Test accounts panel with all five switchable roles provisioned."
+logical_id = "47e148fb-ba20-47ac-b2db-6023531f9d6c"
+content_hash = "sha256:0505a15386e7f4cf704fdd1df4cd349295a70b6f6e97daf94412732fda5ac649"
+size = 63748
+mtime_ms = 1790180386893
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:b1ffe33d-4813-46ea-862b-2545e608b832/47e148fb-ba20-47ac-b2db-6023531f9d6c/1d4f4c75-4ea3-473e-a08e-9caa7e38f348"
+storage_version_token = "1790180400443943"
+content_type = "image/jpeg"
