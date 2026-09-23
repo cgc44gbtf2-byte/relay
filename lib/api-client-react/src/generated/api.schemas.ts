@@ -76,6 +76,67 @@ export interface IrcMessageInput {
   text: string;
 }
 
+export type OnboardingCommunityPlan = typeof OnboardingCommunityPlan[keyof typeof OnboardingCommunityPlan];
+
+
+export const OnboardingCommunityPlan = {
+  free_community: 'free_community',
+  paid_workspace: 'paid_workspace',
+} as const;
+
+export interface OnboardingCommunity {
+  id: number;
+  name: string;
+  slug: string;
+  plan: OnboardingCommunityPlan;
+  onboardingStep: number;
+  joined: boolean;
+  canManage: boolean;
+}
+
+export type OnboardingStateNextStep = typeof OnboardingStateNextStep[keyof typeof OnboardingStateNextStep];
+
+
+export const OnboardingStateNextStep = {
+  create: 'create',
+  configure: 'configure',
+  invite: 'invite',
+  start: 'start',
+} as const;
+
+export interface OnboardingState {
+  nextStep: OnboardingStateNextStep;
+  ownerCommunity: OnboardingCommunity | null;
+  communities: OnboardingCommunity[];
+}
+
+export type OnboardingProgressInputStep = typeof OnboardingProgressInputStep[keyof typeof OnboardingProgressInputStep];
+
+
+export const OnboardingProgressInputStep = {
+  NUMBER_2: 2,
+  NUMBER_9: 9,
+} as const;
+
+export interface OnboardingProgressInput {
+  step: OnboardingProgressInputStep;
+}
+
+export type OnboardingProgressNextStep = typeof OnboardingProgressNextStep[keyof typeof OnboardingProgressNextStep];
+
+
+export const OnboardingProgressNextStep = {
+  create: 'create',
+  configure: 'configure',
+  invite: 'invite',
+  start: 'start',
+} as const;
+
+export interface OnboardingProgress {
+  community: OnboardingCommunity;
+  nextStep: OnboardingProgressNextStep;
+}
+
 export type GetIrcStateParams = {
 /**
  * @minLength 1
