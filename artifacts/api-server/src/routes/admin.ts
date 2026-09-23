@@ -200,6 +200,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         topic: channelsTable.topic,
         ownerId: channelsTable.ownerId,
         communityId: channelsTable.communityId,
+        categoryId: channelsTable.categoryId,
         communityName: communitiesTable.name,
         createdAt: channelsTable.createdAt,
         memberCount: count(channelMembersTable.userId),

@@ -2130,6 +2130,96 @@ router.delete("/communities/:communityId/categories/:categoryId", requireAuth, a
   res.json({ ok: true, categoryId });
 });
 
+router.delete("/communities/:communityId/categories/:categoryId/with-channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const categoryId = Number(param(req, "categoryId"));
+  const confirmation = deletionConfirmation(req.body);
+  if (!Number.isInteger(communityId) || !Number.isInteger(categoryId) || confirmation === null) {
+    res.status(400).json({ error: "Confirmation is required." });
+    return;
+  }
+  const [community] = await db.select({ ownerId: communitiesTable.ownerId, name: communitiesTable.name })
+    .from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community || !exactCommunityOwner(community.ownerId, userId)) {
+    res.status(403).json({ error: "Only the exact workspace owner can delete a category and all of its channels." });
+    return;
+  }
+  const removedChannelIds: number[] = [];
+  const objectPaths: string[] = [];
+  const deletion = await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    if (!lockedCommunity || !exactCommunityOwner(lockedCommunity.ownerId, userId)) return { outcome: "forbidden" } as const;
+    const [category] = await tx.select({ id: categoriesTable.id, name: categoriesTable.name }).from(categoriesTable)
+      .where(and(eq(categoriesTable.id, categoryId), eq(categoriesTable.communityId, communityId))).for("update");
+    if (!category) return { outcome: "not_found" } as const;
+    if (!confirmationMatches(
+      "DELETE CATEGORY {target} AND CHANNELS FROM WORKSPACE {workspace}",
+      confirmation,
+      category.name,
+      community.name,
+    )) return { outcome: "confirmation", category } as const;
+    const channels = await tx.select({ id: channelsTable.id }).from(channelsTable)
+      .where(and(eq(channelsTable.communityId, communityId), eq(channelsTable.categoryId, categoryId)));
+    removedChannelIds.push(...channels.map(({ id }) => id));
+    if (removedChannelIds.length) {
+      const requests = await tx.select({ id: channelJoinRequestsTable.id }).from(channelJoinRequestsTable)
+        .where(inArray(channelJoinRequestsTable.channelId, removedChannelIds));
+      await tx.delete(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "channel"),
+        inArray(notificationsTable.entityId, removedChannelIds.map(String)),
+      ));
+      if (requests.length) {
+        await tx.delete(notificationsTable).where(and(
+          eq(notificationsTable.entityType, "channel_join_request"),
+          inArray(notificationsTable.entityId, requests.map(({ id }) => String(id))),
+        ));
+      }
+      await tx.delete(channelJoinRequestsTable).where(inArray(channelJoinRequestsTable.channelId, removedChannelIds));
+      await tx.delete(channelInvitesTable).where(inArray(channelInvitesTable.channelId, removedChannelIds));
+      await tx.delete(channelBansTable).where(inArray(channelBansTable.channelId, removedChannelIds));
+      const messages = await tx.select({ id: messagesTable.id }).from(messagesTable)
+        .where(inArray(messagesTable.channelId, removedChannelIds));
+      if (messages.length) {
+        const messageIds = messages.map(({ id }) => id);
+        const paths = await tx.select({ objectPath: messageAttachmentsTable.objectPath }).from(messageAttachmentsTable)
+          .where(inArray(messageAttachmentsTable.messageId, messageIds));
+        objectPaths.push(...paths.map(({ objectPath }) => objectPath));
+        await enqueueObjectDeletionJobs(tx, paths.map(({ objectPath }) => objectPath), `category:${categoryId}`);
+        await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, messageIds));
+        await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, messageIds));
+      }
+      await tx.delete(channelMembersTable).where(inArray(channelMembersTable.channelId, removedChannelIds));
+      await tx.delete(messagesTable).where(inArray(messagesTable.channelId, removedChannelIds));
+      await tx.delete(channelsTable).where(inArray(channelsTable.id, removedChannelIds));
+    }
+    await tx.delete(categoriesTable).where(eq(categoriesTable.id, categoryId));
+    return { outcome: "deleted", category } as const;
+  });
+  if (deletion.outcome === "forbidden") {
+    res.status(403).json({ error: "You cannot delete this category and its channels." });
+    return;
+  }
+  if (deletion.outcome === "not_found") {
+    res.status(404).json({ error: "Category not found." });
+    return;
+  }
+  if (deletion.outcome === "confirmation") {
+    res.status(400).json({ error: "Confirmation does not match.", requiredConfirmation: `DELETE CATEGORY ${deletion.category.name} AND CHANNELS FROM WORKSPACE ${community.name}` });
+    return;
+  }
+  for (const channelId of removedChannelIds) wsHub.broadcastChannelRemoved(channelId);
+  await writeCommunityAudit(userId, "deleted_community_category_with_channels", communityId, deletion.category.name);
+  res.json({
+    ok: true,
+    categoryId,
+    deletedChannelCount: removedChannelIds.length,
+    cleanupPending: objectPaths.length > 0,
+    cleanupPendingCount: new Set(objectPaths).size,
+  });
+});
+
 router.delete("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const actorId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
