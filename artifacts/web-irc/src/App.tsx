@@ -501,6 +501,8 @@ function ChatApp() {
   const [newCategoryDescription, setNewCategoryDescription] = useState("");
   const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
   const [showRequests, setShowRequests] = useState(false);
+  const [joiningChannelId, setJoiningChannelId] = useState<number | null>(null);
+  const [joinErrors, setJoinErrors] = useState<Record<number, string>>({});
   const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -856,14 +858,39 @@ function ChatApp() {
     typingAdvertisedRef.current = false;
   }, [currentChannelId, activeDm]);
   const joinChannel = async (channel: Channel) => {
-    const result = await api<{ status: "member" | "pending" }>(`/channels/${channel.id}/join`, { method: "POST", body: "{}" });
-    if (result.status === "pending") {
-      setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, accessStatus: "pending" } : item));
-      window.alert("Join request sent. The channel owner will review it.");
-      return;
+    if (joiningChannelId === channel.id) return;
+    setJoiningChannelId(channel.id);
+    setJoinErrors((errors) => {
+      const next = { ...errors };
+      delete next[channel.id];
+      return next;
+    });
+    try {
+      const result = await api<{ status: "member" | "pending" }>(`/channels/${channel.id}/join`, { method: "POST", body: "{}" });
+      if (result.status === "pending") {
+        setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, accessStatus: "pending" } : item));
+        window.alert("Join request sent. The channel owner will review it.");
+        return;
+      }
+      setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, joined: true, accessStatus: "member" } : item));
+      setCurrentChannelId(channel.id);
+      setActiveDm(null);
+    } catch (error) {
+      if (isMissingChannelError(error)) {
+        try {
+          await refreshChannels();
+        } catch {
+          setJoinErrors((errors) => ({ ...errors, [channel.id]: "The channel is no longer available." }));
+        }
+      } else {
+        setJoinErrors((errors) => ({
+          ...errors,
+          [channel.id]: error instanceof Error ? error.message : "Channel could not be joined.",
+        }));
+      }
+    } finally {
+      setJoiningChannelId((joining) => joining === channel.id ? null : joining);
     }
-    setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, joined: true, accessStatus: "member" } : item));
-    setCurrentChannelId(channel.id); setActiveDm(null);
   };
   const createChannel = async (event: FormEvent) => {
     event.preventDefault();
@@ -998,7 +1025,7 @@ function ChatApp() {
     await api(`/users/${member.id}/block`, { method: "POST", body: "{}" });
     window.alert(`${member.displayName} is now blocked.`);
   };
-  const renderChannel = (channel: Channel) => <button key={channel.id} onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)} className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}><span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span><span className="ml-2 text-[10px]">{channel.accessStatus === "pending" ? "…" : channel.memberCount}</span></button>;
+  const renderChannel = (channel: Channel) => <div key={channel.id}><button disabled={joiningChannelId === channel.id} onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)} className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}><span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span><span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span></button>{joinErrors[channel.id] && <p className="px-2 pb-1 font-mono text-[9px] leading-4 text-destructive">{joinErrors[channel.id]}</p>}</div>;
   if (!profile && bootstrapError) {
     return (
       <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center font-mono">

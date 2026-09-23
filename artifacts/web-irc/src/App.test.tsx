@@ -103,6 +103,8 @@ function installApi({
   notificationsFailure = false,
   channelFailureOnce = false,
   dmPaginationFailureOnce = false,
+  joinFailureOnce = false,
+  fallbackJoined = true,
   uploadFailure = false,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
@@ -121,13 +123,20 @@ function installApi({
   notificationsFailure?: boolean;
   channelFailureOnce?: boolean;
   dmPaginationFailureOnce?: boolean;
+  joinFailureOnce?: boolean;
+  fallbackJoined?: boolean;
   uploadFailure?: boolean;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
-  const fallback = room(2, "#fallback-room");
+  const fallback = {
+    ...room(2, "#fallback-room"),
+    joined: fallbackJoined,
+    accessStatus: fallbackJoined ? "member" as const : "available" as const,
+  };
   let channelListCalls = 0;
   let historyCalls = 0;
   let dmPaginationCalls = 0;
+  let joinCalls = 0;
 
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -209,6 +218,8 @@ function installApi({
       return missingRequest === "topic" ? channelNotFound() : jsonResponse({ ...deleted, topic: "updated" });
     }
     if (url === "/api/channels/2/join" && method === "POST") {
+      joinCalls += 1;
+      if (joinFailureOnce && joinCalls === 1) return jsonResponse({ error: "join temporarily unavailable" }, 500);
       return jsonResponse({ status: "member" });
     }
     return jsonResponse({});
@@ -363,6 +374,24 @@ describe("deleted room recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "load older messages" }));
     expect(await screen.findByText("older recovered message")).toBeTruthy();
     expect(screen.queryByText("Older messages could not be loaded.")).toBeNull();
+  });
+
+  it("keeps a failed channel join retryable and joins after recovery", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      fallbackJoined: false,
+      joinFailureOnce: true,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
+    expect(await screen.findByText("join temporarily unavailable")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: /fallback-room/i }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
+    expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
+    expect(screen.queryByText("join temporarily unavailable")).toBeNull();
   });
 
   it.each([
