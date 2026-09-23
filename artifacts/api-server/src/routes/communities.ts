@@ -2186,18 +2186,49 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
   const channelId = Number(param(req, "channelId"));
-  if (!Number.isInteger(communityId) || !Number.isInteger(channelId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+  if (!Number.isInteger(communityId) || !Number.isInteger(channelId)) {
     res.status(403).json({ error: "You cannot delete channels in this community." });
     return;
   }
-  const [channel] = await db.select({ id: channelsTable.id, name: channelsTable.name })
-    .from(channelsTable)
-    .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)));
-  if (!channel) {
-    res.status(404).json({ error: "Channel not found." });
-    return;
-  }
-  await db.transaction(async (tx) => {
+  const deletion = await db.transaction(async (tx) => {
+    const [channel] = await tx
+      .select({ id: channelsTable.id, name: channelsTable.name })
+      .from(channelsTable)
+      .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
+      .for("update");
+    const [actorMembership] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, channelId),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+    const actorCanManageChannel = await hasPermission(
+      userId,
+      "manage_channel",
+      { communityId, channelId },
+      tx,
+      true,
+    );
+    if (actorMembership?.role !== "owner" && !actorCanManageChannel) {
+      return { outcome: "forbidden" } as const;
+    }
+    if (!channel) return { outcome: "not_found" } as const;
+    const requestIds = await tx
+      .select({ id: channelJoinRequestsTable.id })
+      .from(channelJoinRequestsTable)
+      .where(eq(channelJoinRequestsTable.channelId, channelId));
+    await tx.delete(notificationsTable).where(and(
+      eq(notificationsTable.entityType, "channel"),
+      eq(notificationsTable.entityId, String(channelId)),
+    ));
+    if (requestIds.length) {
+      await tx.delete(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "channel_join_request"),
+        inArray(notificationsTable.entityId, requestIds.map(({ id }) => String(id))),
+      ));
+    }
     await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channelId));
     await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channelId));
     await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channelId));
@@ -2210,10 +2241,24 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
     }
     await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channelId));
     await tx.delete(messagesTable).where(eq(messagesTable.channelId, channelId));
-    await tx.delete(channelsTable).where(eq(channelsTable.id, channelId));
+    const [deleted] = await tx
+      .delete(channelsTable)
+      .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
+      .returning({ id: channelsTable.id });
+    return deleted
+      ? { outcome: "deleted", channel } as const
+      : { outcome: "not_found" } as const;
   });
+  if (deletion.outcome === "forbidden") {
+    res.status(403).json({ error: "You cannot delete channels in this community." });
+    return;
+  }
+  if (deletion.outcome === "not_found") {
+    res.status(404).json({ error: "Channel not found." });
+    return;
+  }
   wsHub.broadcastChannelRemoved(channelId);
-  await writeCommunityAudit(userId, "deleted_community_channel", communityId, channel.name);
+  await writeCommunityAudit(userId, "deleted_community_channel", communityId, deletion.channel.name);
   res.json({ ok: true, channelId });
 });
 

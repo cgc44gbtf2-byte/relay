@@ -7,4 +7,4 @@ Privileged writes that race with role or membership revocation must lock every d
 
 **Why:** A transaction can read an older authorization snapshot and still commit after the revocation commits when no serialization cycle exists. Row locks force revocation and the privileged action to contend directly.
 
-**How to apply:** For role-changing or similarly sensitive operations, lock membership rows in a deterministic order plus the actor's primary-role, scoped-assignment, and custom-permission rows before re-evaluating permission and writing. Keep lock order consistent with deletion paths.
+**How to apply:** For role-changing or similarly sensitive operations, lock membership rows in a deterministic order plus the actor's primary-role, scoped-assignment, and custom-permission rows before re-evaluating permission and writing. For create/approve/delete operations on the same resource, lock the parent row first and keep related state and notification lifecycle changes inside that serialization boundary. Keep lock order consistent across every path.

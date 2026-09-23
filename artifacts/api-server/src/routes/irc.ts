@@ -570,35 +570,65 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
       res.status(403).json({ error: "This channel is invite-only." });
       return;
     }
-    const [existingRequest] = await db
-      .select()
-      .from(channelJoinRequestsTable)
-      .where(and(
-        eq(channelJoinRequestsTable.channelId, channel.id),
-        eq(channelJoinRequestsTable.userId, userId),
-      ));
-    if (existingRequest?.status === "pending") {
+    const requestResult = await db.transaction(async (tx) => {
+      const [lockedChannel] = await tx
+        .select({ id: channelsTable.id, ownerId: channelsTable.ownerId, name: channelsTable.name })
+        .from(channelsTable)
+        .where(eq(channelsTable.id, channel.id))
+        .for("update");
+      if (!lockedChannel) return { outcome: "channel_not_found" } as const;
+      const [existingRequest] = await tx
+        .select()
+        .from(channelJoinRequestsTable)
+        .where(and(
+          eq(channelJoinRequestsTable.channelId, channel.id),
+          eq(channelJoinRequestsTable.userId, userId),
+        ))
+        .for("update");
+      if (existingRequest?.status === "pending") {
+        return { outcome: "pending", request: existingRequest, notification: null } as const;
+      }
+      const [request] = existingRequest
+        ? await tx.update(channelJoinRequestsTable)
+          .set({ status: "pending", createdAt: new Date(), reviewedAt: null, reviewedBy: null })
+          .where(eq(channelJoinRequestsTable.id, existingRequest.id))
+          .returning()
+        : await tx.insert(channelJoinRequestsTable)
+          .values({ channelId: channel.id, userId, status: "pending" })
+          .returning();
+      if (!request) return { outcome: "channel_not_found" } as const;
+      const [notification] = await tx.insert(notificationsTable).values({
+        userId: lockedChannel.ownerId,
+        type: "channel_join_request",
+        category: "join_request",
+        body: `Someone requested access to ${lockedChannel.name}.`,
+        entityType: "channel_join_request",
+        entityId: String(request.id),
+        actionUrl: "/",
+      }).returning();
+      return { outcome: "pending", request, notification: notification ?? null } as const;
+    });
+    if (requestResult.outcome === "channel_not_found") {
+      res.status(404).json(channelNotFoundError);
+      return;
+    }
+    if (requestResult.notification) {
+      wsHub.broadcastUser(requestResult.notification.userId, {
+        type: "notification",
+        notification: {
+          ...requestResult.notification,
+          category: categoryForNotification(
+            requestResult.notification.type,
+            requestResult.notification.category,
+          ),
+        },
+      });
+    }
+    if (!requestResult.notification) {
       res.status(202).json({ ok: true, status: "pending" });
       return;
     }
-    const [request] = existingRequest
-      ? await db.update(channelJoinRequestsTable)
-        .set({ status: "pending", createdAt: new Date(), reviewedAt: null, reviewedBy: null })
-        .where(eq(channelJoinRequestsTable.id, existingRequest.id))
-        .returning()
-      : await db.insert(channelJoinRequestsTable)
-        .values({ channelId: channel.id, userId, status: "pending" })
-        .returning();
-    await createNotification({
-      userId: channel.ownerId,
-      type: "channel_join_request",
-      category: "join_request",
-      body: `Someone requested access to ${channel.name}.`,
-      entityType: "channel_join_request",
-      entityId: request.id,
-      actionUrl: `/`,
-    });
-    res.status(202).json({ ok: true, status: request.status });
+    res.status(202).json({ ok: true, status: requestResult.request.status });
     return;
   }
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
@@ -655,6 +685,14 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
     return;
   }
   const review = await db.transaction(async (tx) => {
+    const [lockedChannel] = await tx
+      .select({ id: channelsTable.id })
+      .from(channelsTable)
+      .where(eq(channelsTable.id, channel.id))
+      .for("update");
+    if (!lockedChannel) {
+      return { outcome: "channel_not_found" } as const;
+    }
     const [request] = await tx
       .select()
       .from(channelJoinRequestsTable)
@@ -696,8 +734,22 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
         .values({ channelId: channel.id, userId: updatedRequest.userId })
         .onConflictDoNothing();
     }
-    return { outcome: "updated", request: updatedRequest } as const;
+    const [notification] = await tx.insert(notificationsTable).values({
+      userId: updatedRequest.userId,
+      type: decision === "approve" ? "channel_join_approved" : "channel_join_rejected",
+      category: "join_request",
+      body: decision === "approve"
+        ? `Your request to join ${channel.name} was approved.`
+        : `Your request to join ${channel.name} was declined.`,
+      entityType: "channel",
+      entityId: String(channel.id),
+    }).returning();
+    return { outcome: "updated", request: updatedRequest, notification: notification ?? null } as const;
   });
+  if (review.outcome === "channel_not_found") {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
   if (review.outcome === "forbidden") {
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
@@ -707,13 +759,13 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
     return;
   }
   const { request } = review;
-  if (decision === "approve") {
-    void createNotification({ userId: request.userId, type: "channel_join_approved", category: "join_request", body: `Your request to join ${channel.name} was approved.`, entityType: "channel", entityId: channel.id }).catch((error: unknown) => {
-      logger.warn({ err: error, requestId: request.id }, "Join-request approval notification failed.");
-    });
-  } else {
-    void createNotification({ userId: request.userId, type: "channel_join_rejected", category: "join_request", body: `Your request to join ${channel.name} was declined.`, entityType: "channel", entityId: channel.id }).catch((error: unknown) => {
-      logger.warn({ err: error, requestId: request.id }, "Join-request rejection notification failed.");
+  if (review.notification) {
+    wsHub.broadcastUser(review.notification.userId, {
+      type: "notification",
+      notification: {
+        ...review.notification,
+        category: categoryForNotification(review.notification.type, review.notification.category),
+      },
     });
   }
   res.json({ ok: true, status: request.status });
@@ -900,24 +952,72 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
 
 router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const channel = await channelFor(param(req, "channelId"));
-  if (!channel) {
+  const channelId = Number(param(req, "channelId"));
+  if (!Number.isInteger(channelId)) {
     res.status(404).json(channelNotFoundError);
     return;
   }
-  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
-    res.status(403).json({ error: "Only channel owners and moderators can delete this channel." });
-    return;
-  }
-  await db.transaction(async (tx) => {
+  const deletion = await db.transaction(async (tx) => {
+    const [channel] = await tx
+      .select()
+      .from(channelsTable)
+      .where(eq(channelsTable.id, channelId))
+      .for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+    const [actorMembership] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, channel.id),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+    const actorCanManageChannel = await hasPermission(
+      userId,
+      "manage_channel",
+      { channelId: channel.id },
+      tx,
+      true,
+    );
+    if (actorMembership?.role !== "owner" && !actorCanManageChannel) {
+      return { outcome: "forbidden" } as const;
+    }
+    const requestIds = await tx
+      .select({ id: channelJoinRequestsTable.id })
+      .from(channelJoinRequestsTable)
+      .where(eq(channelJoinRequestsTable.channelId, channel.id));
+    await tx.delete(notificationsTable).where(and(
+      eq(notificationsTable.entityType, "channel"),
+      eq(notificationsTable.entityId, String(channel.id)),
+    ));
+    if (requestIds.length) {
+      await tx.delete(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "channel_join_request"),
+        inArray(notificationsTable.entityId, requestIds.map(({ id }) => String(id))),
+      ));
+    }
     await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channel.id));
     await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channel.id));
     await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channel.id));
     await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channel.id));
     await tx.delete(messagesTable).where(eq(messagesTable.channelId, channel.id));
-    await tx.delete(channelsTable).where(eq(channelsTable.id, channel.id));
+    const [deleted] = await tx
+      .delete(channelsTable)
+      .where(eq(channelsTable.id, channel.id))
+      .returning({ id: channelsTable.id });
+    return deleted
+      ? { outcome: "deleted", channelId: deleted.id } as const
+      : { outcome: "not_found" } as const;
   });
-  wsHub.broadcastChannelRemoved(channel.id);
+  if (deletion.outcome === "not_found") {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (deletion.outcome === "forbidden") {
+    res.status(403).json({ error: "Only channel owners or channel managers can delete this channel." });
+    return;
+  }
+  wsHub.broadcastChannelRemoved(deletion.channelId);
   res.json({ ok: true });
 });
 
