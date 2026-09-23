@@ -20,6 +20,7 @@ import { createNotifications } from "../lib/notifications";
 import { channelNotFoundError } from "./errors";
 import { ensurePermissionCatalog, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
 import { isPositiveSafeInteger, isValidQuery } from "../lib/validation";
+import { wsHub } from "../lib/ws";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -659,21 +660,77 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
   const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
   const channelId = Number(rawId);
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
-  if (!Number.isInteger(channelId) || topic === undefined) {
-    res.status(400).json({ error: "A valid channel and topic are required." });
+  const hasCategoryId = Object.prototype.hasOwnProperty.call(req.body, "categoryId");
+  const categoryId = req.body.categoryId === null
+    ? null
+    : isPositiveSafeInteger(req.body.categoryId)
+      ? req.body.categoryId
+      : undefined;
+  if (
+    !Number.isInteger(channelId)
+    || (topic === undefined && !hasCategoryId)
+    || (hasCategoryId && categoryId === undefined)
+  ) {
+    res.status(400).json({ error: "A valid channel update is required." });
     return;
   }
-  const [updated] = await db
-    .update(channelsTable)
-    .set({ topic })
-    .where(eq(channelsTable.id, channelId))
-    .returning();
-  if (!updated) {
+  const result = await db.transaction(async (tx) => {
+    const [currentActor] = await tx.select({ role: usersTable.role })
+      .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
+    const [channel] = await tx.select().from(channelsTable)
+      .where(eq(channelsTable.id, channelId)).for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+    if (categoryId !== null && categoryId !== undefined) {
+      const [category] = await tx
+        .select({ communityId: categoriesTable.communityId })
+        .from(categoriesTable)
+        .where(eq(categoriesTable.id, categoryId))
+        .for("share");
+      if (!category || category.communityId !== channel.communityId) {
+        return { outcome: "wrong_workspace" } as const;
+      }
+    }
+    const [updated] = await tx
+      .update(channelsTable)
+      .set({
+        ...(topic === undefined ? {} : { topic }),
+        ...(hasCategoryId ? { categoryId } : {}),
+      })
+      .where(eq(channelsTable.id, channelId))
+      .returning();
+    return { outcome: "updated", updated } as const;
+  });
+  if (result.outcome === "forbidden") {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  if (result.outcome === "not_found") {
     res.status(404).json(channelNotFoundError);
     return;
   }
-  await writeAudit(actor.clerkId, actor.displayName, "updated_channel_topic", String(channelId), updated.name, topic || "Cleared channel topic");
-  res.json(updated);
+  if (result.outcome === "wrong_workspace") {
+    res.status(400).json({ error: "The selected room must belong to the same workspace as the channel." });
+    return;
+  }
+  const { updated } = result;
+  const auditDetails = hasCategoryId
+    ? categoryId === null
+      ? "Moved to unassigned channels"
+      : `Moved to room ${categoryId}`
+    : topic || "Cleared channel topic";
+  await writeAudit(
+    actor.clerkId,
+    actor.displayName,
+    hasCategoryId ? "moved_channel_room" : "updated_channel_topic",
+    String(channelId),
+    updated.name,
+    auditDetails,
+  );
+  const { passwordHash: _passwordHash, ...safeChannel } = updated;
+  wsHub.broadcastChannel(channelId, { type: "channel", channel: safeChannel });
+  if (hasCategoryId) wsHub.broadcastChannelListChanged();
+  res.json(safeChannel);
 });
 
 router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

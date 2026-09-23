@@ -1002,13 +1002,19 @@ router.post("/channels/:channelId/file-messages", requireAuth, async (req: Authe
 
 router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const channel = await channelFor(param(req, "channelId"));
-  if (!channel) {
+  const channelId = Number(param(req, "channelId"));
+  if (!Number.isSafeInteger(channelId) || channelId < 1) {
     res.status(404).json(channelNotFoundError);
     return;
   }
-  if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
-    res.status(403).json({ error: "Only channel owners and moderators can edit this channel." });
+  const hasCategoryId = Object.prototype.hasOwnProperty.call(req.body, "categoryId");
+  const categoryId = req.body.categoryId === null
+    ? null
+    : typeof req.body.categoryId === "number" && Number.isSafeInteger(req.body.categoryId) && req.body.categoryId > 0
+      ? req.body.categoryId
+      : undefined;
+  if (hasCategoryId && categoryId === undefined) {
+    res.status(400).json({ error: "Choose a valid category or unassigned." });
     return;
   }
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
@@ -1023,21 +1029,51 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     res.status(400).json({ error: "Channel passwords must be at least 4 characters." });
     return;
   }
-  const [updated] = await db.update(channelsTable).set({
-    ...(topic === undefined ? {} : { topic }),
-    ...(description === undefined ? {} : { description }),
-    ...(isInviteOnly === undefined ? {} : { isInviteOnly }),
-    ...(password === undefined ? {} : { passwordHash: password ? passwordHash(password) : null }),
-  }).where(eq(channelsTable.id, channel.id)).returning();
-  await db.insert(moderationActionsTable).values({
-    actorId: userId,
-    communityId: channel.communityId,
-    channelId: channel.id,
-    action: "updated_channel",
-    details: topic !== undefined ? `topic:${topic}` : "channel settings changed",
+  const result = await db.transaction(async (tx) => {
+    const [channel] = await tx.select().from(channelsTable)
+      .where(eq(channelsTable.id, channelId)).for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+    const [membership] = await tx.select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(eq(channelMembersTable.channelId, channelId), eq(channelMembersTable.userId, userId)))
+      .for("update");
+    if (membership?.role !== "owner" && membership?.role !== "moderator") return { outcome: "forbidden" } as const;
+    if (categoryId !== null && categoryId !== undefined) {
+      const [category] = await tx.select({ communityId: categoriesTable.communityId })
+        .from(categoriesTable).where(eq(categoriesTable.id, categoryId)).for("share");
+      if (!category || category.communityId !== channel.communityId) return { outcome: "wrong_workspace" } as const;
+    }
+    const [updated] = await tx.update(channelsTable).set({
+      ...(topic === undefined ? {} : { topic }),
+      ...(description === undefined ? {} : { description }),
+      ...(isInviteOnly === undefined ? {} : { isInviteOnly }),
+      ...(password === undefined ? {} : { passwordHash: password ? passwordHash(password) : null }),
+      ...(hasCategoryId ? { categoryId } : {}),
+    }).where(eq(channelsTable.id, channelId)).returning();
+    await tx.insert(moderationActionsTable).values({
+      actorId: userId,
+      communityId: channel.communityId,
+      channelId,
+      action: "updated_channel",
+      details: hasCategoryId ? `category:${categoryId ?? "unassigned"}` : topic !== undefined ? `topic:${topic}` : "channel settings changed",
+    });
+    return { outcome: "updated", updated } as const;
   });
-  wsHub.broadcastChannel(channel.id, { type: "channel", channel: publicChannel(updated) });
-  res.json(publicChannel(updated));
+  if (result.outcome === "not_found") {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (result.outcome === "forbidden") {
+    res.status(403).json({ error: "Only channel owners and moderators can edit this channel." });
+    return;
+  }
+  if (result.outcome === "wrong_workspace") {
+    res.status(400).json({ error: "The selected category must belong to the same workspace as the channel." });
+    return;
+  }
+  wsHub.broadcastChannel(channelId, { type: "channel", channel: publicChannel(result.updated) });
+  if (hasCategoryId) wsHub.broadcastChannelListChanged();
+  res.json(publicChannel(result.updated));
 });
 
 router.delete("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

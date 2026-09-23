@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { DocumentCenter, ownerConfirmationPhrase } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, ownerConfirmationPhrase } from "./App";
 
 type Channel = {
   id: number;
@@ -66,6 +66,38 @@ const room = (id: number, name: string, ownerId = "owner-1"): Channel => ({
   joined: true,
   accessStatus: "member",
   memberCount: 2,
+});
+
+describe("channel category organization", () => {
+  it("offers only same-workspace categories and can assign or unassign a channel", async () => {
+    const onMove = vi.fn().mockResolvedValue(true);
+    const channel = {
+      id: 7,
+      name: "#team",
+      topic: "",
+      memberCount: 2,
+      communityId: 13,
+      communityName: "Workspace 13",
+      categoryId: null as number | null,
+      createdAt: "2026-09-21T12:00:00.000Z",
+    };
+    const categories = [
+      { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
+      { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
+    ];
+    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
+    const select = screen.getByTestId("select-organize-category") as HTMLSelectElement;
+    expect(select.querySelector('option[value="31"]')).not.toBeNull();
+    expect(select.querySelector('option[value="32"]')).toBeNull();
+    fireEvent.change(select, { target: { value: "31" } });
+    fireEvent.click(screen.getByTestId("button-organize-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith(channel, 31));
+
+    rerender(<AdminChannelRoomOrganizer channels={[{ ...channel, categoryId: 31 }]} categories={categories} working={false} onMove={onMove} />);
+    fireEvent.click(screen.getByTestId("button-organize-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenLastCalledWith(expect.objectContaining({ id: 7 }), null));
+  });
 });
 
 const message = (channelId: number, body: string, id = `message-${channelId}`) => ({
@@ -582,7 +614,7 @@ describe("deleted room recovery", () => {
   it("refreshes the active room after reconnecting and replaces stale messages", async () => {
     await renderChat({
       missingRequest: "event",
-      fallbackChannels: [room(2, "#fallback-room")],
+      fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
       reconnectedMessages: [
         {
           ...message(1, "reaction survived", "reaction-message"),

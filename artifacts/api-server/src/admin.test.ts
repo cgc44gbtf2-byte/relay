@@ -3357,6 +3357,73 @@ describe("admin access controls", () => {
     }
   });
 
+  test("moves existing channels between categories without moving them across workspaces or losing history", async () => {
+    let channelId: number | null = null;
+    let globalCategoryId: number | null = null;
+    let workspaceId: number | null = null;
+    const patch = (categoryId: number | null | string): RequestInit => ({
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ categoryId }),
+    });
+    try {
+      const createdCategory = await apiRequest(adminSession, "/categories", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `room-${randomUUID().slice(0, 8)}` }),
+      });
+      assert.equal(createdCategory.status, 201, JSON.stringify(createdCategory));
+      globalCategoryId = (createdCategory.body as { id: number }).id;
+
+      const createdChannel = await apiRequest(adminSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `#move-${randomUUID().slice(0, 8)}` }),
+      });
+      assert.equal(createdChannel.status, 201, JSON.stringify(createdChannel));
+      channelId = (createdChannel.body as { id: number }).id;
+      const message = await apiRequest(adminSession, `/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Keep this message in place." }),
+      });
+      assert.equal(message.status, 201, JSON.stringify(message));
+
+      const unauthorized = await apiRequest(memberSession, `/channels/${channelId}`, patch(globalCategoryId));
+      assert.equal(unauthorized.status, 403, JSON.stringify(unauthorized));
+      const assigned = await apiRequest(adminSession, `/channels/${channelId}`, patch(globalCategoryId));
+      assert.equal(assigned.status, 200, JSON.stringify(assigned));
+      assert.equal((assigned.body as { categoryId: number }).categoryId, globalCategoryId);
+
+      const workspace = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+        ["Move Scope Workspace", `move-scope-${randomUUID()}`, adminSession.userId],
+      );
+      workspaceId = workspace.rows[0].id;
+      const workspaceCategory = await pool.query<{ id: number }>(
+        `INSERT INTO irc_categories (name, owner_id, community_id) VALUES ($1, $2, $3) RETURNING id`,
+        [`scoped-${randomUUID().slice(0, 8)}`, adminSession.userId, workspaceId],
+      );
+      for (const route of [`/channels/${channelId}`, `/admin/channels/${channelId}`]) {
+        const rejected = await apiRequest(adminSession, route, patch(workspaceCategory.rows[0].id));
+        assert.equal(rejected.status, 400, JSON.stringify(rejected));
+      }
+      const malformed = await apiRequest(adminSession, `/admin/channels/${channelId}`, patch("not-an-id"));
+      assert.equal(malformed.status, 400, JSON.stringify(malformed));
+      const unassigned = await apiRequest(adminSession, `/admin/channels/${channelId}`, patch(null));
+      assert.equal(unassigned.status, 200, JSON.stringify(unassigned));
+      assert.equal((unassigned.body as { categoryId: null }).categoryId, null);
+      const history = await apiRequest(adminSession, `/channels/${channelId}/messages`);
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.deepEqual((history.body as { messages: Array<{ body: string }> }).messages.map((row) => row.body), ["Keep this message in place."]);
+    } finally {
+      if (channelId !== null) await removeTestChannels([channelId], [adminSession.userId]);
+      if (globalCategoryId !== null) await pool.query("DELETE FROM irc_categories WHERE id = $1", [globalCategoryId]);
+      if (workspaceId !== null) await pool.query("DELETE FROM irc_communities WHERE id = $1", [workspaceId]);
+    }
+  });
+
   test("lets channel owners and platform admins delete channels", async () => {
     const ownerSession = await createTestSession("channel_delete_owner");
     const channelIds: number[] = [];

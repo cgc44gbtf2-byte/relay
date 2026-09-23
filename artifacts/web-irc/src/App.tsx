@@ -81,13 +81,14 @@ type Profile = {
   isTestAccount?: boolean;
   testRole?: string | null;
 };
-type Category = { id: number; name: string; description: string; ownerId: string };
+type Category = { id: number; name: string; description: string; ownerId: string; communityId: number | null };
 type Channel = {
   id: number;
   name: string;
   topic: string;
   description: string;
   ownerId: string;
+  communityId: number | null;
   categoryId: number | null;
   category?: Category | null;
   isPrivate: boolean;
@@ -498,6 +499,10 @@ function ChatApp() {
   const [newChannelTopic, setNewChannelTopic] = useState("");
   const [newChannelDescription, setNewChannelDescription] = useState("");
   const [newChannelCategoryId, setNewChannelCategoryId] = useState("");
+  const [organizeChannelOpen, setOrganizeChannelOpen] = useState(false);
+  const [organizeCategoryId, setOrganizeCategoryId] = useState("");
+  const [organizeWorking, setOrganizeWorking] = useState(false);
+  const [organizeError, setOrganizeError] = useState("");
   const [newChannelPrivate, setNewChannelPrivate] = useState(false);
   const [newChannelInviteOnly, setNewChannelInviteOnly] = useState(false);
   const [newChannelPassword, setNewChannelPassword] = useState("");
@@ -545,6 +550,9 @@ function ChatApp() {
     });
     channelRefreshRef.current = request;
     return request;
+  };
+  const refreshChannelOrganization = async (): Promise<void> => {
+    await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
   };
 
   const recoverFromMissingChannel = async (channelId: number) => {
@@ -639,9 +647,11 @@ function ChatApp() {
         const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
         socket = connectedSocket;
         connectedSocket.onopen = () => {
+          const wasReconnect = reconnectAttempt > 0;
           reconnectAttempt = 0;
           setConnection("live");
           setWs(connectedSocket);
+          if (wasReconnect) void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
           if (currentChannelId && !activeDm) {
             connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
           }
@@ -665,6 +675,7 @@ function ChatApp() {
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
           if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
+           if (data.type === "channel_list_changed") void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
             if (currentChannelIdRef.current === data.channelId) void recoverFromMissingChannel(data.channelId);
@@ -989,6 +1000,25 @@ function ChatApp() {
       }
     }
   };
+  const moveCurrentChannel = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
+    const channelId = currentChannel.id;
+    setOrganizeWorking(true);
+    setOrganizeError("");
+    try {
+      const updated = await api<Channel>(`/channels/${channelId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ categoryId: organizeCategoryId ? Number(organizeCategoryId) : null }),
+      });
+      setChannels((items) => items.map((item) => item.id === channelId ? { ...item, categoryId: updated.categoryId } : item));
+      setOrganizeChannelOpen(false);
+    } catch (error) {
+      setOrganizeError(error instanceof Error ? error.message : "Could not move channel.");
+    } finally {
+      setOrganizeWorking(false);
+    }
+  };
   const deleteMessage = useCallback(async (message: ChatMessage) => {
     try {
       const deleted = await api<ChatMessage>(`/messages/${message.id}`, { method: "DELETE" });
@@ -1121,7 +1151,8 @@ function ChatApp() {
            <div className="min-w-0">{activeDm ? <><p className="font-mono text-[10px] uppercase tracking-[.15em] text-secondary-foreground">direct message</p><h1 className="truncate font-mono text-base font-bold">@{activeDm.username}</h1></> : <><div className="flex items-center gap-2"><Hash className="h-4 w-4 text-primary" /><h1 className="truncate font-mono text-base font-bold">{currentChannel?.name ?? (channels.length > 0 ? "select a channel" : "no channels")}</h1>{currentChannel && <span className="rounded bg-chart-4/10 px-1.5 py-0.5 font-mono text-[9px] uppercase text-chart-4">{currentChannel.isPrivate ? "private" : "public"}</span>}{["owner", "moderator"].includes(actorRole ?? "") && <button onClick={editTopic} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit channel topic" aria-label="Edit channel topic"><Settings className="h-3.5 w-3.5" /></button>}</div><p className="mt-1 truncate text-[11px] text-muted-foreground">{currentChannel?.description || currentChannel?.topic}</p></>}</div>
            <div className="flex items-center gap-1.5">
             <form onSubmit={searchHistory} className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 sm:flex"><Search className="h-3.5 w-3.5 text-muted-foreground" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="search history" className="h-8 w-28 bg-transparent font-mono text-[10px] outline-none" /></form>
-             {!activeDm && joinRequests.length > 0 && <button onClick={() => setShowRequests(true)} className="rounded-md border border-primary/40 px-2 py-1.5 font-mono text-[10px] text-primary hover:bg-primary/10">{joinRequests.length} request{joinRequests.length === 1 ? "" : "s"}</button>}
+              {!activeDm && currentChannel && ["owner", "moderator"].includes(actorRole ?? "") && <button onClick={() => { setOrganizeCategoryId(currentChannel.categoryId === null ? "" : String(currentChannel.categoryId)); setOrganizeError(""); setOrganizeChannelOpen(true); }} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary" data-testid="button-organize-current-channel">organize</button>}
+              {!activeDm && joinRequests.length > 0 && <button onClick={() => setShowRequests(true)} className="rounded-md border border-primary/40 px-2 py-1.5 font-mono text-[10px] text-primary hover:bg-primary/10">{joinRequests.length} request{joinRequests.length === 1 ? "" : "s"}</button>}
             <button onClick={() => setPanel("notifications")} className="relative rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Notifications"><Bell className="h-4 w-4" />{unread > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent" />}</button>
             <button onClick={() => setShowMembers((value) => !value)} className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Toggle members"><Users className="h-4 w-4" /></button>
             <button onClick={() => signOut({ redirectUrl: basePath || "/" })} className="hidden rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground sm:block" aria-label="Sign out"><LogOut className="h-4 w-4" /></button>
@@ -1150,7 +1181,8 @@ function ChatApp() {
       </main>
 
       {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_updated", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
-      {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
+       {organizeChannelOpen && currentChannel && <Overlay title={`Organize ${currentChannel.name}`} onClose={() => { if (!organizeWorking) setOrganizeChannelOpen(false); }}><form onSubmit={moveCurrentChannel} className="space-y-4"><p className="text-xs text-muted-foreground">Move this channel to a category without affecting its members or messages.</p><label className="block font-mono text-xs">category<select value={organizeCategoryId} onChange={(event) => setOrganizeCategoryId(event.target.value)} className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3"><option value="">uncategorized</option>{categories.filter((category) => category.communityId === currentChannel.communityId).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{organizeError && <p role="alert" className="text-xs text-destructive">{organizeError}</p>}<div className="flex justify-end gap-2"><button type="button" disabled={organizeWorking} onClick={() => setOrganizeChannelOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button><button disabled={organizeWorking || organizeCategoryId === (currentChannel.categoryId === null ? "" : String(currentChannel.categoryId))} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{organizeWorking ? "moving…" : "save category"}</button></div></form></Overlay>}
+       {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
       {panel === "search" && <Overlay title={`Search results for “${search}”`} onClose={() => setPanel(null)}><div className="space-y-4">{searchResults.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No messages found.</p> : searchResults.map((message) => <div key={message.id} className="border-b border-border pb-3"><div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span className="text-secondary-foreground">{message.sender?.displayName}</span><span>{timeLabel(message.createdAt)}</span></div><p className="mt-1 text-sm">{message.body}</p></div>)}</div></Overlay>}
        {newChannelOpen && <Overlay title="Create a room" onClose={() => { if (!creatingChannel) { setNewChannelOpen(false); setCreateChannelError(""); } }}><form onSubmit={createChannel} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">channel name</span><input autoFocus required value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="#room-name" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">topic</span><input value={newChannelTopic} onChange={(event) => setNewChannelTopic(event.target.value)} placeholder="What is this room about?" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">description</span><input value={newChannelDescription} onChange={(event) => setNewChannelDescription(event.target.value)} placeholder="A short description for members" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{categories.length > 0 && <label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">category</span><select value={newChannelCategoryId} onChange={(event) => setNewChannelCategoryId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary"><option value="">no category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>}<label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelPrivate} onChange={(event) => setNewChannelPrivate(event.target.checked)} /> private room (owner approval)</label><label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelInviteOnly} onChange={(event) => setNewChannelInviteOnly(event.target.checked)} /> invite-only</label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">optional password</span><input type="password" minLength={4} value={newChannelPassword} onChange={(event) => setNewChannelPassword(event.target.value)} placeholder="at least 4 characters" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{createChannelError && <p className="rounded border border-destructive/30 bg-destructive/10 p-2 font-mono text-[10px] text-destructive">{createChannelError}</p>}<button disabled={creatingChannel} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{creatingChannel ? "creating room…" : "create room"}</button></form></Overlay>}
@@ -1390,6 +1422,74 @@ function AdminAccountsPanel({
 
 function AdminChannelsPanel({ channels, categories, currentId, editingChannel, topicDraft, setTopicDraft, working, onEdit, onSave, onCancel, onClear, onDeleteChannel, onDeleteCategory, onDeleteCategoryWithChannels }: { channels: ConsoleOverview["channels"]; categories: ConsoleOverview["categories"]; currentId: string; editingChannel: number | null; topicDraft: string; setTopicDraft: (value: string) => void; working: boolean; onEdit: (channel: ConsoleOverview["channels"][number]) => void; onSave: (id: number) => void; onCancel: () => void; onClear: (channel: ConsoleOverview["channels"][number]) => void; onDeleteChannel: (channel: ConsoleOverview["channels"][number]) => void; onDeleteCategory: (category: ConsoleOverview["categories"][number]) => void; onDeleteCategoryWithChannels: (category: ConsoleOverview["categories"][number]) => void }) {
   return <div className="space-y-5"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex items-center justify-between"><div><h2 className="font-mono text-sm font-bold">channel registry</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{channels.length} rooms</p></div><Hash className="h-4 w-4 text-primary" /></div></div><div className="divide-y divide-border">{channels.map((channel) => <div key={channel.id} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-sm font-bold text-secondary-foreground">{channel.name}</span><span className="font-mono text-[9px] text-muted-foreground">{channel.memberCount} members · {channel.communityName || "network room"}</span></div>{editingChannel === channel.id ? <div className="mt-3 flex flex-col gap-2 sm:flex-row"><input autoFocus value={topicDraft} onChange={(event) => setTopicDraft(event.target.value)} className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid={`input-topic-${channel.id}`} /><button disabled={working} onClick={() => onSave(channel.id)} className="flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Save className="h-3.5 w-3.5" />save</button><button onClick={onCancel} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button></div> : <p className="mt-2 truncate text-xs text-muted-foreground">{channel.topic || "No topic set"}</p>}</div>{editingChannel !== channel.id && <div className="flex flex-wrap gap-2"><button onClick={() => onEdit(channel)} className="rounded-md border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary"><Settings className="mr-1 inline h-3 w-3" />edit topic</button><button onClick={() => onClear(channel)} className="rounded-md border border-destructive/30 px-2.5 py-1.5 font-mono text-[9px] text-destructive hover:bg-destructive/10"><Trash2 className="mr-1 inline h-3 w-3" />clear history</button><button onClick={() => onDeleteChannel(channel)} className="rounded-md border border-destructive/50 bg-destructive/10 px-2.5 py-1.5 font-mono text-[9px] font-bold text-destructive hover:bg-destructive/20"><X className="mr-1 inline h-3 w-3" />delete channel</button></div>}</div><p className="mt-3 font-mono text-[9px] text-muted-foreground/70">created {timeLabel(channel.createdAt)}</p></div>)}{channels.length === 0 && <EmptyAdminState label="No channels have been created." />}</div></section><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">category registry</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{categories.length} categories</p></div><div className="divide-y divide-border">{categories.map((category) => { const channelCount = channels.filter((channel) => channel.categoryId === category.id).length; const canDeleteWithChannels = category.communityOwnerId === currentId; return <div key={category.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4"><div className="min-w-0"><p className="truncate font-mono text-sm font-bold">{category.name}</p><p className="mt-1 truncate text-xs text-muted-foreground">{category.description || "No description"} · {category.communityName || "unassigned"} · {channelCount} channel{channelCount === 1 ? "" : "s"}</p></div>{category.communityId && <div className="flex flex-wrap items-center gap-2"><button disabled={working} onClick={() => onDeleteCategory(category)} className="rounded-md border border-destructive/40 px-2.5 py-1.5 font-mono text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-50"><Trash2 className="mr-1 inline h-3 w-3" />delete category only</button>{canDeleteWithChannels ? <button disabled={working} onClick={() => onDeleteCategoryWithChannels(category)} className="rounded-md border border-destructive/60 bg-destructive/10 px-2.5 py-1.5 font-mono text-[9px] font-bold text-destructive hover:bg-destructive/20 disabled:opacity-50"><X className="mr-1 inline h-3 w-3" />delete category + channels</button> : <span className="font-mono text-[9px] text-muted-foreground">workspace owner only</span>}</div>}</div>; })}{categories.length === 0 && <EmptyAdminState label="No categories have been created." />}</div></section></div>;
+}
+
+export function AdminChannelRoomOrganizer({
+  channels,
+  categories,
+  working,
+  onMove,
+}: {
+  channels: ConsoleOverview["channels"];
+  categories: ConsoleOverview["categories"];
+  working: boolean;
+  onMove: (channel: ConsoleOverview["channels"][number], categoryId: number | null) => Promise<boolean>;
+}) {
+  const [channelId, setChannelId] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const selectedChannel = channels.find((channel) => String(channel.id) === channelId);
+  const availableRooms = categories.filter((category) => category.communityId === selectedChannel?.communityId);
+  const currentCategoryId = selectedChannel?.categoryId ?? null;
+  const targetCategoryId = categoryId === "" ? null : Number(categoryId);
+
+  return (
+    <section className="mt-5 rounded-lg border border-border bg-card p-5">
+      <h2 className="font-mono text-sm font-bold">organize channels by category</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Move an existing channel without changing its members or message history. Only categories in the same workspace are available.
+      </p>
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <label className="min-w-48 flex-1 font-mono text-[10px] text-muted-foreground">
+          channel
+          <select
+            value={channelId}
+            onChange={(event) => { setChannelId(event.target.value); setCategoryId(""); }}
+            className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-xs text-foreground"
+            data-testid="select-organize-channel"
+          >
+            <option value="">choose a channel</option>
+            {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name} · {channel.communityName || "network"}</option>)}
+          </select>
+        </label>
+        <label className="min-w-48 flex-1 font-mono text-[10px] text-muted-foreground">
+          category
+          <select
+            disabled={!selectedChannel || working}
+            value={categoryId}
+            onChange={(event) => setCategoryId(event.target.value)}
+            className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-xs text-foreground disabled:opacity-50"
+            data-testid="select-organize-category"
+          >
+            <option value="">unassigned</option>
+            {availableRooms.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+          </select>
+        </label>
+        <button
+          disabled={!selectedChannel || working || currentCategoryId === targetCategoryId}
+          onClick={async () => {
+            if (selectedChannel && await onMove(selectedChannel, targetCategoryId)) setCategoryId("");
+          }}
+          className="h-10 rounded-md bg-primary px-4 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50"
+          data-testid="button-organize-channel"
+        >
+          {working ? "moving…" : "move channel"}
+        </button>
+      </div>
+      {selectedChannel && <p className="mt-3 font-mono text-[10px] text-muted-foreground">
+        Current category: {categories.find((category) => category.id === selectedChannel.categoryId)?.name ?? "unassigned"}
+      </p>}
+    </section>
+  );
 }
 
 function AdminRoleAssignmentsPanel({
@@ -1650,6 +1750,21 @@ function AdminConsole() {
   const revokeRole = async () => { if (!pendingRevoke) return; setWorking(true); try { await api(`/admin/role-assignments/${pendingRevoke.id}`, { method: "DELETE" }); setNotice(`Revoked ${pendingRevoke.role} from ${pendingRevoke.displayName}.`); setPendingRevoke(null); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke scoped role"); } finally { setWorking(false); } };
   const sendAnnouncement = async (event: FormEvent) => { event.preventDefault(); const body = announcementDraft.trim(); if (!body) return; setWorking(true); try { await api("/admin/announcements", { method: "POST", body: JSON.stringify({ body }) }); setAnnouncementDraft(""); setAnnouncementOpen(false); setNotice("Announcement sent to all users."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send announcement"); } finally { setWorking(false); } };
   const saveTopic = async (id: number) => { setWorking(true); try { await api(`/admin/channels/${id}`, { method: "PATCH", body: JSON.stringify({ topic: topicDraft }) }); setEditingChannel(null); setNotice("Channel topic saved."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save channel topic"); } finally { setWorking(false); } };
+  const moveChannel = async (channel: ConsoleOverview["channels"][number], categoryId: number | null): Promise<boolean> => {
+    setWorking(true);
+    setError("");
+    try {
+      await api(`/admin/channels/${channel.id}`, { method: "PATCH", body: JSON.stringify({ categoryId }) });
+      setNotice(`${channel.name} moved to ${overview?.categories.find((category) => category.id === categoryId)?.name ?? "unassigned"}.`);
+      await load();
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not move channel");
+      return false;
+    } finally {
+      setWorking(false);
+    }
+  };
   const clearHistory = async () => { if (!pendingClear) return; setWorking(true); try { await api(`/admin/channels/${pendingClear.id}/messages`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }); setNotice(`History cleared for ${pendingClear.name}.`); setPendingClear(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not clear channel history"); } finally { setWorking(false); } };
   const deleteRegistryResource = async () => {
     if (!pendingResourceDelete) return;
@@ -1722,7 +1837,8 @@ function AdminConsole() {
              <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><Activity className="h-4 w-4 text-primary" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} placeholder="filter by actor" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-actor" /><input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} placeholder="filter by action" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-action" /></div></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>
-          )}
+           )}
+           {section === "channels" && overview && <AdminChannelRoomOrganizer channels={overview.channels} categories={overview.categories} working={working} onMove={moveChannel} />}
         </main>
       </div>
       {announcementOpen && <Overlay title="Platform announcement" onClose={() => { if (!working) setAnnouncementOpen(false); }}><form onSubmit={sendAnnouncement}><p className="mb-4 text-sm leading-6 text-muted-foreground">This message will be delivered to every user as a notification.</p><textarea autoFocus required maxLength={500} value={announcementDraft} onChange={(event) => setAnnouncementDraft(event.target.value)} placeholder="Write a clear message for the network…" className="min-h-32 w-full resize-y rounded-md border border-input bg-background p-3 text-sm outline-none focus:border-primary" /><div className="mt-2 text-right font-mono text-[9px] text-muted-foreground">{announcementDraft.length}/500</div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={working} onClick={() => setAnnouncementOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button><button disabled={working || !announcementDraft.trim()} className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Megaphone className="h-3.5 w-3.5" />{working ? "sending…" : "send announcement"}</button></div></form></Overlay>}

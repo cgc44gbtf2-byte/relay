@@ -100,6 +100,12 @@ export class Hub {
     }
   }
 
+  broadcastChannelListChanged(): void {
+    for (const client of this.clients) {
+      this.send(client.socket, { type: "channel_list_changed" });
+    }
+  }
+
   revokeChannelAccess(channelId: number, userId: string): void {
     for (const client of this.clients) {
       if (client.userId !== userId) continue;
