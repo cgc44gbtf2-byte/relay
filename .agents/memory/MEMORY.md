@@ -8,6 +8,8 @@
 - [Audit actor deletion](audit-actor-deletion.md) — preserve administrative history by nulling deleted actor references while retaining actor snapshots.
 - [Workspace type declarations](workspace-type-declarations.md) — rebuild referenced library declarations after shared schema changes before checking dependent packages.
 - [Business workspace isolation](business-workspace-isolation.md) — legacy IRC endpoints default global; every business-facing read and interaction needs an explicit workspace check.
+- [Tenant-bound relationship IDs](tenant-bound-relationship-ids.md) — validate persisted organization IDs against their workspace when consumed, not only when first written.
+- [Document version allocation](document-version-allocation.md) — serialize version allocation and enforce document/version uniqueness in PostgreSQL.
 - [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.
 - [GitHub connector imports](github-connector-imports.md) — initialize empty repos through Contents API and expect separate workflow-write permission for CI files.
 - [Dependency audit platform entries](dependency-audit-platform-entries.md) — pnpm’s graph can include optional packages absent from node_modules on the current platform.

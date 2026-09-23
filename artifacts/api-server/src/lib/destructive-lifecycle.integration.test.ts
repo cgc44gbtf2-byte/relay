@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { and, eq } from "drizzle-orm";
 import {
+  businessDocumentsTable,
   communitiesTable,
   communityMembersTable,
   db,
+  documentVersionsTable,
   pool,
   usersTable,
   userRolesTable,
@@ -183,6 +185,44 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     assert.equal(await finalizePendingAccountDeletion(ids.target, {
       deleteClerkUser: async () => { throw Object.assign(new Error("missing"), { status: 404 }); },
     }), "completed");
+  });
+
+  test("document versions are unique within each document", async () => {
+    const [document] = await db.insert(businessDocumentsTable).values({
+      communityId,
+      title: "Version integrity",
+      ownerId: ids.owner,
+    }).returning({ id: businessDocumentsTable.id });
+    try {
+      await db.insert(documentVersionsTable).values({
+        documentId: document.id,
+        version: 1,
+        objectPath: `/objects/uploads/${suffix}-version-1`,
+        fileName: "version-1.txt",
+        contentType: "text/plain",
+        fileSize: 10,
+        uploadedBy: ids.owner,
+      });
+      await assert.rejects(
+        () => db.insert(documentVersionsTable).values({
+          documentId: document.id,
+          version: 1,
+          objectPath: `/objects/uploads/${suffix}-duplicate`,
+          fileName: "duplicate.txt",
+          contentType: "text/plain",
+          fileSize: 10,
+          uploadedBy: ids.owner,
+        }),
+        (error: unknown) => {
+          const code = typeof error === "object" && error !== null && "cause" in error
+            ? (error as { cause?: { code?: unknown } }).cause?.code
+            : undefined;
+          return code === "23505";
+        },
+      );
+    } finally {
+      await db.delete(businessDocumentsTable).where(eq(businessDocumentsTable.id, document.id));
+    }
   });
 
   test("object deletion retries transient signed DELETE failure and eventually completes", async () => {

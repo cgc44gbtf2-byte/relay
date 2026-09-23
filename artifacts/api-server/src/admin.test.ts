@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -1690,6 +1690,122 @@ describe("admin access controls", () => {
     } finally {
       if (workspaceId !== undefined) {
         await pool.query("DELETE FROM irc_communities WHERE id = $1", [workspaceId]);
+      }
+    }
+  });
+
+  test("rejects invitation organization assignments from another workspace atomically", async () => {
+    const recipient = await createTestSession("cross_workspace_invitation_recipient");
+    const workspaceIds: number[] = [];
+    const token = randomUUID();
+    let foreignTeamId: number | undefined;
+    try {
+      await apiRequest(recipient, "/me");
+      const recipientUser = await clerkClient.users.getUser(recipient.userId);
+      const recipientEmail = recipientUser.emailAddresses[0]?.emailAddress;
+      assert.ok(recipientEmail);
+
+      for (const label of ["Invitation Home", "Invitation Foreign"]) {
+        const workspace = await pool.query<{ id: number }>(
+          `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+           VALUES ($1, $2, $3, 'paid_workspace', true)
+           RETURNING id`,
+          [label, `invitation-scope-${randomUUID()}`, adminSession.userId],
+        );
+        const id = workspace.rows[0]?.id;
+        assert.ok(id);
+        workspaceIds.push(id);
+      }
+      const [homeWorkspaceId, foreignWorkspaceId] = workspaceIds;
+      assert.ok(homeWorkspaceId);
+      assert.ok(foreignWorkspaceId);
+
+      const foreignDepartment = await pool.query<{ id: number }>(
+        `INSERT INTO irc_departments (community_id, name)
+         VALUES ($1, 'Foreign Department')
+         RETURNING id`,
+        [foreignWorkspaceId],
+      );
+      const foreignLocation = await pool.query<{ id: number }>(
+        `INSERT INTO irc_locations (community_id, name)
+         VALUES ($1, 'Foreign Location')
+         RETURNING id`,
+        [foreignWorkspaceId],
+      );
+      const foreignTeam = await pool.query<{ id: number }>(
+        `INSERT INTO irc_teams (community_id, department_id, location_id, name)
+         VALUES ($1, $2, $3, 'Foreign Team')
+         RETURNING id`,
+        [
+          foreignWorkspaceId,
+          foreignDepartment.rows[0]?.id,
+          foreignLocation.rows[0]?.id,
+        ],
+      );
+      foreignTeamId = foreignTeam.rows[0]?.id;
+      assert.ok(foreignTeamId);
+
+      await pool.query(
+        `INSERT INTO irc_workspace_invitations
+           (community_id, email, role, department_id, location_id, team_id, invited_by, token_hash, expires_at)
+         VALUES ($1, $2, 'employee', $3, $4, $5, $6, $7, now() + interval '1 day')`,
+        [
+          homeWorkspaceId,
+          recipientEmail.toLowerCase(),
+          foreignDepartment.rows[0]?.id,
+          foreignLocation.rows[0]?.id,
+          foreignTeamId,
+          adminSession.userId,
+          createHash("sha256").update(token).digest("hex"),
+        ],
+      );
+
+      const response = await apiRequest(
+        recipient,
+        `/communities/${homeWorkspaceId}/invitations/accept`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token }),
+        },
+      );
+
+      assert.equal(response.status, 409, JSON.stringify(response));
+      assert.deepEqual(response.body, {
+        error: "This invitation contains organization assignments from another workspace.",
+      });
+      const [invitation, membership, profile, teamMembership] = await Promise.all([
+        pool.query(
+          "SELECT status, invited_user_id, accepted_at FROM irc_workspace_invitations WHERE community_id = $1",
+          [homeWorkspaceId],
+        ),
+        pool.query(
+          "SELECT 1 FROM irc_community_members WHERE community_id = $1 AND user_id = $2",
+          [homeWorkspaceId, recipient.userId],
+        ),
+        pool.query(
+          "SELECT 1 FROM irc_employee_profiles WHERE community_id = $1 AND user_id = $2",
+          [homeWorkspaceId, recipient.userId],
+        ),
+        pool.query(
+          "SELECT 1 FROM irc_team_members WHERE team_id = $1 AND user_id = $2",
+          [foreignTeamId, recipient.userId],
+        ),
+      ]);
+      assert.deepEqual(invitation.rows, [{
+        status: "pending",
+        invited_user_id: null,
+        accepted_at: null,
+      }]);
+      assert.equal(membership.rowCount, 0);
+      assert.equal(profile.rowCount, 0);
+      assert.equal(teamMembership.rowCount, 0);
+    } finally {
+      if (workspaceIds.length) {
+        await pool.query(
+          "DELETE FROM irc_communities WHERE id = ANY($1::int[])",
+          [workspaceIds],
+        );
       }
     }
   });

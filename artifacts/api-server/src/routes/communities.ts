@@ -1643,6 +1643,45 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
       throw new Error("Account deletion is pending or completed.");
     }
     await assertDeletionEligibleUser(userId, tx);
+    const [lockedInvitation] = await tx.select().from(workspaceInvitationsTable).where(and(
+      eq(workspaceInvitationsTable.id, invitation.id),
+      eq(workspaceInvitationsTable.communityId, communityId),
+      eq(workspaceInvitationsTable.tokenHash, tokenHash),
+    )).for("update");
+    if (
+      !lockedInvitation
+      || lockedInvitation.status !== "pending"
+      || lockedInvitation.expiresAt <= now
+    ) {
+      return { status: "unavailable" as const };
+    }
+    const [departments, locations, teams] = await Promise.all([
+      lockedInvitation.departmentId
+        ? tx.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+          eq(departmentsTable.id, lockedInvitation.departmentId),
+          eq(departmentsTable.communityId, communityId),
+        ))
+        : Promise.resolve([]),
+      lockedInvitation.locationId
+        ? tx.select({ id: locationsTable.id }).from(locationsTable).where(and(
+          eq(locationsTable.id, lockedInvitation.locationId),
+          eq(locationsTable.communityId, communityId),
+        ))
+        : Promise.resolve([]),
+      lockedInvitation.teamId
+        ? tx.select({ id: teamsTable.id }).from(teamsTable).where(and(
+          eq(teamsTable.id, lockedInvitation.teamId),
+          eq(teamsTable.communityId, communityId),
+        ))
+        : Promise.resolve([]),
+    ]);
+    if (
+      (lockedInvitation.departmentId && departments.length === 0)
+      || (lockedInvitation.locationId && locations.length === 0)
+      || (lockedInvitation.teamId && teams.length === 0)
+    ) {
+      return { status: "invalid_scope" as const };
+    }
     const [accepted] = await tx.update(workspaceInvitationsTable).set({
       status: "accepted",
       invitedUserId: userId,
@@ -1657,36 +1696,44 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
       communityId,
       userId,
       employmentStatus: "onboarding",
-      departmentId: invitation.departmentId,
-      locationId: invitation.locationId,
+      departmentId: lockedInvitation.departmentId,
+      locationId: lockedInvitation.locationId,
       invitedAt: now,
       onboardingStartedAt: now,
     }).onConflictDoUpdate({
       target: [employeeProfilesTable.communityId, employeeProfilesTable.userId],
       set: {
         employmentStatus: "onboarding",
-        departmentId: invitation.departmentId,
-        locationId: invitation.locationId,
+        departmentId: lockedInvitation.departmentId,
+        locationId: lockedInvitation.locationId,
         invitedAt: now,
         onboardingStartedAt: now,
       },
     });
-    if (invitation.teamId) {
-      await tx.insert(teamMembersTable).values({ teamId: invitation.teamId, userId }).onConflictDoNothing();
+    if (lockedInvitation.teamId) {
+      await tx.insert(teamMembersTable).values({ teamId: lockedInvitation.teamId, userId }).onConflictDoNothing();
     }
-    if (invitation.role !== "member") {
+    if (lockedInvitation.role !== "member") {
       await tx.insert(userRolesTable).values({
         userId,
-        role: invitation.role,
+        role: lockedInvitation.role,
         scopeType: "community",
         communityId,
-        grantedBy: invitation.invitedBy,
+        grantedBy: lockedInvitation.invitedBy,
       }).onConflictDoNothing();
     }
-    return accepted;
+    return { status: "accepted" as const, invitation: accepted };
   });
-  await writeCommunityAudit(userId, "accepted_workspace_invitation", communityId, `invitation:${result.id}`);
-  res.json({ ok: true, communityId, invitationId: result.id, employmentStatus: "onboarding" });
+  if (result.status === "invalid_scope") {
+    res.status(409).json({ error: "This invitation contains organization assignments from another workspace." });
+    return;
+  }
+  if (result.status === "unavailable") {
+    res.status(409).json({ error: "Invitation is no longer available." });
+    return;
+  }
+  await writeCommunityAudit(userId, "accepted_workspace_invitation", communityId, `invitation:${result.invitation.id}`);
+  res.json({ ok: true, communityId, invitationId: result.invitation.id, employmentStatus: "onboarding" });
 });
 
 router.post("/communities/:communityId/invitations/:invitationId/resend", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1992,9 +2039,35 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
-  const [latest] = await db.select({ version: documentVersionsTable.version }).from(documentVersionsTable).where(eq(documentVersionsTable.documentId, documentId)).orderBy(desc(documentVersionsTable.version)).limit(1);
-  const [version] = await db.insert(documentVersionsTable).values({ documentId, version: (latest?.version ?? 0) + 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId }).returning();
-  await db.update(businessDocumentsTable).set({ updatedAt: new Date() }).where(eq(businessDocumentsTable.id, documentId));
+  const version = await db.transaction(async (tx) => {
+    const [lockedDocument] = await tx.select({ id: businessDocumentsTable.id }).from(businessDocumentsTable)
+      .where(and(
+        eq(businessDocumentsTable.id, documentId),
+        eq(businessDocumentsTable.communityId, communityId),
+      ))
+      .for("update");
+    if (!lockedDocument) return null;
+    const [latest] = await tx.select({ version: documentVersionsTable.version }).from(documentVersionsTable)
+      .where(eq(documentVersionsTable.documentId, documentId))
+      .orderBy(desc(documentVersionsTable.version))
+      .limit(1);
+    const [inserted] = await tx.insert(documentVersionsTable).values({
+      documentId,
+      version: (latest?.version ?? 0) + 1,
+      objectPath,
+      fileName,
+      contentType,
+      fileSize,
+      uploadedBy: userId,
+    }).returning();
+    await tx.update(businessDocumentsTable).set({ updatedAt: new Date() })
+      .where(eq(businessDocumentsTable.id, documentId));
+    return inserted;
+  });
+  if (!version) {
+    res.status(404).json({ error: "Document not found." });
+    return;
+  }
   await writeCommunityAudit(userId, "uploaded_document_version", communityId, `${document.title} v${version.version}`);
   res.status(201).json(version);
 });

@@ -283,7 +283,7 @@ export const documentVersionsTable = pgTable("irc_document_versions", {
   uploadedBy: text("uploaded_by").notNull().references(() => usersTable.clerkId),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("irc_document_versions_document_version_idx").on(table.documentId, table.version),
+  uniqueIndex("irc_document_versions_document_version_uidx").on(table.documentId, table.version),
 ]);
 
 export const documentPermissionsTable = pgTable("irc_document_permissions", {

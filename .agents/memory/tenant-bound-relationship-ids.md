@@ -1,0 +1,10 @@
+---
+name: Tenant-bound relationship IDs
+description: Isolation rule for persisted department, location, team, category, and similar workspace-owned IDs.
+---
+
+Whenever persisted data carries IDs for workspace-owned relationships, validate every referenced row against the same workspace inside the transaction that consumes those IDs.
+
+**Why:** Validating only at creation is insufficient because legacy, imported, administrative, or previously corrupted rows may contain IDs from another tenant.
+
+**How to apply:** Scope relational lookups by both resource ID and workspace ID before any mutation. Fail atomically rather than silently applying only the valid subset.
