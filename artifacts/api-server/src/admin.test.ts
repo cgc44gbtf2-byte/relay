@@ -4347,6 +4347,77 @@ describe("admin access controls", () => {
       );
       assert.equal(outsiderDirectDownload.status, 404, JSON.stringify(outsiderDirectDownload));
       assert.deepEqual(outsiderDirectDownload.body, { error: "Attachment not found." });
+
+      const atomicFileName = `atomic-${randomUUID().slice(0, 8)}.txt`;
+      const atomicFileMessage = await apiRequest(
+        memberSession,
+        `/channels/${channelId}/file-messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            objectPath: `/objects/uploads/${randomUUID()}`,
+            fileName: atomicFileName,
+            contentType: "text/plain",
+            fileSize: 18,
+          }),
+        },
+      );
+      assert.equal(atomicFileMessage.status, 201, JSON.stringify(atomicFileMessage));
+      assert.ok(atomicFileMessage.body && typeof atomicFileMessage.body === "object");
+      const atomicMessageBody = atomicFileMessage.body as {
+        id?: unknown;
+        body?: unknown;
+        attachments?: unknown;
+      };
+      assert.equal(typeof atomicMessageBody.id, "string");
+      assert.equal(atomicMessageBody.body, atomicFileName);
+      assert.ok(Array.isArray(atomicMessageBody.attachments));
+      assert.equal(atomicMessageBody.attachments.length, 1);
+
+      const triggerName = `fail_atomic_attachment_${randomUUID().replaceAll("-", "")}`;
+      const functionName = `${triggerName}_fn`;
+      const failedFileName = `failed-${randomUUID().slice(0, 8)}.txt`;
+      try {
+        await pool.query(
+          `CREATE FUNCTION "${functionName}"() RETURNS trigger
+           LANGUAGE plpgsql AS $$
+           BEGIN
+             RAISE EXCEPTION 'forced attachment insert failure';
+           END;
+           $$;`,
+        );
+        await pool.query(
+          `CREATE TRIGGER "${triggerName}"
+           BEFORE INSERT ON irc_message_attachments
+           FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+        );
+        const failedAtomicMessage = await apiRequest(
+          memberSession,
+          `/channels/${channelId}/file-messages`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              objectPath: `/objects/uploads/${randomUUID()}`,
+              fileName: failedFileName,
+              contentType: "text/plain",
+              fileSize: 21,
+            }),
+          },
+        );
+        assert.equal(failedAtomicMessage.status, 500, JSON.stringify(failedAtomicMessage));
+        const rolledBackMessages = await pool.query(
+          `SELECT id
+           FROM irc_messages
+           WHERE channel_id = $1 AND sender_id = $2 AND body = $3`,
+          [channelId, memberSession.userId, failedFileName],
+        );
+        assert.deepEqual(rolledBackMessages.rows, []);
+      } finally {
+        await pool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON irc_message_attachments`);
+        await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
+      }
     } finally {
       globalThis.fetch = originalFetch;
       if (previousPrivateObjectDir === undefined) delete process.env.PRIVATE_OBJECT_DIR;

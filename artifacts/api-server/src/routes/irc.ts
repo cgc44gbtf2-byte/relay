@@ -948,6 +948,57 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
   wsHub.broadcastChannel(channel.id, { type: "message", message: view });
 });
 
+router.post("/channels/:channelId/file-messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const channel = await channelFor(param(req, "channelId"));
+  if (!channel) {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  const member = await membership(channel.id, userId);
+  if (!member) {
+    res.status(403).json({ error: "Join the channel before sending messages." });
+    return;
+  }
+  if (member.mutedUntil && member.mutedUntil > new Date()) {
+    res.status(403).json({ error: "You are muted in this channel." });
+    return;
+  }
+  const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const metadata = validateUploadMetadata({
+    name: req.body?.fileName,
+    size: req.body?.fileSize,
+    contentType: req.body?.contentType,
+  });
+  if (
+    !isValidUploadedObjectPath(objectPath)
+    || !metadata
+    || metadata.size > 10_000_000
+  ) {
+    res.status(400).json({ error: "Invalid attachment metadata." });
+    return;
+  }
+  const message = await db.transaction(async (tx) => {
+    const [createdMessage] = await tx.insert(messagesTable).values({
+      channelId: channel.id,
+      senderId: userId,
+      body: metadata.name,
+    }).returning();
+    await tx.insert(messageAttachmentsTable).values({
+      messageId: createdMessage.id,
+      uploaderId: userId,
+      objectPath,
+      fileName: metadata.name,
+      contentType: metadata.contentType,
+      fileSize: metadata.size,
+    });
+    return createdMessage;
+  });
+  const view = await messageView(message, userId);
+  res.status(201).json(view);
+  wsHub.broadcastChannel(channel.id, { type: "message", message: view });
+});
+
 router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));

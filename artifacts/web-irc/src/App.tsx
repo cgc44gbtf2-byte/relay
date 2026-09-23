@@ -1011,30 +1011,28 @@ function ChatApp() {
       return;
     }
     setUploading(true);
-    let sentMessageId: string | null = null;
     try {
-      const sent = await api<ChatMessage>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ body: file.name }) });
-      sentMessageId = sent.id;
-      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type, resourceType: "message", resourceId: sent.id }) });
+      const contentType = file.type || "application/octet-stream";
+      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType }) });
       const uploaded = await fetch(upload.uploadURL, { method: "PUT", body: file, headers: { "content-type": file.type || "application/octet-stream" } });
       if (!uploaded.ok) throw new Error("File upload failed");
-      const attachment = await api<NonNullable<ChatMessage["attachments"]>[number]>(`/messages/${sent.id}/attachments`, { method: "POST", body: JSON.stringify({ objectPath: upload.objectPath, fileName: file.name, contentType: file.type || "application/octet-stream", fileSize: file.size }) });
+      const sent = await api<ChatMessage>(`/channels/${channelId}/file-messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          objectPath: upload.objectPath,
+          fileName: file.name,
+          contentType,
+          fileSize: file.size,
+        }),
+      });
       if (currentChannelIdRef.current === channelId) {
         room.setMessages((items) => {
-          const updated = { ...sent, attachments: [attachment] };
           return items.some((item) => item.id === sent.id)
-            ? items.map((item) => item.id === sent.id ? updated : item)
-            : [...items, updated];
+            ? items.map((item) => item.id === sent.id ? sent : item)
+            : [...items, sent];
         });
       }
     } catch (error) {
-      if (sentMessageId) {
-        try {
-          await api(`/messages/${sentMessageId}`, { method: "DELETE" });
-        } catch {
-          // Preserve the original upload error if cleanup also fails.
-        }
-      }
       if (isMissingChannelError(error)) {
         await recoverFromMissingChannel(channelId);
       } else {

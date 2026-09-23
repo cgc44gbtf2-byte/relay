@@ -232,8 +232,19 @@ function installApi({
     if (url === "/api/channels/1/messages" && method === "POST") {
       return missingRequest === "send" ? channelNotFound() : jsonResponse(message(1, "sent"));
     }
-    if (url === "/api/messages/message-1" && method === "DELETE") {
-      return jsonResponse({ ok: true });
+    if (url === "/api/channels/1/file-messages" && method === "POST") {
+      return missingRequest === "send"
+        ? channelNotFound()
+        : jsonResponse({
+          ...message(1, "notes.txt"),
+          attachments: [{
+            id: 1,
+            fileName: "notes.txt",
+            contentType: "text/plain",
+            fileSize: 10,
+            url: "/api/attachments/1",
+          }],
+        });
     }
     if (url === "/api/channels/1" && method === "PATCH") {
       return missingRequest === "topic" ? channelNotFound() : jsonResponse({ ...deleted, topic: "updated" });
@@ -653,7 +664,7 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(screen.getByText(/· read$/)).toBeTruthy());
   });
 
-  it("cleans up the placeholder message when an attachment upload fails", async () => {
+  it("does not create a placeholder message when an attachment upload fails", async () => {
     await renderChat({
       missingRequest: "event",
       fallbackChannels: [room(2, "#fallback-room")],
@@ -667,9 +678,15 @@ describe("deleted room recovery", () => {
 
     await waitFor(() => {
       expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-        String(input) === "/api/messages/message-1" && init?.method === "DELETE",
+        String(input) === "https://upload.test/file" && init?.method === "PUT",
       )).toBe(true);
     });
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input).includes("/file-messages") && init?.method === "POST",
+    )).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input).match(/^\/api\/messages\/[^/]+$/) && init?.method === "DELETE",
+    )).toBe(false);
   });
 });
 
