@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -30,7 +30,8 @@ type Channel = {
   topic: string;
   description: string;
   ownerId: string;
-  categoryId: null;
+  categoryId: number | null;
+  communityId: number | null;
   isPrivate: boolean;
   isInviteOnly: boolean;
   joined: boolean;
@@ -61,6 +62,7 @@ const room = (id: number, name: string, ownerId = "owner-1"): Channel => ({
   description: `${name} description`,
   ownerId,
   categoryId: null,
+  communityId: null,
   isPrivate: false,
   isInviteOnly: false,
   joined: true,
@@ -69,6 +71,8 @@ const room = (id: number, name: string, ownerId = "owner-1"): Channel => ({
 });
 
 describe("channel category organization", () => {
+  afterEach(() => cleanup());
+
   it("offers only same-workspace categories and can assign or unassign a channel", async () => {
     const onMove = vi.fn().mockResolvedValue(true);
     const channel = {
@@ -162,6 +166,7 @@ function installApi({
   createChannelFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
+  categories = [],
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
@@ -183,6 +188,7 @@ function installApi({
   createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
+  categories?: Array<{ id: number; name: string; description: string; ownerId: string; communityId: number | null }>;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = {
@@ -206,7 +212,7 @@ function installApi({
       ownerCommunity: { id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner },
       communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
     });
-    if (url === "/api/categories") return jsonResponse([]);
+    if (url === "/api/categories") return jsonResponse(categories);
     if (url === "/api/notifications" && method === "GET") {
       return notificationsFailure ? jsonResponse({ error: "notifications unavailable" }, 500) : jsonResponse(notifications);
     }
@@ -297,7 +303,11 @@ function installApi({
         });
     }
     if (url === "/api/channels/1" && method === "PATCH") {
-      return missingRequest === "topic" ? channelNotFound() : jsonResponse({ ...deleted, topic: "updated" });
+      return missingRequest === "topic" ? channelNotFound() : jsonResponse({
+        ...deleted,
+        topic: "updated",
+        categoryId: JSON.parse(String(init?.body)).categoryId ?? null,
+      });
     }
     if (url === "/api/channels/2/join" && method === "POST") {
       joinCalls += 1;
@@ -341,6 +351,35 @@ describe("deleted room recovery", () => {
     latestWebSocket = null;
     webSocketFrames = [];
     vi.unstubAllGlobals();
+  });
+
+  it("moves an owned channel into a same-workspace category and back without hiding history", async () => {
+    await renderChat({
+      missingRequest: "event",
+      owner: true,
+      fallbackChannels: [room(1, "#deleted-room", "user-1"), room(2, "#fallback-room")],
+      categories: [
+        { id: 31, name: "project room", description: "", ownerId: "user-1", communityId: null },
+        { id: 32, name: "foreign workspace", description: "", ownerId: "user-1", communityId: 2 },
+      ],
+    });
+    await screen.findByText("stale history");
+    fireEvent.click(await screen.findByTestId("button-organize-current-channel"));
+    const category = screen.getByLabelText("category") as HTMLSelectElement;
+    expect(category.querySelector('option[value="31"]')).not.toBeNull();
+    expect(category.querySelector('option[value="32"]')).toBeNull();
+    fireEvent.change(category, { target: { value: "31" } });
+    fireEvent.click(screen.getByRole("button", { name: "save category" }));
+    await waitFor(() => expect(within(screen.getByText("project room").parentElement!).getByRole("button", { name: /deleted-room/i })).toBeTruthy());
+    expect(screen.getByText("stale history")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledWith("/api/channels/1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ categoryId: 31 }) }));
+
+    fireEvent.click(screen.getByTestId("button-organize-current-channel"));
+    fireEvent.change(screen.getByLabelText("category"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "save category" }));
+    await waitFor(() => expect(within(screen.getByText("uncategorized").parentElement!).getByRole("button", { name: /deleted-room/i })).toBeTruthy());
+    expect(screen.getByText("stale history")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledWith("/api/channels/1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ categoryId: null }) }));
   });
 
   it.each([
