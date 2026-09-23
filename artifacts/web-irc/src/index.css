@@ -459,3 +459,9 @@
   0%, 100% { opacity: 0.55; transform: scale(0.9); }
   50% { opacity: 1; transform: scale(1); }
 }
+
+/* Let the browser skip layout and paint work for offscreen chat history. */
+.space-y-5 > .group {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 96px;
+}
