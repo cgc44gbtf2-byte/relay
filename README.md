@@ -205,6 +205,13 @@ SESSION_SECRET
 
 Object-storage configuration is also required for file uploads.
 
+For credentialed browser requests, configure the API's explicit CORS allowlist
+with `CORS_ALLOWED_ORIGINS` (a comma-separated list of complete `http` or
+`https` origins). Replit deployments also trust the hosts in
+`REPLIT_DOMAINS`, and development previews trust `REPLIT_DEV_DOMAIN`; these
+variables are read as hostnames and are treated as HTTPS origins. Requests
+without an `Origin` header (including same-origin requests) remain supported.
+
 ### Apply the database schema
 
 ```bash

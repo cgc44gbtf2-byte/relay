@@ -12,3 +12,4 @@
 - [Community product separation](community-product-separation.md) — signup auto-provisions one free community; paid workspaces use a separate path.
 - [Authorization locking](authorization-locking.md) — privileged writes must lock authority-granting rows; serializable isolation alone does not stop stale revocation races.
 - [Realtime history reconciliation](realtime-history-reconciliation.md) — merge only post-refresh changes and scope history/pagination state to a stable room key.
+- [Migration baseline safety](migration-baseline-safety.md) — establish Relay’s first migration baseline from verified production schema, never an assumed development schema.

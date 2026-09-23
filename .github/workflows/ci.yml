@@ -10,6 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  release-validation:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run release validation (typecheck, tests, builds, licenses)
+        run: pnpm run release:validate
+
   validate-scheduled-cleanup:
     runs-on: ubuntu-latest
     steps:
@@ -164,7 +188,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run disposable database and authenticated API tests
+      - name: Check API types
+        run: pnpm --filter @workspace/api-server run typecheck
+
+      - name: Build API
+        run: pnpm --filter @workspace/api-server run build
+
+      - name: Run disposable database schema validation and authenticated API tests
         run: pnpm --filter @workspace/api-server run test:ci
 
   database-runner-compatibility:
