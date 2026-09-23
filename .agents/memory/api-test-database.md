@@ -7,7 +7,7 @@ The API integration test runner intentionally refuses to start without a dedicat
 
 **Why:** Admin access tests create and remove external Clerk users and database profiles, so running them against an unspecified or shared database would risk contaminating persistent data.
 
-**How to apply:** Before relying on the API package's full validation command, provision or expose a fresh disposable test database through `TEST_DATABASE_URL`; the stateful admin suite assumes it starts without prior profiles or admin claims. Type checking and test compilation can still run without it.
+**How to apply:** This Replit project cannot provision or expose the required disposable database, so treat the full stateful API integration suite as unavailable here. Continue using type checking, builds, test compilation, and the web test suite; do not make the unavailable database a prerequisite for progress.
 
 When provisioning PostgreSQL locally in this environment, pass an explicit temporary socket directory because `/run/postgresql` may not exist.
 
