@@ -23,6 +23,7 @@ import {
 
 const router: IRouter = Router();
 const loginTicketLimiter = new FixedWindowLimiter(10, 60_000);
+const returnTicketLimiter = new FixedWindowLimiter(10, 60_000);
 
 function communityId(req: AuthenticatedRequest): number {
   const raw = req.params.communityId;
@@ -87,7 +88,7 @@ router.post("/communities/:communityId/test-accounts/provision", async (req: Aut
         user = await clerkClient.users.createUser({
           externalId,
           username: `relay_test_${id}_${role}`,
-          emailAddress: [`relay-test-${id}-${role}@relay.invalid`],
+          emailAddress: [`relay-test-${id}-${role}@example.com`],
           emailAddressIdentificationStatus: ["reserved"],
           skipPasswordRequirement: true,
           publicMetadata: testAccountMetadata(id, role, creatorId),
@@ -122,6 +123,41 @@ router.post("/communities/:communityId/test-accounts/provision", async (req: Aut
     await Promise.allSettled(createdIds.map((userId) => clerkClient.users.deleteUser(userId)));
     res.status(409).json({ error: error instanceof Error ? error.message : "Unable to provision test accounts." });
   }
+});
+
+router.post("/communities/:communityId/test-accounts/return", async (req: AuthenticatedRequest, res) => {
+  if (!testAccountsAvailable(process.env)) { res.status(404).json({ error: "Development test accounts are unavailable." }); return; }
+  const testUserId = getUserId(req);
+  const id = communityId(req);
+  const limiterResult = returnTicketLimiter.check(rateLimitKey(testUserId, req.ip ?? req.socket.remoteAddress ?? "unknown"));
+  if (!limiterResult.allowed) {
+    res.set("Retry-After", String(limiterResult.retryAfterSeconds)).status(429).json({ error: "Too many owner return requests." });
+    return;
+  }
+  const testUser = await clerkClient.users.getUser(testUserId);
+  const metadata = testUser.publicMetadata as Record<string, unknown>;
+  const role = typeof metadata.role === "string" ? metadata.role : undefined;
+  if (!role || !isMarkedTestAccount(metadata, id, role)) {
+    res.status(403).json({ error: "Only a workspace test account can return to its owner." });
+    return;
+  }
+  const ownerId = typeof metadata.createdBy === "string" ? metadata.createdBy : "";
+  const workspace = await ownedWorkspace(ownerId, id);
+  if (!workspace) {
+    res.status(404).json({ error: "The original owner or workspace is no longer available." });
+    return;
+  }
+  const [owner] = await db.select({
+    accountStatus: usersTable.accountStatus,
+    deletionStatus: usersTable.deletionStatus,
+  }).from(usersTable).where(eq(usersTable.clerkId, ownerId));
+  if (!owner || owner.accountStatus !== "active" || owner.deletionStatus !== "none") {
+    res.status(409).json({ error: "The original owner account is unavailable." });
+    return;
+  }
+  const ticket = await clerkClient.signInTokens.createSignInToken({ userId: ownerId, expiresInSeconds: 60 });
+  await audit(ownerId, id, "issued_owner_return_ticket", `Issued a short-lived owner return ticket from the ${role} test account.`);
+  res.json({ ticket: ticket.token, ownerUserId: ownerId, expiresInSeconds: 60 });
 });
 
 router.post("/communities/:communityId/test-accounts/:role/login", async (req: AuthenticatedRequest, res) => {

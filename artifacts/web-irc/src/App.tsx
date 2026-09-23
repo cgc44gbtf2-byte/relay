@@ -1059,16 +1059,21 @@ function ChatApp() {
     try {
       const context = readTestAccountReturnContext();
       const ownerSession = context && client?.sessions?.find((item) => item.id === context.ownerSessionId);
-      if (
-        !context
-        || !ownerSession
-        || ownerSession.status !== "active"
-        || ownerSession.user?.id !== context.ownerUserId
-      ) {
-        throw new Error("Your owner session is no longer available. Sign out and sign in again to return to the owner account.");
-      }
+      if (!context) throw new Error("Your owner return context is unavailable. Sign out and sign in again to return to the owner account.");
       if (!setActive) throw new Error("Clerk session switching is unavailable.");
-      await setActive({ session: context.ownerSessionId });
+      if (ownerSession?.status === "active" && ownerSession.user?.id === context.ownerUserId) {
+        await setActive({ session: context.ownerSessionId });
+      } else {
+        if (!session?.id || !client) throw new Error("Your test-account session is unavailable.");
+        const result = await api<{ ticket: string; ownerUserId: string }>(`/communities/${context.workspaceId}/test-accounts/return`, { method: "POST", body: "{}" });
+        if (result.ownerUserId !== context.ownerUserId) throw new Error("The owner return identity did not match the original owner.");
+        await signOut({ sessionId: session.id });
+        const ownerSignIn = await client.signIn.create({ strategy: "ticket", ticket: result.ticket });
+        if (ownerSignIn.status !== "complete" || !ownerSignIn.createdSessionId) {
+          throw new Error(`Owner return sign-in did not complete (${ownerSignIn.status}).`);
+        }
+        await setActive({ session: ownerSignIn.createdSessionId });
+      }
       clearTestAccountReturnContext();
       window.location.assign(`${basePath}/chat`);
     } catch (reason) {
@@ -1807,8 +1812,18 @@ export function ownerConfirmationPhrase(kind: OwnerConfirmation["kind"], target:
 
 type TestAccount = { id: string; role: string; displayName: string; username?: string | null };
 
+function isAlreadySignedInError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { message?: string; errors?: Array<{ code?: string; message?: string; longMessage?: string }> };
+  const messages = [
+    value.message,
+    ...(value.errors ?? []).flatMap((item) => [item.code, item.message, item.longMessage]),
+  ].filter(Boolean).join(" ").toLowerCase();
+  return messages.includes("already signed in") || messages.includes("session_exists");
+}
+
 function TestAccountsPanel({ detail, setError, setNotice }: { detail: CommunityDetail; setError: (value: string) => void; setNotice: (value: string) => void }) {
-  const { client, setActive } = useClerk();
+  const { client, setActive, signOut } = useClerk();
   const { session } = useSession();
   const { user } = useUser();
   const [accounts, setAccounts] = useState<TestAccount[]>([]);
@@ -1842,7 +1857,14 @@ function TestAccountsPanel({ detail, setError, setNotice }: { detail: CommunityD
       }
       const { ticket } = await api<{ ticket: string }>(`/communities/${detail.community.id}/test-accounts/${role}/login`, { method: "POST", body: "{}" });
       if (!client || !setActive) throw new Error("Clerk sign-in is unavailable.");
-      const result = await client.signIn.create({ strategy: "ticket", ticket });
+      let result;
+      try {
+        result = await client.signIn.create({ strategy: "ticket", ticket });
+      } catch (reason) {
+        if (!isAlreadySignedInError(reason)) throw reason;
+        await signOut({ sessionId: session.id });
+        result = await client.signIn.create({ strategy: "ticket", ticket });
+      }
       if (result.status !== "complete" || !result.createdSessionId) {
         throw new Error(`Test account sign-in did not complete (${result.status}).`);
       }
@@ -2986,7 +3008,13 @@ function CommunityConsole() {
     setPermissions(nextPermissions);
     setCurrentUserId(me.id);
     setCommunities(nextCommunities);
-    setSelectedId((current) => current ?? requestedCommunityId ?? nextCommunities[0]?.id ?? null);
+    setSelectedId((current) => {
+      if (current !== null && nextCommunities.some((community) => community.id === current)) return current;
+      if (requestedCommunityId !== null && nextCommunities.some((community) => community.id === requestedCommunityId)) {
+        return requestedCommunityId;
+      }
+      return nextCommunities[0]?.id ?? null;
+    });
   };
   const loadDetail = async (id: number) => {
     const next = await api<CommunityDetail>(`/communities/${id}?view=summary`);
@@ -3090,6 +3118,8 @@ function CommunityConsole() {
       } else {
         const deleted = await api<{ cleanupPending?: boolean }>(`/communities/${detail.community.id}`, { method: "DELETE", body: JSON.stringify({ confirmation }) });
         setOwnerConfirmation(null);
+        setDetail(null);
+        setSelectedId(null);
         setNotice(deleted.cleanupPending ? "Workspace deleted. Some storage cleanup is still pending." : "Workspace deleted.");
         await loadCommunities();
         window.setTimeout(() => {

@@ -20,6 +20,7 @@ await esbuild({
     path.resolve(artifactDir, "src/lib/validation.test.ts"),
     path.resolve(artifactDir, "src/lib/test-account-policy.test.ts"),
     path.resolve(artifactDir, "src/lib/destructive-policy.test.ts"),
+    path.resolve(artifactDir, "src/lib/destructive-lifecycle.integration.test.ts"),
   ],
   platform: "node",
   bundle: true,

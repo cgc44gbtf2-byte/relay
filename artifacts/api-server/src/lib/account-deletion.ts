@@ -15,12 +15,15 @@ function clerkNotFound(error: unknown): boolean {
     || !!value?.errors?.some((item) => item.message?.toLowerCase().includes("not found"));
 }
 
-export async function finalizePendingAccountDeletion(userId: string): Promise<"completed" | "retryable" | "not_pending"> {
+export async function finalizePendingAccountDeletion(
+  userId: string,
+  dependencies: { deleteClerkUser?: (userId: string) => Promise<unknown> } = {},
+): Promise<"completed" | "retryable" | "not_pending"> {
   const [subject] = await db.select().from(usersTable).where(eq(usersTable.clerkId, userId));
   if (!subject || subject.deletionStatus !== "pending") return "not_pending";
   if (subject.clerkDeletionStatus !== "deleted") {
     try {
-      await clerkClient.users.deleteUser(userId);
+      await (dependencies.deleteClerkUser ?? ((id: string) => clerkClient.users.deleteUser(id)))(userId);
     } catch (error) {
       if (!clerkNotFound(error)) {
         await db.update(usersTable).set({

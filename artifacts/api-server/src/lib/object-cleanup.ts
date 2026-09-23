@@ -17,7 +17,15 @@ export async function enqueueObjectDeletionJobs(
     .onConflictDoNothing({ target: workspaceObjectDeletionJobsTable.objectPath });
 }
 
-export async function processObjectDeletionJobs(limit = 50): Promise<{ processed: number; failed: number }> {
+export async function processObjectDeletionJobs(
+  limit = 50,
+  dependencies: {
+    signObjectUrl?: typeof signedObjectUrlForPath;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Promise<{ processed: number; failed: number }> {
+  const signObjectUrl = dependencies.signObjectUrl ?? signedObjectUrlForPath;
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
   const jobs = await db.select().from(workspaceObjectDeletionJobsTable)
     .where(inArray(workspaceObjectDeletionJobsTable.status, ["pending", "failed"]))
     .orderBy(asc(workspaceObjectDeletionJobsTable.createdAt)).limit(limit);
@@ -25,8 +33,8 @@ export async function processObjectDeletionJobs(limit = 50): Promise<{ processed
   let failed = 0;
   for (const job of jobs) {
     try {
-      const url = await signedObjectUrlForPath(job.objectPath, "DELETE");
-      const response = await fetch(url, { method: "DELETE" });
+      const url = await signObjectUrl(job.objectPath, "DELETE");
+      const response = await fetchImpl(url, { method: "DELETE" });
       if (!response.ok && response.status !== 404) throw new Error(`Object storage returned ${response.status}`);
       await db.update(workspaceObjectDeletionJobsTable).set({ status: "completed", processedAt: new Date(), updatedAt: new Date(), lastError: null })
         .where(eq(workspaceObjectDeletionJobsTable.id, job.id));
