@@ -8,3 +8,7 @@
 - [Business workspace isolation](business-workspace-isolation.md) — legacy IRC endpoints default global; every business-facing read and interaction needs an explicit workspace check.
 - [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.
 - [GitHub connector imports](github-connector-imports.md) — initialize empty repos through Contents API and expect separate workflow-write permission for CI files.
+- [Dependency audit platform entries](dependency-audit-platform-entries.md) — pnpm’s graph can include optional packages absent from node_modules on the current platform.
+- [Community product separation](community-product-separation.md) — signup auto-provisions one free community; paid workspaces use a separate path.
+- [Authorization locking](authorization-locking.md) — privileged writes must lock authority-granting rows; serializable isolation alone does not stop stale revocation races.
+- [Realtime history reconciliation](realtime-history-reconciliation.md) — merge only post-refresh changes and scope history/pagination state to a stable room key.
