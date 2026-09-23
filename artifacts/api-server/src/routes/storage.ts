@@ -15,7 +15,7 @@ function objectParts(path: string): { bucketName: string; objectName: string } {
 
 async function signObjectUrl(
   path: string,
-  method: "GET" | "PUT",
+  method: "GET" | "PUT" | "DELETE",
 ): Promise<string> {
   const { bucketName, objectName } = objectParts(path);
   const response = await fetch(`${SIDECAR_ENDPOINT}/object-storage/signed-object-url`, {
@@ -128,7 +128,7 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: Authenticat
   }
 });
 
-export async function signedObjectUrlForPath(objectPath: string, method: "GET" | "PUT" = "GET"): Promise<string> {
+export async function signedObjectUrlForPath(objectPath: string, method: "GET" | "PUT" | "DELETE" = "GET"): Promise<string> {
   const raw = objectPath.replace(/^\/objects\//, "");
   const privateDir = process.env.PRIVATE_OBJECT_DIR?.replace(/^\/+/, "").replace(/\/+$/, "");
   if (!privateDir || !raw || raw.includes("..") || raw.startsWith("/")) throw new Error("Invalid object path");

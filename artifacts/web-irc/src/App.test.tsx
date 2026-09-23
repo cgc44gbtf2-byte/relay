@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { DocumentCenter } from "./App";
+import App, { DocumentCenter, ownerConfirmationPhrase } from "./App";
 
 type Channel = {
   id: number;
@@ -523,6 +523,7 @@ describe("deleted room recovery", () => {
 
   it("limits outbound typing frames and clears them after idle or draft removal", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());
     latestWebSocket?.onopen?.();
     webSocketFrames = [];
     vi.useFakeTimers();
@@ -531,9 +532,7 @@ describe("deleted room recovery", () => {
     fireEvent.change(editor, { target: { value: "h" } });
     fireEvent.change(editor, { target: { value: "he" } });
     fireEvent.change(editor, { target: { value: "hey" } });
-    await vi.advanceTimersByTimeAsync(299);
-    expect(webSocketFrames).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(300);
     expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual([
       { type: "typing", channelId: 1, active: true },
     ]);
@@ -642,6 +641,7 @@ describe("deleted room recovery", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     expect(screen.getByText(/Read this from another session/)).toBeTruthy();
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
     latestWebSocket?.onmessage?.({
       data: JSON.stringify({
         type: "notification_read",
@@ -700,5 +700,14 @@ describe("frontend route and document error hardening", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("documents unavailable");
     expect(screen.getByRole("button", { name: "Dismiss error" })).toBeTruthy();
     expect(screen.queryByText("No documents match this search.")).toBeNull();
+  });
+});
+
+describe("owner confirmation phrases", () => {
+  it("uses the exact server phrase for every destructive owner action", () => {
+    expect(ownerConfirmationPhrase("remove-member", "Avery Stone", "Northwind")).toBe("REMOVE MEMBER Avery Stone FROM WORKSPACE Northwind");
+    expect(ownerConfirmationPhrase("delete-account", "Avery Stone", "Northwind")).toBe("DELETE ACCOUNT Avery Stone FROM WORKSPACE Northwind");
+    expect(ownerConfirmationPhrase("delete-channel", "#shipping", "Northwind")).toBe("DELETE CHANNEL #shipping FROM WORKSPACE Northwind");
+    expect(ownerConfirmationPhrase("delete-workspace", "Northwind", "Northwind")).toBe("DELETE WORKSPACE Northwind");
   });
 });

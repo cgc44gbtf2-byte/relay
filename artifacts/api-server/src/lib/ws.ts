@@ -107,6 +107,20 @@ export class Hub {
     }
   }
 
+  revokeUserChannelAccess(channelIds: readonly number[], userId: string): void {
+    for (const channelId of channelIds) this.revokeChannelAccess(channelId, userId);
+    this.broadcastUser(userId, { type: "workspace_membership_removed", channelIds: [...channelIds] });
+  }
+
+  disconnectUser(userId: string, reason = "Access revoked."): void {
+    for (const client of [...this.clients]) {
+      if (client.userId === userId) client.socket.close(1008, reason);
+    }
+    for (const [ticket, entry] of this.tickets) {
+      if (entry.userId === userId) this.tickets.delete(ticket);
+    }
+  }
+
   private hasConnectedUser(userId: string): boolean {
     for (const client of this.clients) {
       if (client.userId === userId) return true;

@@ -1159,6 +1159,29 @@ function Overlay({ title, onClose, children }: { title: string; onClose: () => v
   return <div className="fixed inset-0 z-40 flex items-end justify-center bg-background/70 p-3 backdrop-blur-sm sm:items-center"><div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl"><div className="mb-5 flex items-center justify-between"><h2 className="font-mono text-base font-bold">{title}</h2><button onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Close"><X className="h-4 w-4" /></button></div>{children}</div></div>;
 }
 
+function OwnerConfirmOverlay({ title, description, phrase, confirmLabel, working, error, onConfirm, onClose }: {
+  title: string;
+  description: string;
+  phrase: string;
+  confirmLabel: string;
+  working: boolean;
+  error?: string;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const matches = value.trim() === phrase;
+  return <Overlay title={title} onClose={() => { if (!working) onClose(); }}>
+    <form onSubmit={(event) => { event.preventDefault(); if (matches && !working) onConfirm(); }} className="space-y-4">
+      <p className="text-sm leading-6 text-muted-foreground">{description}</p>
+      <p className="rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">This action cannot be undone.</p>
+      <label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">Type <strong className="text-foreground">{phrase}</strong> to confirm</span><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" aria-label={`Type ${phrase} to confirm`} /></label>
+      {error && <p role="alert" className="rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}
+      <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" disabled={working} onClick={onClose} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button><button type="submit" disabled={!matches || working} className="rounded-md bg-destructive px-3 py-2 font-mono text-[10px] font-bold text-destructive-foreground disabled:opacity-50">{working ? "working…" : confirmLabel}</button></div>
+    </form>
+  </Overlay>;
+}
+
 type AdminStatus = { isAdmin: boolean; bootstrapAvailable: boolean; profile: Pick<Profile, "id" | "username" | "displayName"> };
 type AdminOverview = {
   stats: { users: number; channels: number; messages: number; online: number };
@@ -1768,6 +1791,19 @@ type CommunityDetail = {
   canManageOrganization: boolean;
   isOwner: boolean;
 };
+type OwnerConfirmation = {
+  kind: "remove-member" | "delete-account" | "delete-channel" | "delete-workspace";
+  id?: string | number;
+  label: string;
+  phrase: string;
+};
+
+export function ownerConfirmationPhrase(kind: OwnerConfirmation["kind"], target: string, workspace: string): string {
+  if (kind === "remove-member") return `REMOVE MEMBER ${target} FROM WORKSPACE ${workspace}`;
+  if (kind === "delete-account") return `DELETE ACCOUNT ${target} FROM WORKSPACE ${workspace}`;
+  if (kind === "delete-channel") return `DELETE CHANNEL ${target} FROM WORKSPACE ${workspace}`;
+  return `DELETE WORKSPACE ${workspace}`;
+}
 
 type TestAccount = { id: string; role: string; displayName: string; username?: string | null };
 
@@ -2902,6 +2938,7 @@ function CommunityConsole() {
   const parsedCommunityId = routeParams?.id ? Number(routeParams.id) : NaN;
   const requestedCommunityId = Number.isSafeInteger(parsedCommunityId) && parsedCommunityId > 0 ? parsedCommunityId : null;
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [communities, setCommunities] = useState<CommunitySummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<CommunityDetail | null>(null);
@@ -2937,13 +2974,17 @@ function CommunityConsole() {
   const [newWorkspaceChannelDescription, setNewWorkspaceChannelDescription] = useState("");
   const [newWorkspaceChannelCategoryId, setNewWorkspaceChannelCategoryId] = useState("");
   const [newWorkspaceChannelPrivate, setNewWorkspaceChannelPrivate] = useState(false);
+  const [ownerConfirmation, setOwnerConfirmation] = useState<OwnerConfirmation | null>(null);
+  const [ownerActionError, setOwnerActionError] = useState("");
 
   const loadCommunities = async () => {
-    const [nextPermissions, nextCommunities] = await Promise.all([
+    const [nextPermissions, nextCommunities, me] = await Promise.all([
       api<PermissionSnapshot>("/permissions/me"),
       api<CommunitySummary[]>("/communities"),
+      api<Profile>("/me"),
     ]);
     setPermissions(nextPermissions);
+    setCurrentUserId(me.id);
     setCommunities(nextCommunities);
     setSelectedId((current) => current ?? requestedCommunityId ?? nextCommunities[0]?.id ?? null);
   };
@@ -3016,6 +3057,51 @@ function CommunityConsole() {
       await loadCommunities();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save community settings");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const runOwnerAction = async () => {
+    if (!detail || !detail.isOwner || !ownerConfirmation) return;
+    const pending = ownerConfirmation;
+    const targetName = pending.kind === "remove-member" || pending.kind === "delete-account"
+      ? detail.members.find((member) => member.id === pending.id)?.displayName ?? pending.label
+      : pending.kind === "delete-channel"
+        ? detail.channels.find((channel) => channel.id === pending.id)?.name ?? pending.label
+        : detail.community.name;
+    const confirmation = ownerConfirmationPhrase(pending.kind, targetName, detail.community.name);
+    setWorking(true);
+    setOwnerActionError("");
+    try {
+      if (pending.kind === "remove-member") {
+        await api(`/communities/${detail.community.id}/members/${pending.id}`, { method: "DELETE", body: JSON.stringify({ confirmation }) });
+        setNotice(`${pending.label} was removed from this workspace.`);
+        await loadDetail(detail.community.id);
+        await loadCommunities();
+      } else if (pending.kind === "delete-account") {
+        await api(`/communities/${detail.community.id}/members/${pending.id}/account`, { method: "DELETE", body: JSON.stringify({ confirmation }) });
+        setNotice(`${pending.label}'s account was deleted everywhere.`);
+        await loadDetail(detail.community.id);
+        await loadCommunities();
+      } else if (pending.kind === "delete-channel") {
+        await api(`/communities/${detail.community.id}/channels/${pending.id}`, { method: "DELETE", body: JSON.stringify({ confirmation }) });
+        setNotice(`${pending.label} deleted.`);
+        await loadDetail(detail.community.id);
+      } else {
+        const deleted = await api<{ cleanupPending?: boolean }>(`/communities/${detail.community.id}`, { method: "DELETE", body: JSON.stringify({ confirmation }) });
+        setOwnerConfirmation(null);
+        setNotice(deleted.cleanupPending ? "Workspace deleted. Some storage cleanup is still pending." : "Workspace deleted.");
+        await loadCommunities();
+        window.setTimeout(() => {
+          window.history.pushState({}, "", `${basePath}/communities`);
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }, 300);
+      }
+      setOwnerConfirmation(null);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "The owner action could not be completed.";
+      setOwnerActionError(message);
+      setError(message);
     } finally {
       setWorking(false);
     }
@@ -3130,12 +3216,13 @@ function CommunityConsole() {
               <form onSubmit={sendAnnouncement} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">team announcement</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Send a visible notification to current business members.</p><textarea required value={announcement} onChange={(event) => setAnnouncement(event.target.value)} className="mt-4 min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" placeholder="Write a short announcement" /><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">send announcement</button></form>
             </div>}
             <div className="grid gap-5 xl:grid-cols-2">
-              <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
+              <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; const isOwnerOrSelf = member.id === currentUserId || role === "workspace_owner"; return <div key={member.id} className="flex flex-wrap items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}{detail.isOwner && !isOwnerOrSelf && <div className="flex flex-wrap gap-2"><button type="button" disabled={working} aria-label={`Remove ${member.username} from workspace`} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "remove-member", id: member.id, label: `@${member.username}`, phrase: member.username }); }} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive">remove from workspace</button><button type="button" disabled={working} aria-label={`Delete ${member.username} account everywhere`} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-account", id: member.id, label: `@${member.username}`, phrase: member.username }); }} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive">delete account everywhere</button></div>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
-              {detail.isOwner && <TestAccountsPanel detail={detail} setError={setError} setNotice={setNotice} />}
+              {detail.isOwner && <><TestAccountsPanel detail={detail} setError={setError} setNotice={setNotice} /><section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">This permanently deletes every channel, member relationship, and business record in this workspace. This cannot be undone.</p></div><button type="button" disabled={working} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-workspace", label: detail.community.name, phrase: detail.community.name }); }} className="rounded border border-destructive/40 px-3 py-2 font-mono text-[10px] font-bold text-destructive">delete workspace</button></div></section></>}
               {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
               {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
+             {detail.isOwner && <section className="rounded-xl border border-destructive/30 bg-card p-5"><h2 className="font-mono text-sm font-bold">owner channel controls</h2><p className="mt-1 text-xs text-muted-foreground">Only the workspace owner can permanently delete a channel.</p><div className="mt-4 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex flex-wrap items-center justify-between gap-3 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span><button type="button" disabled={working} aria-label={`Delete channel ${channel.name}`} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-channel", id: channel.id, label: channel.name, phrase: ownerConfirmationPhrase("delete-channel", channel.name, detail.community.name) }); }} className="rounded border border-destructive/40 px-2 py-1 font-mono text-[9px] text-destructive">delete channel</button></div>)}</div></section>}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
@@ -3145,6 +3232,7 @@ function CommunityConsole() {
         </section>
       </main>
        {newCommunityOpen && <Overlay title="Set up a business workspace" onClose={() => setNewCommunityOpen(false)}><form onSubmit={createCommunity} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business name</span><input autoFocus required value={newName} onChange={(event) => setNewName(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">visibility</span><select value={newCommunityPrivate ? "private" : "public"} onChange={(event) => setNewCommunityPrivate(event.target.value === "private")} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs"><option value="public">public workspace</option><option value="private">private workspace</option></select><span className="mt-1 block font-mono text-[9px] text-muted-foreground">Public workspaces can be discovered by all signed-in users. Private workspaces are limited to members and assigned roles.</span></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><input value={newDescription} onChange={(event) => setNewDescription(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services</span><input value={newServices} onChange={(event) => setNewServices(event.target.value)} placeholder="HVAC, plumbing, electrical" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={newServiceArea} onChange={(event) => setNewServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={newContactEmail} onChange={(event) => setNewContactEmail(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact phone</span><input value={newContactPhone} onChange={(event) => setNewContactPhone(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={newBusinessHours} onChange={(event) => setNewBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">policies and rules</span><textarea value={newRules} onChange={(event) => setNewRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">create business workspace</button></form></Overlay>}
+       {ownerConfirmation && detail?.isOwner && <OwnerConfirmOverlay title={ownerConfirmation.kind === "remove-member" ? `Remove ${ownerConfirmation.label} from this workspace?` : ownerConfirmation.kind === "delete-account" ? `Delete ${ownerConfirmation.label}'s account everywhere?` : ownerConfirmation.kind === "delete-channel" ? `Delete ${ownerConfirmation.label}?` : "Delete this workspace permanently?"} description={ownerConfirmation.kind === "remove-member" ? "This removes the member from this workspace and revokes their workspace access. Their Relay account and other workspaces remain." : ownerConfirmation.kind === "delete-account" ? "This revokes the member's Clerk identity and removes their Relay access. Authored history is retained and attributed to [deleted user]. A 409 response means deletion is blocked because they belong to another owner's workspace." : ownerConfirmation.kind === "delete-channel" ? "This permanently deletes the channel, its messages, members, requests, and invitations." : "All channels, members, and business data will be permanently deleted."} phrase={ownerConfirmationPhrase(ownerConfirmation.kind, ownerConfirmation.kind === "remove-member" || ownerConfirmation.kind === "delete-account" ? detail.members.find((member) => member.id === ownerConfirmation.id)?.displayName ?? ownerConfirmation.label : ownerConfirmation.kind === "delete-channel" ? detail.channels.find((channel) => channel.id === ownerConfirmation.id)?.name ?? ownerConfirmation.label : detail.community.name, detail.community.name)} confirmLabel={ownerConfirmation.kind === "remove-member" ? "remove from workspace" : ownerConfirmation.kind === "delete-account" ? "delete account everywhere" : ownerConfirmation.kind === "delete-channel" ? "delete channel" : "delete workspace"} working={working} error={ownerActionError} onConfirm={() => void runOwnerAction()} onClose={() => { setOwnerConfirmation(null); setOwnerActionError(""); }} />}
     </div>
   );
 }

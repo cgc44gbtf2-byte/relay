@@ -1,7 +1,9 @@
 import { Router, type IRouter } from "express";
+import { clerkClient } from "@clerk/express";
 import { and, asc, count, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  blocksTable,
   adminAuditLogsTable,
   announcementAcknowledgementsTable,
   announcementAttachmentsTable,
@@ -60,6 +62,16 @@ import {
 import { createNotification, createNotifications } from "../lib/notifications";
 import { wsHub } from "../lib/ws";
 import { validateUploadMetadata } from "./storage";
+import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
+import { assertDeletionEligibleUser, finalizePendingAccountDeletion } from "../lib/account-deletion";
+import {
+  ACCOUNT_DELETION_CONFIRMATION,
+  COMMUNITY_DELETION_CONFIRMATION,
+  MEMBER_REMOVAL_CONFIRMATION,
+  confirmationMatches,
+  exactCommunityOwner,
+  targetMayBePermanentlyDeleted,
+} from "../lib/destructive-policy";
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
@@ -75,6 +87,12 @@ const workspaceRoleRank: Record<string, number> = {
   business_owner: 5,
 };
 const invitationRoles = ["member", "employee", "contractor"] as const;
+
+function deletionConfirmation(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const value = (body as Record<string, unknown>).confirmation;
+  return typeof value === "string" ? value : null;
+}
 
 function onboardingCommunity(community: typeof communitiesTable.$inferSelect, joined = true, canManage = false) {
   return {
@@ -1325,6 +1343,7 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
       ));
     }
     if (employmentStatus === "active") {
+      await assertDeletionEligibleUser(employeeId, tx);
       await tx.insert(communityMembersTable).values({ communityId, userId: employeeId }).onConflictDoNothing();
       await tx.insert(userRolesTable).values({
         userId: employeeId,
@@ -1480,6 +1499,12 @@ router.put("/communities/:communityId/teams/:teamId/members/:memberId", requireA
     res.status(400).json({ error: "Invalid team membership." });
     return;
   }
+  if (status === "active") {
+    try { await assertDeletionEligibleUser(memberId); } catch {
+      res.status(409).json({ error: "This account is pending deletion and cannot receive team access." });
+      return;
+    }
+  }
   const [membership] = await db.insert(teamMembersTable).values({
     teamId,
     userId: memberId,
@@ -1621,6 +1646,12 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
   }
   const now = new Date();
   const result = await db.transaction(async (tx) => {
+    const [lockedUser] = await tx.select({ deletionStatus: usersTable.deletionStatus }).from(usersTable)
+      .where(eq(usersTable.clerkId, userId)).for("update");
+    if (!lockedUser || lockedUser.deletionStatus === "pending" || lockedUser.deletionStatus === "completed") {
+      throw new Error("Account deletion is pending or completed.");
+    }
+    await assertDeletionEligibleUser(userId, tx);
     const [accepted] = await tx.update(workspaceInvitationsTable).set({
       status: "accepted",
       invitedUserId: userId,
@@ -1703,26 +1734,20 @@ router.post("/communities/:communityId/transfer-ownership", requireAuth, async (
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
   const targetUserId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
-  const [community] = Number.isInteger(communityId)
-    ? await db.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable).where(eq(communitiesTable.id, communityId))
-    : [];
-  if (!community || (community.ownerId !== userId && !(await hasPermission(userId, "manage_business", { communityId })))) {
-    res.status(403).json({ error: "Only the workspace owner can transfer ownership." });
-    return;
-  }
+  if (!Number.isInteger(communityId)) { res.status(400).json({ error: "Invalid workspace." }); return; }
   if (!targetUserId || targetUserId === userId) {
     res.status(400).json({ error: "Choose another workspace member as the new owner." });
     return;
   }
-  const [target] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(and(
-    eq(communityMembersTable.communityId, communityId),
-    eq(communityMembersTable.userId, targetUserId),
-  ));
-  if (!target) {
-    res.status(400).json({ error: "The new owner must already belong to this workspace." });
-    return;
-  }
-  await db.transaction(async (tx) => {
+  try {
+    await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    const [target] = await tx.select({ deletionStatus: usersTable.deletionStatus }).from(communityMembersTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, targetUserId))).for("update");
+    if (!lockedCommunity || lockedCommunity.ownerId !== userId) throw new Error("Only the workspace owner can transfer ownership.");
+    if (!target || target.deletionStatus !== "none") throw new Error("The new owner must be an active workspace member.");
     await tx.update(communitiesTable).set({ ownerId: targetUserId }).where(eq(communitiesTable.id, communityId));
     await tx.delete(userRolesTable).where(and(
       eq(userRolesTable.userId, userId),
@@ -1748,7 +1773,11 @@ router.post("/communities/:communityId/transfer-ownership", requireAuth, async (
       communityId,
       grantedBy: userId,
     });
-  });
+    }, { isolationLevel: "serializable" });
+  } catch (error) {
+    res.status(403).json({ error: error instanceof Error ? error.message : "Ownership transfer was rejected." });
+    return;
+  }
   await writeCommunityAudit(userId, "transferred_workspace_ownership", communityId, {
     resourceType: "workspace",
     resourceId: communityId,
@@ -2110,6 +2139,75 @@ router.delete("/communities/:communityId/categories/:categoryId", requireAuth, a
   res.json({ ok: true, categoryId });
 });
 
+router.delete("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actorId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const confirmation = deletionConfirmation(req.body);
+  if (!Number.isInteger(communityId) || confirmation === null) { res.status(400).json({ error: "Confirmation is required." }); return; }
+  const [community] = await db.select().from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community) { res.status(404).json({ error: "Workspace not found." }); return; }
+  if (!exactCommunityOwner(community.ownerId, actorId)) { res.status(403).json({ error: "Only the exact workspace owner can delete this workspace." }); return; }
+  if (!confirmationMatches(COMMUNITY_DELETION_CONFIRMATION, confirmation, community.name, community.name)) {
+    res.status(400).json({ error: "Confirmation does not match.", requiredConfirmation: `DELETE WORKSPACE ${community.name}` }); return;
+  }
+  const removedChannelIds: number[] = [];
+  const objectPaths: string[] = [];
+  await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    if (!lockedCommunity || !exactCommunityOwner(lockedCommunity.ownerId, actorId)) throw new Error("Workspace ownership changed.");
+    await tx.insert(adminAuditLogsTable).values({
+      actorId, communityId: null, action: "deleted_workspace", resourceType: "workspace",
+      resourceId: String(communityId), targetId: String(communityId), targetLabel: community.name,
+      details: `Workspace ${community.name} deleted`,
+    });
+    const channels = await tx.select({ id: channelsTable.id }).from(channelsTable).where(eq(channelsTable.communityId, communityId));
+    removedChannelIds.push(...channels.map((channel) => channel.id));
+    const channelIds = channels.map((channel) => channel.id);
+    if (channelIds.length) {
+      const requests = await tx.select({ id: channelJoinRequestsTable.id }).from(channelJoinRequestsTable)
+        .where(inArray(channelJoinRequestsTable.channelId, channelIds));
+      if (requests.length) await tx.delete(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "channel_join_request"),
+        inArray(notificationsTable.entityId, requests.map((row) => String(row.id))),
+      ));
+      await tx.delete(channelJoinRequestsTable).where(inArray(channelJoinRequestsTable.channelId, channelIds));
+      await tx.delete(channelInvitesTable).where(inArray(channelInvitesTable.channelId, channelIds));
+      await tx.delete(channelBansTable).where(inArray(channelBansTable.channelId, channelIds));
+      const messages = await tx.select({ id: messagesTable.id }).from(messagesTable).where(inArray(messagesTable.channelId, channelIds));
+      if (messages.length) {
+        const messageIds = messages.map((message) => message.id);
+        const attachments = await tx.select({ objectPath: messageAttachmentsTable.objectPath }).from(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, messageIds));
+        objectPaths.push(...attachments.map((row) => row.objectPath));
+        await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, messageIds));
+        await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, messageIds));
+      }
+      await tx.delete(channelMembersTable).where(inArray(channelMembersTable.channelId, channelIds));
+      await tx.delete(messagesTable).where(inArray(messagesTable.channelId, channelIds));
+      await tx.delete(channelsTable).where(inArray(channelsTable.id, channelIds));
+    }
+    const versions = await tx.select({ objectPath: documentVersionsTable.objectPath }).from(documentVersionsTable)
+      .innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId))
+      .where(eq(businessDocumentsTable.communityId, communityId));
+    objectPaths.push(...versions.map((row) => row.objectPath));
+    const taskAttachments = await tx.select({ objectPath: workspaceTaskAttachmentsTable.objectPath }).from(workspaceTaskAttachmentsTable)
+      .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
+      .where(eq(workspaceTasksTable.communityId, communityId));
+    objectPaths.push(...taskAttachments.map((row) => row.objectPath));
+    const announcementAttachments = await tx.select({ objectPath: announcementAttachmentsTable.objectPath }).from(announcementAttachmentsTable)
+      .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
+      .where(eq(serverAnnouncementsTable.communityId, communityId));
+    objectPaths.push(...announcementAttachments.map((row) => row.objectPath));
+    await enqueueObjectDeletionJobs(tx, objectPaths, `community:${communityId}`);
+    // Community-owned audit rows are cascaded with the community. This is a
+    // known retention limitation; no fake post-delete audit is emitted.
+    await tx.delete(communitiesTable).where(eq(communitiesTable.id, communityId));
+  });
+  for (const channelId of removedChannelIds) wsHub.broadcastChannelRemoved(channelId);
+  const cleanupPendingCount = [...new Set(objectPaths)].length;
+  res.json({ ok: true, navigation: "/communities", cleanupPending: cleanupPendingCount > 0, cleanupPendingCount });
+});
+
 router.patch("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
@@ -2188,35 +2286,34 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
   const channelId = Number(param(req, "channelId"));
-  if (!Number.isInteger(communityId) || !Number.isInteger(channelId)) {
+  const confirmation = deletionConfirmation(req.body);
+  if (!Number.isInteger(communityId) || !Number.isInteger(channelId) || confirmation === null) {
     res.status(403).json({ error: "You cannot delete channels in this community." });
     return;
   }
+  const [community] = await db.select({ ownerId: communitiesTable.ownerId, name: communitiesTable.name })
+    .from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community || !exactCommunityOwner(community.ownerId, userId)) {
+    res.status(403).json({ error: "Only the exact workspace owner can use the workspace-console channel deletion action." });
+    return;
+  }
+  let cleanupPendingCount = 0;
   const deletion = await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    if (!lockedCommunity || !exactCommunityOwner(lockedCommunity.ownerId, userId)) return { outcome: "forbidden" } as const;
     const [channel] = await tx
       .select({ id: channelsTable.id, name: channelsTable.name })
       .from(channelsTable)
       .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
       .for("update");
-    const [actorMembership] = await tx
-      .select({ role: channelMembersTable.role })
-      .from(channelMembersTable)
-      .where(and(
-        eq(channelMembersTable.channelId, channelId),
-        eq(channelMembersTable.userId, userId),
-      ))
-      .for("update");
-    const actorCanManageChannel = await hasPermission(
-      userId,
-      "manage_channel",
-      { communityId, channelId },
-      tx,
-      true,
-    );
-    if (actorMembership?.role !== "owner" && !actorCanManageChannel) {
-      return { outcome: "forbidden" } as const;
-    }
     if (!channel) return { outcome: "not_found" } as const;
+    if (!confirmationMatches(
+      MEMBER_REMOVAL_CONFIRMATION.replace("REMOVE MEMBER {target}", "DELETE CHANNEL {target}"),
+      confirmation,
+      channel.name,
+      community.name,
+    )) return { outcome: "confirmation", channel } as const;
     const requestIds = await tx
       .select({ id: channelJoinRequestsTable.id })
       .from(channelJoinRequestsTable)
@@ -2238,6 +2335,10 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
       .from(messagesTable)
       .where(eq(messagesTable.channelId, channelId));
     if (channelMessages.length) {
+      const paths = await tx.select({ objectPath: messageAttachmentsTable.objectPath }).from(messageAttachmentsTable)
+        .where(inArray(messageAttachmentsTable.messageId, channelMessages.map((message) => message.id)));
+      cleanupPendingCount = new Set(paths.map((row) => row.objectPath)).size;
+      await enqueueObjectDeletionJobs(tx, paths.map((row) => row.objectPath), `channel:${channelId}`);
       await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, channelMessages.map((message) => message.id)));
       await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, channelMessages.map((message) => message.id)));
     }
@@ -2255,13 +2356,175 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
     res.status(403).json({ error: "You cannot delete channels in this community." });
     return;
   }
+  if (deletion.outcome === "confirmation") {
+    res.status(400).json({ error: "Confirmation does not match.", requiredConfirmation: `DELETE CHANNEL ${deletion.channel?.name ?? "channel"} FROM WORKSPACE ${community.name}` });
+    return;
+  }
   if (deletion.outcome === "not_found") {
     res.status(404).json({ error: "Channel not found." });
     return;
   }
   wsHub.broadcastChannelRemoved(channelId);
   await writeCommunityAudit(userId, "deleted_community_channel", communityId, deletion.channel.name);
-  res.json({ ok: true, channelId });
+  res.json({ ok: true, channelId, cleanupPending: cleanupPendingCount > 0, cleanupPendingCount });
+});
+
+/**
+ * Destructive member operations deliberately do not use hasPermission: platform
+ * and workspace-manager roles must not be able to invoke these owner actions.
+ */
+router.delete("/communities/:communityId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actorId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const memberId = param(req, "memberId");
+  const confirmation = deletionConfirmation(req.body);
+  if (!Number.isInteger(communityId) || confirmation === null) {
+    res.status(400).json({ error: "Confirmation is required." });
+    return;
+  }
+  const [community] = await db.select().from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community) { res.status(404).json({ error: "Workspace not found." }); return; }
+  if (!exactCommunityOwner(community.ownerId, actorId)) {
+    res.status(403).json({ error: "Only the exact workspace owner can remove members." });
+    return;
+  }
+  const [target] = await db.select().from(usersTable).where(eq(usersTable.clerkId, memberId));
+  if (!target) { res.status(404).json({ error: "Member not found." }); return; }
+  if (memberId === actorId || memberId === community.ownerId) {
+    res.status(400).json({ error: "The workspace owner cannot remove themselves or the workspace owner." });
+    return;
+  }
+  if (!confirmationMatches(MEMBER_REMOVAL_CONFIRMATION, confirmation, target.displayName, community.name)) {
+    res.status(400).json({ error: "Confirmation does not match.", requiredConfirmation: `REMOVE MEMBER ${target.displayName} FROM WORKSPACE ${community.name}` });
+    return;
+  }
+  const removed = await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    if (!lockedCommunity || !exactCommunityOwner(lockedCommunity.ownerId, actorId)) return false;
+    const [membership] = await tx.select().from(communityMembersTable).where(and(
+      eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, memberId),
+    )).for("update");
+    if (!membership) return false;
+    const workspaceChannels = await tx.select({ id: channelsTable.id }).from(channelsTable)
+      .where(eq(channelsTable.communityId, communityId));
+    const channels = await tx.select({ id: channelsTable.id }).from(channelsTable)
+      .where(and(eq(channelsTable.communityId, communityId), eq(channelsTable.ownerId, memberId)));
+    const categories = await tx.select({ id: categoriesTable.id }).from(categoriesTable)
+      .where(and(eq(categoriesTable.communityId, communityId), eq(categoriesTable.ownerId, memberId)));
+    if (channels.length) {
+      await tx.update(channelsTable).set({ ownerId: community.ownerId })
+        .where(inArray(channelsTable.id, channels.map((row) => row.id)));
+      await tx.insert(channelMembersTable).values(channels.map((row) => ({
+        channelId: row.id, userId: community.ownerId, role: "owner",
+      }))).onConflictDoUpdate({ target: [channelMembersTable.channelId, channelMembersTable.userId], set: { role: "owner" } });
+    }
+    if (categories.length) await tx.update(categoriesTable).set({ ownerId: community.ownerId })
+      .where(inArray(categoriesTable.id, categories.map((row) => row.id)));
+    if (workspaceChannels.length) {
+      const channelIds = workspaceChannels.map((row) => row.id);
+      await tx.delete(channelMembersTable).where(and(eq(channelMembersTable.userId, memberId), inArray(channelMembersTable.channelId, channelIds)));
+      await tx.delete(channelBansTable).where(and(eq(channelBansTable.userId, memberId), inArray(channelBansTable.channelId, channelIds)));
+      await tx.delete(channelJoinRequestsTable).where(and(eq(channelJoinRequestsTable.userId, memberId), inArray(channelJoinRequestsTable.channelId, channelIds)));
+      await tx.delete(channelInvitesTable).where(and(eq(channelInvitesTable.userId, memberId), inArray(channelInvitesTable.channelId, channelIds)));
+    }
+    const workspaceTeams = await tx.select({ id: teamsTable.id }).from(teamsTable).where(eq(teamsTable.communityId, communityId));
+    if (workspaceTeams.length) await tx.delete(teamMembersTable).where(and(eq(teamMembersTable.userId, memberId), inArray(teamMembersTable.teamId, workspaceTeams.map((row) => row.id))));
+    await tx.delete(userRolesTable).where(and(eq(userRolesTable.userId, memberId), eq(userRolesTable.communityId, communityId)));
+    await tx.delete(notificationsTable).where(and(eq(notificationsTable.userId, memberId), eq(notificationsTable.communityId, communityId)));
+    const policies = await tx.select({ id: workspacePoliciesTable.id }).from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, communityId));
+    if (policies.length) await tx.delete(policyAcknowledgementsTable).where(and(eq(policyAcknowledgementsTable.userId, memberId), inArray(policyAcknowledgementsTable.policyId, policies.map((row) => row.id))));
+    const documents = await tx.select({ id: businessDocumentsTable.id }).from(businessDocumentsTable).where(eq(businessDocumentsTable.communityId, communityId));
+    if (documents.length) {
+      const documentIds = documents.map((row) => row.id);
+      await tx.delete(documentPermissionsTable).where(and(eq(documentPermissionsTable.userId, memberId), inArray(documentPermissionsTable.documentId, documentIds)));
+      await tx.delete(documentAcknowledgementsTable).where(and(eq(documentAcknowledgementsTable.userId, memberId), inArray(documentAcknowledgementsTable.documentId, documentIds)));
+      await tx.delete(documentDownloadsTable).where(and(eq(documentDownloadsTable.userId, memberId), inArray(documentDownloadsTable.documentId, documentIds)));
+    }
+    await tx.delete(employeeProfilesTable).where(and(eq(employeeProfilesTable.userId, memberId), eq(employeeProfilesTable.communityId, communityId)));
+    await tx.update(workspaceInvitationsTable).set({ invitedUserId: null })
+      .where(and(eq(workspaceInvitationsTable.communityId, communityId), eq(workspaceInvitationsTable.invitedUserId, memberId)));
+    await tx.update(departmentsTable).set({ managerId: null }).where(and(eq(departmentsTable.communityId, communityId), eq(departmentsTable.managerId, memberId)));
+    await tx.update(teamsTable).set({ managerId: null }).where(and(eq(teamsTable.communityId, communityId), eq(teamsTable.managerId, memberId)));
+    await tx.delete(communityMembersTable).where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, memberId)));
+    return true;
+  });
+  if (!removed) { res.status(404).json({ error: "Member is not in this workspace." }); return; }
+  const channelIds = (await db.select({ id: channelsTable.id }).from(channelsTable).where(eq(channelsTable.communityId, communityId))).map((row) => row.id);
+  wsHub.revokeUserChannelAccess(channelIds, memberId);
+  for (const channelId of channelIds) wsHub.broadcastChannel(channelId, { type: "presence", action: "leave", channelId, userId: memberId });
+  wsHub.broadcastUser(memberId, { type: "workspace_membership_removed", communityId });
+  await writeCommunityAudit(actorId, "removed_workspace_member", communityId, {
+    resourceType: "member", resourceId: memberId, targetId: memberId, targetLabel: target.displayName,
+  });
+  res.json({ ok: true, communityId, memberId });
+});
+
+router.delete("/communities/:communityId/members/:memberId/account", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actorId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const memberId = param(req, "memberId");
+  const confirmation = deletionConfirmation(req.body);
+  if (!Number.isInteger(communityId) || confirmation === null) { res.status(400).json({ error: "Confirmation is required." }); return; }
+  const [community] = await db.select().from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  const [target] = await db.select().from(usersTable).where(eq(usersTable.clerkId, memberId));
+  if (!community || !target) { res.status(404).json({ error: "Workspace or member not found." }); return; }
+  if (!exactCommunityOwner(community.ownerId, actorId)) { res.status(403).json({ error: "Only the exact workspace owner can delete accounts." }); return; }
+  if (memberId === actorId || memberId === community.ownerId) { res.status(400).json({ error: "The workspace owner cannot delete themselves or the workspace owner." }); return; }
+  if (!confirmationMatches(ACCOUNT_DELETION_CONFIRMATION, confirmation, target.displayName, community.name)) {
+    res.status(400).json({ error: "Confirmation does not match.", requiredConfirmation: `DELETE ACCOUNT ${target.displayName} FROM WORKSPACE ${community.name}` }); return;
+  }
+  const [targetMemberships, targetOwned] = await Promise.all([
+    db.select({ communityId: communityMembersTable.communityId }).from(communityMembersTable).where(eq(communityMembersTable.userId, memberId)),
+    db.select({ id: communitiesTable.id }).from(communitiesTable).where(eq(communitiesTable.ownerId, memberId)),
+  ]);
+  if (!targetMemberships.some((row) => row.communityId === communityId) && target.deletionStatus !== "pending") {
+    res.status(404).json({ error: "Member is not in this workspace." }); return;
+  }
+  const requesterOwned = await db.select({ id: communitiesTable.id }).from(communitiesTable).where(eq(communitiesTable.ownerId, actorId));
+  if (!targetMayBePermanentlyDeleted(targetMemberships.map((row) => row.communityId), targetOwned.map((row) => row.id), requesterOwned.map((row) => row.id))) {
+    res.status(409).json({ error: "This account belongs to another workspace or owns a workspace; use workspace-only member removal." }); return;
+  }
+  await db.transaction(async (tx) => {
+    const [lockedCommunity] = await tx.select({ ownerId: communitiesTable.ownerId }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
+    if (!lockedCommunity || !exactCommunityOwner(lockedCommunity.ownerId, actorId)) throw new Error("Ownership changed.");
+    const [lockedTarget] = await tx.select({ accountStatus: usersTable.accountStatus }).from(usersTable)
+      .where(eq(usersTable.clerkId, memberId)).for("update");
+    if (!lockedTarget) throw new Error("Member disappeared.");
+    const lockedMemberships = await tx.select({ communityId: communityMembersTable.communityId }).from(communityMembersTable)
+      .where(eq(communityMembersTable.userId, memberId)).for("update");
+    const lockedOwned = await tx.select({ id: communitiesTable.id }).from(communitiesTable)
+      .where(eq(communitiesTable.ownerId, memberId)).for("update");
+    const lockedRequesterOwned = await tx.select({ id: communitiesTable.id }).from(communitiesTable)
+      .where(eq(communitiesTable.ownerId, actorId)).for("update");
+    if (!targetMayBePermanentlyDeleted(
+      lockedMemberships.map((row) => row.communityId),
+      lockedOwned.map((row) => row.id),
+      lockedRequesterOwned.map((row) => row.id),
+    ) && target.deletionStatus !== "pending") throw new Error("Account deletion eligibility changed.");
+    await tx.insert(adminAuditLogsTable).values({
+      actorId, communityId, action: "requested_account_deletion", resourceType: "user",
+      resourceId: memberId, targetId: memberId, targetLabel: target.displayName,
+      details: "Account deletion initiated; Clerk revocation pending.",
+    });
+    await tx.update(usersTable).set({
+      deletionStatus: "pending", deletionRequestedAt: new Date(), accountStatus: "suspended",
+      clerkDeletionStatus: "pending", clerkDeletionLastError: null,
+    })
+      .where(eq(usersTable.clerkId, memberId));
+    await tx.delete(communityMembersTable).where(eq(communityMembersTable.userId, memberId));
+    await tx.delete(userRolesTable).where(eq(userRolesTable.userId, memberId));
+    await tx.delete(channelMembersTable).where(eq(channelMembersTable.userId, memberId));
+     await tx.delete(teamMembersTable).where(eq(teamMembersTable.userId, memberId));
+  }, { isolationLevel: "serializable" });
+  wsHub.disconnectUser(memberId, "Account access revoked.");
+  const finalization = await finalizePendingAccountDeletion(memberId);
+  if (finalization === "retryable") {
+    res.status(502).json({ error: "Clerk deletion failed; the pending deletion will be retried.", retryable: true, pending: true });
+    return;
+  }
+  res.json({ ok: true, pending: finalization !== "completed", navigation: `/communities/${communityId}` });
 });
 
 router.patch("/communities/:communityId/members/:memberId/role", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -2296,6 +2559,10 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
   });
   if (!member) {
     res.status(404).json({ error: "Community member not found." });
+    return;
+  }
+  try { await assertDeletionEligibleUser(memberId); } catch {
+    res.status(409).json({ error: "This account is pending deletion and cannot receive roles." });
     return;
   }
   await db.delete(userRolesTable).where(and(

@@ -23,6 +23,11 @@ export const usersTable = pgTable(
     avatarUrl: text("avatar_url"),
     status: text("status").notNull().default("offline"),
     accountStatus: text("account_status").notNull().default("active"),
+    deletionStatus: text("deletion_status").notNull().default("none"),
+    deletionRequestedAt: timestamp("deletion_requested_at", { withTimezone: true }),
+    clerkDeletionStatus: text("clerk_deletion_status").notNull().default("none"),
+    clerkDeletionAttempts: integer("clerk_deletion_attempts").notNull().default(0),
+    clerkDeletionLastError: text("clerk_deletion_last_error"),
     role: text("role").notNull().default("member"),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -570,7 +575,7 @@ export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   id: serial("id").primaryKey(),
   actorId: text("actor_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
   actorDisplayName: text("actor_display_name"),
-  communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
+  communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "set null" }),
   departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "set null" }),
   locationId: integer("location_id").references(() => locationsTable.id, { onDelete: "set null" }),
   action: text("action").notNull(),
@@ -590,6 +595,18 @@ export const developerSettingsTable = pgTable("irc_developer_settings", {
   value: text("value").notNull().default(""),
   updatedBy: text("updated_by").notNull().references(() => usersTable.clerkId),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const workspaceObjectDeletionJobsTable = pgTable("irc_workspace_object_deletion_jobs", {
+  id: serial("id").primaryKey(),
+  objectPath: text("object_path").notNull().unique(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  context: text("context").notNull().default("workspace"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  processedAt: timestamp("processed_at", { withTimezone: true }),
 });
 
 export const developerReleasesTable = pgTable("irc_developer_releases", {

@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { wsHub } from "./lib/ws";
+import { startObjectDeletionWorker } from "./lib/object-cleanup";
+import { startAccountDeletionWorker } from "./lib/account-deletion";
 
 const rawPort = process.env["PORT"];
 
@@ -24,5 +26,7 @@ server.on("error", (err) => {
   process.exit(1);
 });
 server.listen(port, () => {
+  startObjectDeletionWorker();
+  startAccountDeletionWorker();
   logger.info({ port }, "Server listening");
 });

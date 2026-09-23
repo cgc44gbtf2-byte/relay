@@ -19,7 +19,7 @@ export async function requireAuth(
   const profile = await db.query.usersTable.findFirst({
     where: eq(usersTable.clerkId, userId),
   });
-  if (profile?.accountStatus === "suspended") {
+  if (profile?.accountStatus === "suspended" || profile?.deletionStatus === "pending" || profile?.deletionStatus === "completed") {
     res.status(403).json({ error: "This account is suspended." });
     return;
   }
