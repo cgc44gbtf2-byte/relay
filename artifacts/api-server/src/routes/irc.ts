@@ -37,6 +37,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
+import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
 import { signedObjectUrlForPath } from "./storage";
 import { channelNotFoundError } from "./errors";
@@ -1040,6 +1041,23 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   if (!(await isChannelOwnerOrModerator(channel.id, userId))) {
     res.status(403).json({ error: "You do not have moderation permissions." });
     return;
+  }
+  if (action === "moderator") {
+    const [actorMembership, targetMembership, actorCanManageChannel] = await Promise.all([
+      membership(channel.id, userId),
+      membership(channel.id, targetUserId),
+      hasPermission(userId, "manage_channel", { channelId: channel.id }),
+    ]);
+    if (!canPromoteChannelModerator({
+      actorRole: actorMembership?.role ?? null,
+      actorCanManageChannel,
+      targetRole: targetMembership?.role ?? null,
+    })) {
+      res.status(403).json({
+        error: "Only channel owners or channel managers can promote current members.",
+      });
+      return;
+    }
   }
   if (action === "mute") {
     const minutes = Math.max(1, Math.min(1440, Number(req.body.minutes) || 10));
