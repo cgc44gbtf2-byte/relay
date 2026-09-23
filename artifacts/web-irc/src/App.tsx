@@ -498,6 +498,10 @@ function ChatApp() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const wsRef = useRef<WebSocket | null>(ws);
+  const typingStartTimerRef = useRef<number | null>(null);
+  const typingIdleTimerRef = useRef<number | null>(null);
+  const typingAdvertisedRef = useRef(false);
   const [connection, setConnection] = useState("connecting");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [bootstrapError, setBootstrapError] = useState("");
@@ -510,6 +514,7 @@ function ChatApp() {
   currentChannelIdRef.current = currentChannelId;
   activeDmIdRef.current = activeDm?.id ?? null;
   profileRef.current = profile;
+  wsRef.current = ws;
 
   const refreshChannels = async (): Promise<Channel[]> => {
     if (channelRefreshRef.current) return channelRefreshRef.current;
@@ -753,6 +758,16 @@ function ChatApp() {
     const dmId = activeDm?.id ?? null;
     if (!activeDm && channelId === null) return;
     setDraft("");
+    if (channelId !== null) {
+      if (typingStartTimerRef.current !== null) window.clearTimeout(typingStartTimerRef.current);
+      if (typingIdleTimerRef.current !== null) window.clearTimeout(typingIdleTimerRef.current);
+      typingStartTimerRef.current = null;
+      typingIdleTimerRef.current = null;
+      if (typingAdvertisedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "typing", channelId, active: false }));
+      }
+      typingAdvertisedRef.current = false;
+    }
     try {
       const sent = activeDm
         ? await api<ChatMessage>(`/dm/${activeDm.id}/messages`, { method: "POST", body: JSON.stringify({ body, replyToId: replyingTo?.id ?? null }) })
@@ -776,10 +791,63 @@ function ChatApp() {
   }, [currentChannelId, activeDm?.id]);
   const sendTyping = (value: string) => {
     setDraft(value);
-    if (ws?.readyState === WebSocket.OPEN && currentChannelId && !activeDm) {
-      ws.send(JSON.stringify({ type: "typing", channelId: currentChannelId, active: Boolean(value.trim()) }));
+    const channelId = currentChannelId;
+    if (!channelId || activeDm) return;
+    if (typingIdleTimerRef.current !== null) window.clearTimeout(typingIdleTimerRef.current);
+
+    if (!value.trim()) {
+      if (typingStartTimerRef.current !== null) window.clearTimeout(typingStartTimerRef.current);
+      typingStartTimerRef.current = null;
+      typingIdleTimerRef.current = null;
+      if (typingAdvertisedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "typing", channelId, active: false }));
+      }
+      typingAdvertisedRef.current = false;
+      return;
     }
+
+    if (!typingAdvertisedRef.current && typingStartTimerRef.current === null) {
+      typingStartTimerRef.current = window.setTimeout(() => {
+        typingStartTimerRef.current = null;
+        if (
+          currentChannelIdRef.current === channelId
+          && !activeDmIdRef.current
+          && wsRef.current?.readyState === WebSocket.OPEN
+        ) {
+          wsRef.current.send(JSON.stringify({ type: "typing", channelId, active: true }));
+          typingAdvertisedRef.current = true;
+        }
+      }, 300);
+    }
+
+    typingIdleTimerRef.current = window.setTimeout(() => {
+      typingIdleTimerRef.current = null;
+      if (
+        typingAdvertisedRef.current
+        && currentChannelIdRef.current === channelId
+        && !activeDmIdRef.current
+        && wsRef.current?.readyState === WebSocket.OPEN
+      ) {
+        wsRef.current.send(JSON.stringify({ type: "typing", channelId, active: false }));
+      }
+      typingAdvertisedRef.current = false;
+    }, 1_500);
   };
+  useEffect(() => () => {
+    if (typingStartTimerRef.current !== null) window.clearTimeout(typingStartTimerRef.current);
+    if (typingIdleTimerRef.current !== null) window.clearTimeout(typingIdleTimerRef.current);
+    typingStartTimerRef.current = null;
+    typingIdleTimerRef.current = null;
+    if (
+      typingAdvertisedRef.current
+      && currentChannelId
+      && !activeDm
+      && wsRef.current?.readyState === WebSocket.OPEN
+    ) {
+      wsRef.current.send(JSON.stringify({ type: "typing", channelId: currentChannelId, active: false }));
+    }
+    typingAdvertisedRef.current = false;
+  }, [currentChannelId, activeDm]);
   const joinChannel = async (channel: Channel) => {
     const result = await api<{ status: "member" | "pending" }>(`/channels/${channel.id}/join`, { method: "POST", body: "{}" });
     if (result.status === "pending") {

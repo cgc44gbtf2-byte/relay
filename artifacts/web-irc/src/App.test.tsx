@@ -393,6 +393,39 @@ describe("deleted room recovery", () => {
     expect(screen.queryByText(/Orion typing/)).toBeNull();
   });
 
+  it("limits outbound typing frames and clears them after idle or draft removal", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    latestWebSocket?.onopen?.();
+    webSocketFrames = [];
+    vi.useFakeTimers();
+
+    const editor = screen.getByPlaceholderText("message #deleted-room");
+    fireEvent.change(editor, { target: { value: "h" } });
+    fireEvent.change(editor, { target: { value: "he" } });
+    fireEvent.change(editor, { target: { value: "hey" } });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(webSocketFrames).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual([
+      { type: "typing", channelId: 1, active: true },
+    ]);
+
+    fireEvent.change(editor, { target: { value: "hey there" } });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual([
+      { type: "typing", channelId: 1, active: true },
+      { type: "typing", channelId: 1, active: false },
+    ]);
+
+    fireEvent.change(editor, { target: { value: "a" } });
+    await vi.advanceTimersByTimeAsync(300);
+    fireEvent.change(editor, { target: { value: "" } });
+    expect(webSocketFrames.map((frame) => JSON.parse(frame)).slice(-2)).toEqual([
+      { type: "typing", channelId: 1, active: true },
+      { type: "typing", channelId: 1, active: false },
+    ]);
+  });
+
   it("refreshes the active room after reconnecting and replaces stale messages", async () => {
     await renderChat({
       missingRequest: "event",
