@@ -99,11 +99,23 @@ function installApi({
   fallbackChannels,
   owner = false,
   reconnectedMessages,
+  notifications = [],
+  uploadFailure = false,
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
   owner?: boolean;
   reconnectedMessages?: unknown[];
+  notifications?: Array<{
+    id: number;
+    type: string;
+    category: "general";
+    body: string;
+    createdAt: string;
+    readAt: string | null;
+    actionUrl: string | null;
+  }>;
+  uploadFailure?: boolean;
 }) {
   const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
   const fallback = room(2, "#fallback-room");
@@ -115,8 +127,23 @@ function installApi({
     const method = init?.method ?? "GET";
 
     if (url === "/api/me") return jsonResponse(profile);
+    if (url === "/api/onboarding") return jsonResponse({
+      nextStep: "start",
+      ownerCommunity: { id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner },
+      communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
+    });
     if (url === "/api/categories") return jsonResponse([]);
-    if (url === "/api/notifications") return jsonResponse([]);
+    if (url === "/api/notifications" && method === "GET") return jsonResponse(notifications);
+    if (url.match(/^\/api\/notifications\/\d+\/read$/) && method === "POST") return jsonResponse({ ok: true });
+    if (url === "/api/storage/uploads/request-url" && method === "POST") {
+      return jsonResponse({
+        uploadURL: "https://upload.test/file",
+        objectPath: "/objects/uploads/123e4567-e89b-12d3-a456-426614174000",
+      });
+    }
+    if (url === "https://upload.test/file" && method === "PUT") {
+      return uploadFailure ? jsonResponse({ error: "upload failed" }, 500) : jsonResponse({});
+    }
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
@@ -139,6 +166,9 @@ function installApi({
     }
     if (url === "/api/channels/1/messages" && method === "POST") {
       return missingRequest === "send" ? channelNotFound() : jsonResponse(message(1, "sent"));
+    }
+    if (url === "/api/messages/message-1" && method === "DELETE") {
+      return jsonResponse({ ok: true });
     }
     if (url === "/api/channels/1" && method === "PATCH") {
       return missingRequest === "topic" ? channelNotFound() : jsonResponse({ ...deleted, topic: "updated" });
@@ -178,6 +208,7 @@ describe("deleted room recovery", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
     latestWebSocket = null;
     webSocketFrames = [];
@@ -235,13 +266,21 @@ describe("deleted room recovery", () => {
   it("removes a room immediately when another session deletes it", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    const deletedRoomSocket = latestWebSocket;
 
     latestWebSocket?.onmessage?.({
       data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
     } as MessageEvent);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    deletedRoomSocket?.onmessage?.({
+      data: JSON.stringify({
+        type: "message",
+        message: message(1, "late message from deleted room", "late-message"),
+      }),
+    } as MessageEvent);
     expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
+    expect(screen.queryByText("late message from deleted room")).toBeNull();
     expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
   });
 
@@ -306,5 +345,92 @@ describe("deleted room recovery", () => {
     expect(screen.getAllByText("reaction survived")).toHaveLength(1);
     expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+  });
+
+  it("requests a fresh socket and resubscribes after a connection drops", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    const firstSocket = latestWebSocket;
+    expect(firstSocket).toBeTruthy();
+
+    vi.useFakeTimers();
+    firstSocket?.onclose?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const reconnectedSocket = latestWebSocket;
+    expect(reconnectedSocket).toBeTruthy();
+    expect(reconnectedSocket).not.toBe(firstSocket);
+    reconnectedSocket?.onopen?.();
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
+      { type: "subscribe", channelId: 1 },
+    ]));
+  });
+
+  it("keeps notification navigation inside the signed-in workspace", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 7,
+        type: "task_updated",
+        category: "general",
+        body: "Open the workspace task",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: "/communities/1",
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    fireEvent.click(screen.getByRole("button", { name: /Open the workspace task/ }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/communities/1"));
+    expect(screen.queryByText("Open the workspace task")).toBeNull();
+  });
+
+  it("applies notification read updates received from another session", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 8,
+        type: "task_updated",
+        category: "general",
+        body: "Read this from another session",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: null,
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText(/Read this from another session/)).toBeTruthy();
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({
+        type: "notification_read",
+        notificationId: 8,
+        readAt: "2026-09-21T12:01:00.000Z",
+      }),
+    } as MessageEvent);
+
+    await waitFor(() => expect(screen.getByText(/· read$/)).toBeTruthy());
+  });
+
+  it("cleans up the placeholder message when an attachment upload fails", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      uploadFailure: true,
+    });
+
+    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+        String(input) === "/api/messages/message-1" && init?.method === "DELETE",
+      )).toBe(true);
+    });
   });
 });
