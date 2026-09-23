@@ -1245,7 +1245,7 @@ function ChatApp() {
               {publicSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
             </select>
           </label>
-          {!moveSpaceWorking && publicSpaces.length === 0 && !moveSpaceError && <p className="text-xs text-muted-foreground">No other public spaces you own are available.</p>}
+          {!moveSpaceWorking && publicSpaces.length === 0 && !moveSpaceError && <p className="text-xs text-muted-foreground">No other public communities you own are available. Free accounts currently have one community.</p>}
           {moveSpaceError && <p role="alert" className="text-xs text-destructive">{moveSpaceError}</p>}
           <div className="flex justify-end gap-2">
             <button type="button" disabled={moveSpaceWorking} onClick={() => setMoveSpaceOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button>
