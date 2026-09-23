@@ -167,6 +167,7 @@ function installApi({
   fallbackJoined = true,
   uploadFailure = false,
   categories = [],
+  publicSpaces = [],
 }: {
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   fallbackChannels: Channel[];
@@ -189,8 +190,9 @@ function installApi({
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
   categories?: Array<{ id: number; name: string; description: string; ownerId: string; communityId: number | null }>;
+  publicSpaces?: Array<{ id: number | null; name: string }>;
 }) {
-  const deleted = room(1, "#deleted-room", owner ? "user-1" : "owner-1");
+  const deleted = { ...room(1, "#deleted-room", owner ? "user-1" : "owner-1"), canMovePublicSpace: owner };
   const fallback = {
     ...room(2, "#fallback-room"),
     joined: fallbackJoined,
@@ -227,6 +229,16 @@ function installApi({
       return uploadFailure ? jsonResponse({ error: "upload failed" }, 500) : jsonResponse({});
     }
     if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
+    if (url === "/api/channels/1/public-spaces" && method === "GET") return jsonResponse(publicSpaces);
+    if (url === "/api/channels/1/public-space" && method === "PATCH") {
+      const communityId = (JSON.parse(String(init?.body)) as { communityId: number | null }).communityId;
+      return jsonResponse({
+        ...deleted,
+        communityId,
+        communityName: communityId === null ? "Public network" : publicSpaces.find((space) => space.id === communityId)?.name,
+        categoryId: null,
+      });
+    }
     if (url === "/api/users/search?q=or") return jsonResponse([members()[1]]);
     if (url.startsWith("/api/dm/user-2/messages?before=") && method === "GET") {
       dmPaginationCalls += 1;
@@ -380,6 +392,26 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(within(screen.getByText("uncategorized").parentElement!).getByRole("button", { name: /deleted-room/i })).toBeTruthy());
     expect(screen.getByText("stale history")).toBeTruthy();
     expect(fetch).toHaveBeenCalledWith("/api/channels/1", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ categoryId: null }) }));
+  });
+
+  it("moves a public channel to an owned public space while keeping its history", async () => {
+    await renderChat({
+      missingRequest: "event",
+      owner: true,
+      fallbackChannels: [room(1, "#deleted-room", "user-1"), room(2, "#fallback-room")],
+      publicSpaces: [{ id: 41, name: "Mira's community" }],
+    });
+    await screen.findByText("stale history");
+    fireEvent.click(screen.getByTestId("button-move-public-space"));
+    const select = await screen.findByTestId("select-public-space");
+    await waitFor(() => expect((select as HTMLSelectElement).querySelector('option[value="41"]')).not.toBeNull());
+    fireEvent.change(select, { target: { value: "41" } });
+    fireEvent.click(screen.getByRole("button", { name: "move channel" }));
+    await waitFor(() => expect(screen.queryByTestId("select-public-space")).toBeNull());
+    expect(fetch).toHaveBeenCalledWith("/api/channels/1/public-space",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ communityId: 41 }) }));
+    expect(screen.getByText("Mira's community")).toBeTruthy();
+    expect(screen.getByText("stale history")).toBeTruthy();
   });
 
   it.each([

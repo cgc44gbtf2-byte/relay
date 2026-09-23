@@ -20,3 +20,4 @@
 - [Migration baseline safety](migration-baseline-safety.md) — establish Relay’s first migration baseline from verified production schema, never an assumed development schema.
 - [Clerk test-account switching](clerk-test-account-switching.md) — development Clerk may be single-session; preserve safe owner return without persisting sign-in tickets.
 - [Clerk test identity limits](clerk-test-identity-limits.md) — authenticated suites and strict cleanup must tolerate management API rate limits without leaking users.
+- [Public channel destinations](public-channel-destinations.md) — owner-directed public-channel moves target only public communities the owner owns, never arbitrary communities or business workspaces.

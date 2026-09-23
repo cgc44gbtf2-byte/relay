@@ -89,6 +89,8 @@ type Channel = {
   description: string;
   ownerId: string;
   communityId: number | null;
+  communityName?: string | null;
+  canMovePublicSpace?: boolean;
   categoryId: number | null;
   category?: Category | null;
   isPrivate: boolean;
@@ -503,6 +505,11 @@ function ChatApp() {
   const [organizeCategoryId, setOrganizeCategoryId] = useState("");
   const [organizeWorking, setOrganizeWorking] = useState(false);
   const [organizeError, setOrganizeError] = useState("");
+  const [moveSpaceOpen, setMoveSpaceOpen] = useState(false);
+  const [publicSpaces, setPublicSpaces] = useState<Array<{ id: number; name: string }>>([]);
+  const [moveSpaceId, setMoveSpaceId] = useState("");
+  const [moveSpaceWorking, setMoveSpaceWorking] = useState(false);
+  const [moveSpaceError, setMoveSpaceError] = useState("");
   const [newChannelPrivate, setNewChannelPrivate] = useState(false);
   const [newChannelInviteOnly, setNewChannelInviteOnly] = useState(false);
   const [newChannelPassword, setNewChannelPassword] = useState("");
@@ -589,6 +596,7 @@ function ChatApp() {
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
+  useEffect(() => { setMoveSpaceOpen(false); }, [currentChannelId]);
   const visibleNotifications = notificationFilter === "all"
     ? notifications
     : notifications.filter((notification) => notification.category === notificationFilter);
@@ -1019,6 +1027,43 @@ function ChatApp() {
       setOrganizeWorking(false);
     }
   };
+  const openPublicSpaceMove = async () => {
+    if (!currentChannel || !currentChannel.canMovePublicSpace) return;
+    const channelId = currentChannel.id;
+    setMoveSpaceError("");
+    setMoveSpaceId("");
+    setPublicSpaces([]);
+    setMoveSpaceOpen(true);
+    setMoveSpaceWorking(true);
+    try {
+      setPublicSpaces(await api<Array<{ id: number; name: string }>>(`/channels/${channelId}/public-spaces`));
+    } catch (error) {
+      setMoveSpaceError(error instanceof Error ? error.message : "Could not load public spaces.");
+    } finally {
+      setMoveSpaceWorking(false);
+    }
+  };
+  const movePublicSpace = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!currentChannel || !moveSpaceId || currentChannel.ownerId !== profile?.id) return;
+    const channelId = currentChannel.id;
+    setMoveSpaceWorking(true);
+    setMoveSpaceError("");
+    try {
+      const updated = await api<Channel>(`/channels/${channelId}/public-space`, {
+        method: "PATCH",
+        body: JSON.stringify({ communityId: Number(moveSpaceId) }),
+      });
+      setChannels((items) => items.map((item) => item.id === channelId
+        ? { ...item, communityId: updated.communityId, communityName: updated.communityName, categoryId: null, category: null }
+        : item));
+      setMoveSpaceOpen(false);
+    } catch (error) {
+      setMoveSpaceError(error instanceof Error ? error.message : "Could not move the channel.");
+    } finally {
+      setMoveSpaceWorking(false);
+    }
+  };
   const deleteMessage = useCallback(async (message: ChatMessage) => {
     try {
       const deleted = await api<ChatMessage>(`/messages/${message.id}`, { method: "DELETE" });
@@ -1110,7 +1155,16 @@ function ChatApp() {
       setReturningToOwner(false);
     }
   };
-  const renderChannel = (channel: Channel) => <div key={channel.id}><button disabled={joiningChannelId === channel.id} onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)} className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}><span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span><span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span></button>{joinErrors[channel.id] && <p className="px-2 pb-1 font-mono text-[9px] leading-4 text-destructive">{joinErrors[channel.id]}</p>}</div>;
+  const renderChannel = (channel: Channel) => <div key={channel.id}>
+    <button disabled={joiningChannelId === channel.id}
+      onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)}
+      className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}>
+      <span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span>
+      <span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span>
+    </button>
+    {channel.categoryId === null && <p className="truncate px-3 pb-1 font-mono text-[9px] text-muted-foreground/80">{channel.communityName ?? (channel.communityId === null ? "Public network" : "Community")}</p>}
+    {joinErrors[channel.id] && <p className="px-2 pb-1 font-mono text-[9px] leading-4 text-destructive">{joinErrors[channel.id]}</p>}
+  </div>;
   if (!profile && bootstrapError) {
     return (
       <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center font-mono">
@@ -1152,6 +1206,7 @@ function ChatApp() {
            <div className="flex items-center gap-1.5">
             <form onSubmit={searchHistory} className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 sm:flex"><Search className="h-3.5 w-3.5 text-muted-foreground" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="search history" className="h-8 w-28 bg-transparent font-mono text-[10px] outline-none" /></form>
               {!activeDm && currentChannel && ["owner", "moderator"].includes(actorRole ?? "") && <button onClick={() => { setOrganizeCategoryId(currentChannel.categoryId === null ? "" : String(currentChannel.categoryId)); setOrganizeError(""); setOrganizeChannelOpen(true); }} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary" data-testid="button-organize-current-channel">organize</button>}
+               {!activeDm && currentChannel?.canMovePublicSpace && <button onClick={() => void openPublicSpaceMove()} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary" data-testid="button-move-public-space">move space</button>}
               {!activeDm && joinRequests.length > 0 && <button onClick={() => setShowRequests(true)} className="rounded-md border border-primary/40 px-2 py-1.5 font-mono text-[10px] text-primary hover:bg-primary/10">{joinRequests.length} request{joinRequests.length === 1 ? "" : "s"}</button>}
             <button onClick={() => setPanel("notifications")} className="relative rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Notifications"><Bell className="h-4 w-4" />{unread > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent" />}</button>
             <button onClick={() => setShowMembers((value) => !value)} className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Toggle members"><Users className="h-4 w-4" /></button>
@@ -1179,6 +1234,25 @@ function ChatApp() {
           {showMembers && !activeDm && <aside className="hidden w-[285px] shrink-0 border-l border-border bg-card/70 lg:flex lg:flex-col"><div className="border-b border-border px-4 py-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">in the room</p><p className="mt-1 font-mono text-lg font-bold">{room.members.length} <span className="text-xs font-normal text-muted-foreground">people</span></p></div><div className="flex-1 overflow-y-auto p-3">{room.members.map((member) => <div key={member.id} className="group rounded-md px-2 py-2 hover:bg-muted"><div className="flex items-center gap-2"><Avatar user={member} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName} {member.status === "online" ? <span className="ml-1 text-chart-4">●</span> : <span className="ml-1 text-muted-foreground">○</span>}</p><p className="font-mono text-[9px] text-muted-foreground">@{member.username} · {member.role}</p></div><button onClick={() => setActiveDm(member)} className="rounded p-1 text-muted-foreground hover:text-primary" aria-label={`Message ${member.displayName}`}><MessageCircle className="h-3.5 w-3.5" /></button></div>{member.id !== profile.id && <div className="mt-2 hidden gap-1 group-hover:flex"><button onClick={() => blockUser(member)} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-accent hover:text-accent">block</button>{actorRole === "owner" && member.role === "member" && <button onClick={() => moderate(member, "moderator")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-secondary-foreground hover:text-secondary-foreground">mod</button>}{["owner", "moderator"].includes(actorRole ?? "") && member.role === "member" && <><button onClick={() => moderate(member, "mute")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">mute</button><button onClick={() => moderate(member, "kick")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">kick</button><button onClick={() => moderate(member, "ban")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-destructive hover:text-destructive">ban</button></>}</div>}</div>)}</div></aside>}
         </div>
       </main>
+
+      {moveSpaceOpen && currentChannel && <Overlay title={`Move ${currentChannel.name} to a public space`} onClose={() => { if (!moveSpaceWorking) setMoveSpaceOpen(false); }}>
+        <form onSubmit={movePublicSpace} className="space-y-4">
+          <p className="text-xs text-muted-foreground">Current space: {currentChannel.communityName || "Public network"}. The channel, its members, and message history will move together. Its old category will be cleared.</p>
+          <label className="block font-mono text-xs">destination
+            <select value={moveSpaceId} disabled={moveSpaceWorking} onChange={(event) => setMoveSpaceId(event.target.value)}
+              className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3" data-testid="select-public-space">
+              <option value="">select a public space</option>
+              {publicSpaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+            </select>
+          </label>
+          {!moveSpaceWorking && publicSpaces.length === 0 && !moveSpaceError && <p className="text-xs text-muted-foreground">No other public spaces you own are available.</p>}
+          {moveSpaceError && <p role="alert" className="text-xs text-destructive">{moveSpaceError}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={moveSpaceWorking} onClick={() => setMoveSpaceOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button>
+            <button disabled={!moveSpaceId || moveSpaceWorking} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{moveSpaceWorking ? "moving…" : "move channel"}</button>
+          </div>
+        </form>
+      </Overlay>}
 
       {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_updated", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
        {organizeChannelOpen && currentChannel && <Overlay title={`Organize ${currentChannel.name}`} onClose={() => { if (!organizeWorking) setOrganizeChannelOpen(false); }}><form onSubmit={moveCurrentChannel} className="space-y-4"><p className="text-xs text-muted-foreground">Move this channel to a category without affecting its members or messages.</p><label className="block font-mono text-xs">category<select value={organizeCategoryId} onChange={(event) => setOrganizeCategoryId(event.target.value)} className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3"><option value="">uncategorized</option>{categories.filter((category) => category.communityId === currentChannel.communityId).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{organizeError && <p role="alert" className="text-xs text-destructive">{organizeError}</p>}<div className="flex justify-end gap-2"><button type="button" disabled={organizeWorking} onClick={() => setOrganizeChannelOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button><button disabled={organizeWorking || organizeCategoryId === (currentChannel.categoryId === null ? "" : String(currentChannel.categoryId))} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{organizeWorking ? "moving…" : "save category"}</button></div></form></Overlay>}

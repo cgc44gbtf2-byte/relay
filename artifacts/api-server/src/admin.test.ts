@@ -3424,6 +3424,75 @@ describe("admin access controls", () => {
     }
   });
 
+  test("moves only owner-controlled public channels to the owner's public community", async () => {
+    const channelIds: number[] = [];
+    let categoryId: number | null = null;
+    try {
+      const ownOnboarding = await apiRequest(memberSession, "/onboarding");
+      const foreignOnboarding = await apiRequest(adminSession, "/onboarding");
+      assert.equal(ownOnboarding.status, 200, JSON.stringify(ownOnboarding));
+      assert.equal(foreignOnboarding.status, 200, JSON.stringify(foreignOnboarding));
+      const ownId = (ownOnboarding.body as { ownerCommunity: { id: number } }).ownerCommunity.id;
+      const foreignId = (foreignOnboarding.body as { ownerCommunity: { id: number } }).ownerCommunity.id;
+      assert.notEqual(ownId, foreignId);
+
+      const category = await apiRequest(memberSession, "/categories", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `source-${randomUUID().slice(0, 8)}` }),
+      });
+      assert.equal(category.status, 201, JSON.stringify(category));
+      categoryId = (category.body as { id: number }).id;
+      const created = await apiRequest(memberSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `#transfer-${randomUUID().slice(0, 8)}`, categoryId }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      const channelId = (created.body as { id: number }).id;
+      channelIds.push(channelId);
+      const message = await apiRequest(memberSession, `/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "This history stays with its channel." }),
+      });
+      assert.equal(message.status, 201, JSON.stringify(message));
+      const patch = (communityId: unknown): RequestInit => ({
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ communityId }),
+      });
+      const destinations = await apiRequest(memberSession, `/channels/${channelId}/public-spaces`);
+      assert.equal(destinations.status, 200, JSON.stringify(destinations));
+      assert.deepEqual((destinations.body as Array<{ id: number }>).map(({ id }) => id), [ownId]);
+      assert.equal((await apiRequest(adminSession, `/channels/${channelId}/public-space`, patch(foreignId))).status, 403);
+      assert.equal((await apiRequest(memberSession, `/channels/${channelId}/public-space`, patch(foreignId))).status, 400);
+      assert.equal((await apiRequest(memberSession, `/channels/${channelId}/public-space`, patch("invalid"))).status, 400);
+      assert.equal((await apiRequest(memberSession, `/channels/${channelId}/public-space`, patch(null))).status, 400);
+      const moved = await apiRequest(memberSession, `/channels/${channelId}/public-space`, patch(ownId));
+      assert.equal(moved.status, 200, JSON.stringify(moved));
+      assert.equal((moved.body as { communityId: number; categoryId: null }).communityId, ownId);
+      assert.equal((moved.body as { categoryId: null }).categoryId, null);
+      assert.equal((moved.body as { passwordHash?: unknown }).passwordHash, undefined);
+      const history = await apiRequest(memberSession, `/channels/${channelId}/messages`);
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.deepEqual((history.body as { messages: Array<{ body: string }> }).messages.map(({ body }) => body),
+        ["This history stays with its channel."]);
+      const privateChannel = await apiRequest(memberSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `#private-transfer-${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(privateChannel.status, 201, JSON.stringify(privateChannel));
+      const privateId = (privateChannel.body as { id: number }).id;
+      channelIds.push(privateId);
+      assert.equal((await apiRequest(memberSession, `/channels/${privateId}/public-space`, patch(ownId))).status, 400);
+    } finally {
+      await removeTestChannels(channelIds, [memberSession.userId]);
+      if (categoryId !== null) await pool.query("DELETE FROM irc_categories WHERE id = $1", [categoryId]);
+    }
+  });
+
   test("lets workspace admins organize channels they do not own, only within their workspace", async () => {
     const managerSession = await createTestSession("channel_organizer");
     const communityIds: number[] = [];
