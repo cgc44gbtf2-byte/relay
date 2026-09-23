@@ -722,7 +722,8 @@ function ChatApp() {
       cancelled = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       const closingSocket = socket;
-      if (closingSocket?.readyState === WebSocket.OPEN || closingSocket?.readyState === WebSocket.CONNECTING) {
+      if (!closingSocket) return;
+      if (closingSocket.readyState === WebSocket.OPEN || closingSocket.readyState === WebSocket.CONNECTING) {
         if (closingSocket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
           closingSocket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
         }
@@ -3254,6 +3255,32 @@ function CommunityConsole() {
       setWorking(false);
     }
   };
+  const deleteCategoryWithChannels = async (category: CommunityDetail["categories"][number]) => {
+    if (!detail || !detail.isOwner) return;
+    const confirmation = `DELETE CATEGORY ${category.name} AND CHANNELS FROM WORKSPACE ${detail.community.name}`;
+    const supplied = window.prompt(
+      `This permanently deletes the category and all ${detail.channels.filter((channel) => channel.categoryId === category.id).length} channels inside it.\n\nType exactly:\n${confirmation}`,
+    );
+    if (supplied === null) return;
+    if (supplied.trim() !== confirmation) {
+      setError("Confirmation did not match. Nothing was deleted.");
+      return;
+    }
+    setWorking(true);
+    setError("");
+    try {
+      const deleted = await api<{ deletedChannelCount: number; cleanupPending?: boolean }>(
+        `/communities/${detail.community.id}/categories/${category.id}/with-channels`,
+        { method: "DELETE", body: JSON.stringify({ confirmation: supplied.trim() }) },
+      );
+      setNotice(`${category.name} and ${deleted.deletedChannelCount} channel${deleted.deletedChannelCount === 1 ? "" : "s"} were deleted${deleted.cleanupPending ? "; storage cleanup is pending" : ""}.`);
+      await loadDetail(detail.community.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `Could not delete category ${category.name} and its channels`);
+    } finally {
+      setWorking(false);
+    }
+  };
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading communities…</div>;
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
@@ -3289,7 +3316,7 @@ function CommunityConsole() {
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              {(detail.canManage || detail.canManageOrganization) && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
-             {detail.canManage && <section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace resources</h2><p className="mt-1 text-xs text-muted-foreground">Deleting a category unassigns its channels. Deleting a channel removes its members, requests, messages, and invitations.</p></div><Trash2 className="h-5 w-5 text-destructive" /></div><div className="mt-5 grid gap-5 xl:grid-cols-3"><div><p className="font-mono text-[10px] uppercase text-muted-foreground">categories</p><div className="mt-2 space-y-2">{detail.categories.map((category) => <div key={category.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{category.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("categories", category.id, `category “${category.name}”`)} /></div>)}{detail.categories.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No categories.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">channels</p><div className="mt-2 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("channels", channel.id, `channel “${channel.name}”`)} /></div>)}{detail.channels.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No channels.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">announcements</p><div className="mt-2 space-y-2">{detail.announcements.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{item.title}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("announcements", item.id, `announcement “${item.title}”`)} /></div>)}{detail.announcements.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No announcements.</p>}</div></div></div></section>}
+             {detail.canManage && <section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace resources</h2><p className="mt-1 text-xs text-muted-foreground">Delete a category alone to keep its channels uncategorized, or delete the category and every channel inside it. Channel deletion also removes members, requests, messages, invitations, and attachments.</p></div><Trash2 className="h-5 w-5 text-destructive" /></div><div className="mt-5 grid gap-5 xl:grid-cols-3"><div><p className="font-mono text-[10px] uppercase text-muted-foreground">categories</p><div className="mt-2 space-y-2">{detail.categories.map((category) => <div key={category.id} className="rounded border border-border/70 px-3 py-2"><div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-xs">{category.name}</span><span className="font-mono text-[9px] text-muted-foreground">{detail.channels.filter((channel) => channel.categoryId === category.id).length} channels</span></div><div className="mt-2 flex flex-wrap justify-end gap-2"><AdminDeleteButton label="category only" working={working} onDelete={() => void deleteCommunityResource("categories", category.id, `category “${category.name}”`)} />{detail.isOwner && <AdminDeleteButton label="category + channels" working={working} onDelete={() => void deleteCategoryWithChannels(category)} />}</div></div>)}{detail.categories.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No categories.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">channels</p><div className="mt-2 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("channels", channel.id, `channel “${channel.name}”`)} /></div>)}{detail.channels.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No channels.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">announcements</p><div className="mt-2 space-y-2">{detail.announcements.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{item.title}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("announcements", item.id, `announcement “${item.title}”`)} /></div>)}{detail.announcements.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No announcements.</p>}</div></div></div></section>}
            </div>}
         </section>
       </main>
