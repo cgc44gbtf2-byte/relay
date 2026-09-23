@@ -211,18 +211,45 @@ router.patch("/developer/releases/:releaseId/announcement", requireAuth, async (
     return;
   }
   if (release.status !== "published" || !release.announcementId) {
-    res.status(400).json({ error: "Publish the release before publishing its announcement." });
-    return;
+    if (release.status !== "published") {
+      res.status(400).json({ error: "Publish the release before publishing its announcement." });
+      return;
+    }
   }
-  const [announcement] = await db.update(serverAnnouncementsTable).set({ status: "published" })
-    .where(and(
-      eq(serverAnnouncementsTable.id, release.announcementId),
-      eq(serverAnnouncementsTable.status, "draft"),
-    )).returning();
-  if (!announcement) {
+  const result = await db.transaction(async (tx) => {
+    const [linkedAnnouncement] = release.announcementId
+      ? await tx.select().from(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.id, release.announcementId))
+      : [];
+    if (linkedAnnouncement && linkedAnnouncement.status !== "draft") return null;
+    if (linkedAnnouncement) {
+      const [announcement] = await tx.update(serverAnnouncementsTable).set({ status: "published" })
+        .where(and(
+          eq(serverAnnouncementsTable.id, linkedAnnouncement.id),
+          eq(serverAnnouncementsTable.status, "draft"),
+        )).returning();
+      return announcement ? { release, announcement } : null;
+    }
+    const [draft] = await tx.insert(serverAnnouncementsTable).values({
+      authorId: actor.clerkId,
+      title: `Release ${release.version}: ${release.title}`,
+      body: release.notes || `Release ${release.version} is ready for announcement review.`,
+      audienceType: "company",
+      status: "published",
+    }).returning();
+    if (!draft) return null;
+    const [linkedRelease] = await tx.update(developerReleasesTable)
+      .set({ announcementId: draft.id })
+      .where(and(
+        eq(developerReleasesTable.id, release.id),
+        eq(developerReleasesTable.status, "published"),
+      )).returning();
+    return linkedRelease ? { release: linkedRelease, announcement: draft } : null;
+  });
+  if (!result) {
     res.status(409).json({ error: "This release announcement is already published or unavailable." });
     return;
   }
+  const { release: linkedRelease, announcement } = result;
   const recipients = await db.select({ userId: usersTable.clerkId }).from(usersTable);
   if (recipients.length) {
     await db.insert(notificationsTable).values(recipients.map((recipient) => ({
@@ -238,9 +265,9 @@ router.patch("/developer/releases/:releaseId/announcement", requireAuth, async (
     "published_release_announcement",
     String(announcement.id),
     "release announcement",
-    `${release.version} · ${release.title}`,
+    `${linkedRelease.version} · ${linkedRelease.title}`,
   );
-  res.json({ release, announcement });
+  res.json({ release: linkedRelease, announcement });
 });
 
 export default router;
