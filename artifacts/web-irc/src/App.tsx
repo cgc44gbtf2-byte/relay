@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Bell,
@@ -43,6 +43,7 @@ import {
 } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
+import { mergeRefreshedMessages, upsertMessage } from "./message-state";
 import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -307,6 +308,35 @@ function PreviewMessage({ name, text, color }: { name: string; text: string; col
   return <div className="flex gap-3"><div className="flex h-8 w-8 items-center justify-center rounded-md font-mono text-[10px] font-bold text-background" style={{ backgroundColor: color }}>{initials(name)}</div><div><div className="font-mono text-xs font-bold" style={{ color }}>{name} <span className="ml-2 text-[10px] font-normal text-muted-foreground">03:14 PM</span></div><p className="mt-1 text-sm text-foreground/85">{text}</p></div></div>;
 }
 
+const MessageRow = memo(function MessageRow({
+  message,
+  currentUserId,
+  onDelete,
+  onToggleReaction,
+}: {
+  message: ChatMessage;
+  currentUserId: string;
+  onDelete: (message: ChatMessage) => void;
+  onToggleReaction: (message: ChatMessage, emoji: string) => void;
+}) {
+  return <div className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}>
+    <Avatar user={message.sender} size="sm" />
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span>
+        <span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>
+        {message.sender?.id === currentUserId && message.kind !== "deleted" && <button onClick={() => onDelete(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}
+      </div>
+      <p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>
+      {message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}
+      {message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => {
+        const reaction = message.reactions?.find((item) => item.emoji === emoji);
+        return <button key={emoji} onClick={() => onToggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>;
+      })}</div>}
+    </div>
+  </div>;
+});
+
 function useRoomData(channelId: number | null, activeDm: Profile | null, onMissingChannel?: (channelId: number) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -315,10 +345,36 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const [hasOlder, setHasOlder] = useState(false);
   const onMissingChannelRef = useRef(onMissingChannel);
   const messageRefreshRef = useRef(0);
+  const messagesRef = useRef(messages);
+  const messageVersionRef = useRef(0);
+  const changedMessagesRef = useRef(new Map<string, { version: number; message: ChatMessage }>());
+  const roomKey = activeDm ? `dm:${activeDm.id}` : channelId ? `channel:${channelId}` : "none";
+  const roomKeyRef = useRef(roomKey);
   onMissingChannelRef.current = onMissingChannel;
+  messagesRef.current = messages;
+
+  const updateMessages = useCallback((updater: ChatMessage[] | ((items: ChatMessage[]) => ChatMessage[])) => {
+    setMessages((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      const currentById = new Map(current.map((message) => [message.id, message]));
+      const version = messageVersionRef.current + 1;
+      let changed = false;
+      for (const message of next) {
+        if (currentById.get(message.id) !== message) {
+          changedMessagesRef.current.set(message.id, { version, message });
+          changed = true;
+        }
+      }
+      if (changed) messageVersionRef.current = version;
+      return next;
+    });
+  }, []);
 
   const refreshMessages = useCallback(async (showLoading = false) => {
     const refreshId = ++messageRefreshRef.current;
+    const refreshRoomKey = roomKey;
+    const startVersion = messageVersionRef.current;
+    const messagesAtStart = messagesRef.current;
     if (showLoading) setLoading(true);
     if (!channelId && !activeDm) {
       setMessages([]);
@@ -331,8 +387,22 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       : api<{ messages: ChatMessage[] }>(`/channels/${channelId}/messages`);
     try {
       const data = await promise;
-      if (refreshId === messageRefreshRef.current) {
-        setMessages(data.messages);
+      if (refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) {
+        const changedDuringRefresh = [...changedMessagesRef.current.values()]
+          .filter(({ version }) => version > startVersion)
+          .map(({ message }) => message);
+        const preservedHistory = activeDm
+          ? messagesAtStart.filter((message) => !data.messages.some(({ id }) => id === message.id))
+          : [];
+        setMessages(mergeRefreshedMessages(
+          data.messages,
+          changedDuringRefresh,
+          preservedHistory,
+          activeDm ? Number.POSITIVE_INFINITY : 100,
+        ));
+        for (const [id, change] of changedMessagesRef.current) {
+          if (change.version <= startVersion) changedMessagesRef.current.delete(id);
+        }
         setHasOlder(Boolean(activeDm && data.messages.length === 100));
       }
     } catch (error) {
@@ -342,27 +412,35 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     } finally {
       if (showLoading && refreshId === messageRefreshRef.current) setLoading(false);
     }
-  }, [activeDm, channelId]);
+  }, [activeDm, channelId, roomKey]);
 
   const loadOlderMessages = useCallback(async () => {
     if (!activeDm || loadingOlder || !hasOlder || messages.length === 0) return;
+    const paginationRoomKey = roomKey;
     setLoadingOlder(true);
     try {
       const cursor = encodeURIComponent(messages[0].createdAt);
       const data = await api<{ messages: ChatMessage[] }>(`/dm/${activeDm.id}/messages?before=${cursor}`);
-      setMessages((items) => {
+      if (roomKeyRef.current !== paginationRoomKey) return;
+      updateMessages((items) => {
         const existing = new Set(items.map((item) => item.id));
         return [...data.messages.filter((item) => !existing.has(item.id)), ...items];
       });
       setHasOlder(data.messages.length === 100);
     } finally {
-      setLoadingOlder(false);
+      if (roomKeyRef.current === paginationRoomKey) setLoadingOlder(false);
     }
-  }, [activeDm, hasOlder, loadingOlder, messages]);
+  }, [activeDm, hasOlder, loadingOlder, messages, roomKey, updateMessages]);
 
   useEffect(() => {
+    roomKeyRef.current = roomKey;
+    messageVersionRef.current = 0;
+    changedMessagesRef.current.clear();
+    messagesRef.current = [];
     setMessages([]);
     setMembers([]);
+    setHasOlder(false);
+    setLoadingOlder(false);
     if (!channelId && !activeDm) {
       setLoading(false);
       return;
@@ -379,8 +457,8 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       });
     }
     return () => { cancelled = true; };
-  }, [channelId, activeDm, refreshMessages]);
-  return { messages, setMessages, members, setMembers, loading, loadingOlder, hasOlder, loadOlderMessages, refreshMessages };
+  }, [channelId, activeDm, refreshMessages, roomKey]);
+  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, loadOlderMessages, refreshMessages };
 }
 
 function ChatApp() {
@@ -473,6 +551,7 @@ function ChatApp() {
   };
 
   const room = useRoomData(currentChannelId, activeDm, recoverFromMissingChannel);
+  const setRoomMessages = room.setMessages;
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
@@ -531,10 +610,10 @@ function ChatApp() {
         try {
            if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
-           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items.map((item) => item.id === data.message!.id ? { ...item, ...data.message } : item) : [...items, data.message!]);
+           if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => upsertMessage(items, data.message!));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
-          if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => items.some((item) => item.id === data.message!.id) ? items : [...items, data.message!]);
+          if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
@@ -579,12 +658,13 @@ function ChatApp() {
     return () => {
       cancelled = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
-        if (socket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
-          socket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
+      const closingSocket = socket;
+      if (closingSocket?.readyState === WebSocket.OPEN || closingSocket?.readyState === WebSocket.CONNECTING) {
+        if (closingSocket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
+          closingSocket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
         }
-        socket.close();
-        setWs((current) => current === socket ? null : current);
+        closingSocket.close();
+        setWs((current) => current === closingSocket ? null : current);
       }
     };
   }, [currentChannelId, activeDm, room.refreshMessages]);
@@ -723,21 +803,21 @@ function ChatApp() {
       }
     }
   };
-  const deleteMessage = async (message: ChatMessage) => {
+  const deleteMessage = useCallback(async (message: ChatMessage) => {
     try {
       const deleted = await api<ChatMessage>(`/messages/${message.id}`, { method: "DELETE" });
-      room.setMessages((items) => items.map((item) => item.id === deleted.id ? deleted : item));
+      setRoomMessages((items) => items.map((item) => item.id === deleted.id ? deleted : item));
     } catch (error) { window.alert(error instanceof Error ? error.message : "Message could not be deleted"); }
-  };
-  const toggleReaction = async (message: ChatMessage, emoji: string) => {
+  }, [setRoomMessages]);
+  const toggleReaction = useCallback(async (message: ChatMessage, emoji: string) => {
     const current = message.reactions?.find((reaction) => reaction.emoji === emoji);
     try {
       const reactions = current?.reacted
         ? await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions/${encodeURIComponent(emoji)}`, { method: "DELETE" })
         : await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) });
-      room.setMessages((items) => items.map((item) => item.id === message.id ? { ...item, reactions } : item));
+      setRoomMessages((items) => items.map((item) => item.id === message.id ? { ...item, reactions } : item));
     } catch (error) { window.alert(error instanceof Error ? error.message : "Reaction could not be changed"); }
-  };
+  }, [setRoomMessages]);
   const sendAttachment = async (file: File) => {
     const channelId = currentChannelId;
     if (channelId === null || activeDm) return;
@@ -826,7 +906,7 @@ function ChatApp() {
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="mx-auto block rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>}{room.messages.map((message) => <div key={message.id} className={`group flex gap-3 ${message.kind === "system" ? "opacity-65" : ""}`}><Avatar user={message.sender} size="sm" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-baseline gap-2"><span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span><span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>{message.sender?.id === profile.id && message.kind !== "deleted" && <button onClick={() => deleteMessage(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}</div><p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>{message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}{message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => { const reaction = message.reactions?.find((item) => item.emoji === emoji); return <button key={emoji} onClick={() => toggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>; })}</div>}</div></div>)}</div>}
+              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="mx-auto block rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
               {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}
               {Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>
