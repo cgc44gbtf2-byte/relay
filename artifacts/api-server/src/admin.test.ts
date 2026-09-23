@@ -1083,6 +1083,143 @@ describe("admin access controls", () => {
     }
   });
 
+  test("repairs a published release whose announcement was deleted", async () => {
+    const version = `test-${randomUUID().slice(0, 8)}`;
+    const title = `Missing announcement recovery ${randomUUID().slice(0, 8)}`;
+    const notes = `Recovery notes ${randomUUID()}`;
+    let releaseId: number | null = null;
+    let draftAnnouncementId: number | null = null;
+    let replacementAnnouncementId: number | null = null;
+
+    try {
+      const created = await apiRequest(adminSession, "/developer/releases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version, title, notes }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      releaseId = (created.body as { id?: unknown }).id as number;
+      assert.equal(typeof releaseId, "number");
+
+      const review = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "review" }),
+        },
+      );
+      assert.equal(review.status, 200, JSON.stringify(review));
+
+      const published = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "published" }),
+        },
+      );
+      assert.equal(published.status, 200, JSON.stringify(published));
+      assert.ok(published.body && typeof published.body === "object");
+      draftAnnouncementId = (published.body as { announcementId?: unknown }).announcementId as number;
+      assert.equal(typeof draftAnnouncementId, "number");
+
+      await pool.query(
+        "DELETE FROM irc_server_announcements WHERE id = $1",
+        [draftAnnouncementId],
+      );
+
+      const releases = await apiRequest(adminSession, "/developer/releases");
+      assert.equal(releases.status, 200, JSON.stringify(releases));
+      assert.ok(Array.isArray(releases.body));
+      const visibleRelease = releases.body.find(
+        (release): release is { id: number; status: string; announcementId: number | null } =>
+          typeof release === "object" &&
+          release !== null &&
+          (release as { id?: unknown }).id === releaseId,
+      );
+      assert.deepEqual(visibleRelease, {
+        id: releaseId,
+        status: "published",
+        announcementId: null,
+      });
+
+      const repaired = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/announcement`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "published" }),
+        },
+      );
+      assert.equal(repaired.status, 200, JSON.stringify(repaired));
+      assert.ok(repaired.body && typeof repaired.body === "object");
+      const repairedBody = repaired.body as {
+        release?: { id?: unknown; status?: unknown; announcementId?: unknown };
+        announcement?: { id?: unknown; status?: unknown; title?: unknown; body?: unknown };
+      };
+      assert.equal(repairedBody.release?.id, releaseId);
+      assert.equal(repairedBody.release?.status, "published");
+      replacementAnnouncementId = repairedBody.announcement?.id as number;
+      assert.equal(typeof replacementAnnouncementId, "number");
+      assert.notEqual(replacementAnnouncementId, draftAnnouncementId);
+      assert.equal(repairedBody.announcement?.status, "published");
+      assert.equal(
+        repairedBody.announcement?.title,
+        `Release ${version}: ${title}`,
+      );
+      assert.equal(repairedBody.announcement?.body, notes);
+      assert.equal(repairedBody.release?.announcementId, replacementAnnouncementId);
+
+      const linkedRows = await pool.query<{
+        release_status: string;
+        announcement_id: number | null;
+        announcement_status: string | null;
+      }>(
+        `SELECT r.status AS release_status,
+                r.announcement_id,
+                a.status AS announcement_status
+         FROM irc_developer_releases r
+         LEFT JOIN irc_server_announcements a ON a.id = r.announcement_id
+         WHERE r.id = $1`,
+        [releaseId],
+      );
+      assert.deepEqual(linkedRows.rows, [{
+        release_status: "published",
+        announcement_id: replacementAnnouncementId,
+        announcement_status: "published",
+      }]);
+    } finally {
+      const notificationBody = `Release ${version}: ${title}: ${notes}`;
+      await pool.query(
+        "DELETE FROM irc_notifications WHERE type = 'server_announcement' AND body = $1",
+        [notificationBody],
+      );
+      if (releaseId !== null) {
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE target_id = $1 OR target_id = $2",
+          [String(releaseId), replacementAnnouncementId === null ? "" : String(replacementAnnouncementId)],
+        );
+        await pool.query(
+          "DELETE FROM irc_developer_releases WHERE id = $1",
+          [releaseId],
+        );
+      }
+      for (const announcementId of [draftAnnouncementId, replacementAnnouncementId]) {
+        if (announcementId !== null) {
+          await pool.query(
+            "DELETE FROM irc_server_announcements WHERE id = $1",
+            [announcementId],
+          );
+        }
+      }
+    }
+  });
+
   test("reports exact user statistics from the admin overview", async () => {
     const expected = (
       await pool.query<{
@@ -1934,6 +2071,381 @@ describe("admin access controls", () => {
     }
   });
 
+  test("prevents workspace administrators from promoting at or above their own rank", async () => {
+    const ownerSession = await createTestSession("role_guard_owner");
+    const actorSession = await createTestSession("role_guard_actor");
+    const targetSession = await createTestSession("role_guard_target");
+    let communityId: number | null = null;
+
+    try {
+      const [actorProfile, targetProfile] = await Promise.all([
+        apiRequest(actorSession, "/me"),
+        apiRequest(targetSession, "/me"),
+      ]);
+      assert.equal(actorProfile.status, 200, JSON.stringify(actorProfile));
+      assert.equal(targetProfile.status, 200, JSON.stringify(targetProfile));
+
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Role guard ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, actorSession.userId, targetSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [actorSession.userId, communityId, ownerSession.userId],
+      );
+
+      const auditCountBefore = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+
+      for (const role of ["workspace_owner", "workspace_admin"]) {
+        const rejected = await apiRequest(
+          actorSession,
+          `/communities/${communityId}/members/${targetSession.userId}/role`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ role }),
+          },
+        );
+        assert.equal(rejected.status, 403, JSON.stringify(rejected));
+        assert.deepEqual(rejected.body, {
+          error: "You can only assign roles below your own workspace role.",
+        });
+      }
+
+      const rejectedRoles = await pool.query<{ role: string }>(
+        `SELECT role
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2
+         ORDER BY role`,
+        [targetSession.userId, communityId],
+      );
+      assert.deepEqual(rejectedRoles.rows, []);
+      const auditAfterRejections = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+      assert.equal(auditAfterRejections, auditCountBefore);
+
+      const allowed = await apiRequest(
+        actorSession,
+        `/communities/${communityId}/members/${targetSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "manager" }),
+        },
+      );
+      assert.equal(allowed.status, 200, JSON.stringify(allowed));
+      assert.deepEqual(allowed.body, {
+        ok: true,
+        userId: targetSession.userId,
+        role: "manager",
+        communityId,
+      });
+      const assignedRoles = await pool.query<{ role: string }>(
+        `SELECT role
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2
+         ORDER BY role`,
+        [targetSession.userId, communityId],
+      );
+      assert.deepEqual(assignedRoles.rows, [{ role: "manager" }]);
+      const auditAfterSuccess = Number(
+        (
+          await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM irc_admin_audit_logs
+             WHERE actor_id = $1
+               AND community_id = $2
+               AND action = 'changed_community_role'`,
+            [actorSession.userId, communityId],
+          )
+        ).rows[0]?.count ?? 0,
+      );
+      assert.equal(auditAfterSuccess, auditCountBefore + 1);
+    } finally {
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [
+          communityId,
+        ]);
+      }
+    }
+  });
+
+  test("creates only one chat identity during concurrent first-session requests", async () => {
+    const session = await createTestSession("concurrent_profile");
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        apiRequest(session, index % 2 === 0 ? "/me" : "/channels"),
+      ),
+    );
+    assert.ok(
+      responses.every(({ status }) => status === 200),
+      JSON.stringify(responses),
+    );
+
+    const profiles = await pool.query<{
+      clerk_id: string;
+      username: string;
+    }>(
+      `SELECT clerk_id, username
+       FROM irc_users
+       WHERE clerk_id = $1`,
+      [session.userId],
+    );
+    assert.equal(profiles.rows.length, 1);
+    assert.equal(profiles.rows[0]?.clerk_id, session.userId);
+
+    const profile = await apiRequest(session, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    assert.equal(
+      (profile.body as { id?: unknown }).id,
+      session.userId,
+    );
+  });
+
+  test("prevents suspended accounts from changing their profile", async () => {
+    const suspendedSession = await createTestSession("suspended_profile");
+    let suspended = false;
+
+    try {
+      const initial = await apiRequest(suspendedSession, "/me");
+      assert.equal(initial.status, 200, JSON.stringify(initial));
+      assert.ok(initial.body && typeof initial.body === "object");
+      const initialUsername = (initial.body as { username?: unknown }).username;
+      const initialDisplayName = (
+        initial.body as { displayName?: unknown }
+      ).displayName;
+
+      const suspension = await apiRequest(
+        adminSession,
+        `/admin/users/${suspendedSession.userId}/account-status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountStatus: "suspended" }),
+        },
+      );
+      assert.equal(suspension.status, 200, JSON.stringify(suspension));
+      suspended = true;
+
+      const rejected = await apiRequest(suspendedSession, "/me", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: `blocked_${randomUUID().slice(0, 8)}`,
+          displayName: "Blocked profile update",
+        }),
+      });
+      assert.equal(rejected.status, 403, JSON.stringify(rejected));
+      assert.deepEqual(rejected.body, {
+        error: "This account is suspended.",
+      });
+
+      const stored = await pool.query<{
+        username: string;
+        display_name: string;
+        account_status: string;
+      }>(
+        `SELECT username, display_name, account_status
+         FROM irc_users
+         WHERE clerk_id = $1`,
+        [suspendedSession.userId],
+      );
+      assert.deepEqual(stored.rows, [
+        {
+          username: initialUsername,
+          display_name: initialDisplayName,
+          account_status: "suspended",
+        },
+      ]);
+    } finally {
+      if (suspended) {
+        await apiRequest(
+          adminSession,
+          `/admin/users/${suspendedSession.userId}/account-status`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ accountStatus: "active" }),
+          },
+        );
+      }
+    }
+  });
+
+  test("ignores malformed realtime channel subscriptions", async () => {
+    const ownerSession = await createTestSession("malformed_subscription");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `malformed-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Malformed subscription isolation",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const socket = await openWebSocket(ownerSession);
+      sockets.push(socket);
+      const malformedFrames = [
+        "{",
+        JSON.stringify({}),
+        JSON.stringify({ type: "unknown", channelId }),
+        JSON.stringify({ type: "subscribe", channelId: String(channelId) }),
+        JSON.stringify({ type: "subscribe", channelId: null }),
+        JSON.stringify({ type: "subscribe", channelId: 1.5 }),
+        JSON.stringify({ type: "subscribe", channelId: -1 }),
+        JSON.stringify({
+          type: "subscribe",
+          channelId: Number.MAX_SAFE_INTEGER + 1,
+        }),
+      ];
+      for (const frame of malformedFrames) socket.send(frame);
+
+      const body = `Malformed subscription ${randomUUID()}`;
+      const blockedEvent = expectNoWebSocketEvent(
+        socket,
+        (event) =>
+          event.type === "message" &&
+          Boolean(event.message) &&
+          (event.message as { body?: unknown }).body === body,
+        750,
+      );
+      const message = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body }),
+        },
+      );
+      assert.equal(message.status, 201, JSON.stringify(message));
+      await blockedEvent;
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
+  test("preserves channel history when channel settings change", async () => {
+    const ownerSession = await createTestSession("history_preservation");
+    const channelIds: number[] = [];
+
+    try {
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `history-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Initial topic",
+          description: "Initial description",
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const sent = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "History must survive edits." }),
+        },
+      );
+      assert.equal(sent.status, 201, JSON.stringify(sent));
+
+      const ownerEdit = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            topic: "Updated topic",
+            description: "Updated description",
+            isInviteOnly: true,
+          }),
+        },
+      );
+      assert.equal(ownerEdit.status, 200, JSON.stringify(ownerEdit));
+
+      const adminEdit = await apiRequest(
+        adminSession,
+        `/admin/channels/${channelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Admin updated topic" }),
+        },
+      );
+      assert.equal(adminEdit.status, 200, JSON.stringify(adminEdit));
+
+      const history = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.ok(history.body && typeof history.body === "object");
+      const messages = (history.body as {
+        messages?: Array<{ body?: unknown }>;
+      }).messages;
+      assert.deepEqual(messages?.map(({ body }) => body), [
+        "History must survive edits.",
+      ]);
+    } finally {
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
   test("reports channel member counts without loading every membership row", async () => {
     const ownerSession = await createTestSession("channel_count_owner");
     const memberSession = await createTestSession("channel_count_member");
@@ -2338,6 +2850,282 @@ describe("admin access controls", () => {
     }
   });
 
+  test("notifies employees when workspace tasks are assigned or changed", async () => {
+    const ownerSession = await createTestSession("task_notification_owner");
+    const workerSession = await createTestSession("task_notification_worker");
+    const replacementSession = await createTestSession("task_notification_replacement");
+    const outsiderSession = await createTestSession("task_notification_outsider");
+    let communityId: number | null = null;
+
+    try {
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Task notifications ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, workerSession.userId, replacementSession.userId],
+      );
+
+      const created = await apiRequest(ownerSession, `/communities/${communityId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Prepare onboarding",
+          assignedTo: workerSession.userId,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const taskId = (created.body as { id?: unknown }).id as number;
+      assert.equal(typeof taskId, "number");
+
+      const initialNotifications = await pool.query<{
+        type: string;
+        category: string;
+        body: string;
+      }>(
+        `SELECT type, category, body
+         FROM irc_notifications
+         WHERE user_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
+         ORDER BY id`,
+        [workerSession.userId, String(taskId)],
+      );
+      assert.deepEqual(initialNotifications.rows, [{
+        type: "task_assigned",
+        category: "task_assigned",
+        body: "You were assigned the task “Prepare onboarding”.",
+      }]);
+
+      const changed = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "in_progress", priority: "urgent" }),
+      });
+      assert.equal(changed.status, 200, JSON.stringify(changed));
+      const updateNotification = await pool.query<{ type: string; category: string; body: string }>(
+        `SELECT type, category, body
+         FROM irc_notifications
+         WHERE user_id = $1 AND type = 'task_updated' AND entity_id = $2
+         ORDER BY id`,
+        [workerSession.userId, String(taskId)],
+      );
+      assert.deepEqual(updateNotification.rows, [{
+        type: "task_updated",
+        category: "task_updated",
+        body: "Task “Prepare onboarding” updated: status → in_progress, priority → urgent.",
+      }]);
+
+      const reassigned = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignedTo: replacementSession.userId }),
+      });
+      assert.equal(reassigned.status, 200, JSON.stringify(reassigned));
+      const reassignmentNotifications = await pool.query<{ user_id: string; type: string; body: string }>(
+        `SELECT user_id, type, body
+         FROM irc_notifications
+         WHERE entity_type = 'workspace_task' AND entity_id = $1
+           AND user_id = ANY($2::text[])
+         ORDER BY id`,
+        [String(taskId), [workerSession.userId, replacementSession.userId]],
+      );
+      assert.deepEqual(reassignmentNotifications.rows.slice(-2), [
+        {
+          user_id: workerSession.userId,
+          type: "task_updated",
+          body: "You are no longer assigned the task “Prepare onboarding”.",
+        },
+        {
+          user_id: replacementSession.userId,
+          type: "task_assigned",
+          body: "You were assigned the task “Prepare onboarding”.",
+        },
+      ]);
+
+      const crossWorkspaceAssignment = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignedTo: outsiderSession.userId }),
+      });
+      assert.equal(crossWorkspaceAssignment.status, 400, JSON.stringify(crossWorkspaceAssignment));
+    } finally {
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
+  test("lets organization managers assign employees without crossing workspace boundaries", async () => {
+    const ownerSession = await createTestSession("organization_owner");
+    const managerSession = await createTestSession("organization_manager");
+    const employeeSession = await createTestSession("organization_employee");
+    const communityIds: number[] = [];
+
+    try {
+      const createCommunity = async (name: string) => {
+        const response = await apiRequest(ownerSession, "/communities", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, isPrivate: true }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        const id = (response.body as { id?: unknown }).id;
+        assert.equal(typeof id, "number");
+        communityIds.push(id as number);
+        return id as number;
+      };
+      const communityId = await createCommunity(`Organization ${randomUUID().slice(0, 8)}`);
+      const foreignCommunityId = await createCommunity(`Foreign ${randomUUID().slice(0, 8)}`);
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, managerSession.userId, employeeSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
+         VALUES ($1, $2, 'active'), ($1, $3, 'active')`,
+        [communityId, managerSession.userId, employeeSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'manager', 'community', $2, $3)`,
+        [managerSession.userId, communityId, ownerSession.userId],
+      );
+
+      const createDepartment = async (session: TestSession, targetCommunityId: number, name: string) => {
+        const response = await apiRequest(session, `/communities/${targetCommunityId}/departments`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        return (response.body as { id?: unknown }).id as number;
+      };
+      const createLocation = async (targetCommunityId: number) => {
+        const response = await apiRequest(ownerSession, `/communities/${targetCommunityId}/locations`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `Office ${randomUUID().slice(0, 6)}` }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        return (response.body as { id?: unknown }).id as number;
+      };
+      const departmentId = await createDepartment(ownerSession, communityId, "Operations");
+      const foreignDepartmentId = await createDepartment(ownerSession, foreignCommunityId, "Foreign Operations");
+      const locationId = await createLocation(communityId);
+      const teamResponse = await apiRequest(ownerSession, `/communities/${communityId}/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Field team", departmentId, locationId }),
+      });
+      assert.equal(teamResponse.status, 201, JSON.stringify(teamResponse));
+      assert.ok(teamResponse.body && typeof teamResponse.body === "object");
+      const teamId = (teamResponse.body as { id?: unknown }).id as number;
+      const foreignTeamResponse = await apiRequest(ownerSession, `/communities/${foreignCommunityId}/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Foreign team" }),
+      });
+      assert.equal(foreignTeamResponse.status, 201, JSON.stringify(foreignTeamResponse));
+      assert.ok(foreignTeamResponse.body && typeof foreignTeamResponse.body === "object");
+      const foreignTeamId = (foreignTeamResponse.body as { id?: unknown }).id as number;
+
+      const crossWorkspaceAssignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/employees/${employeeSession.userId}/organization`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ departmentId: foreignDepartmentId }),
+        },
+      );
+      assert.equal(crossWorkspaceAssignment.status, 400, JSON.stringify(crossWorkspaceAssignment));
+
+      const assignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/employees/${employeeSession.userId}/organization`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ departmentId, locationId, managerId: managerSession.userId }),
+        },
+      );
+      assert.equal(assignment.status, 200, JSON.stringify(assignment));
+      assert.ok(assignment.body && typeof assignment.body === "object");
+      assert.deepEqual(
+        await pool.query(
+          `SELECT department_id AS "departmentId", location_id AS "locationId", manager_id AS "managerId"
+           FROM irc_employee_profiles
+           WHERE community_id = $1 AND user_id = $2`,
+          [communityId, employeeSession.userId],
+        ).then((result) => result.rows),
+        [{ departmentId, locationId, managerId: managerSession.userId }],
+      );
+
+      const addToTeam = async (targetTeamId: number) => apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${targetTeamId}/members/${employeeSession.userId}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member", status: "active" }),
+        },
+      );
+      const firstMembership = await addToTeam(teamId);
+      assert.equal(firstMembership.status, 200, JSON.stringify(firstMembership));
+      const repeatedMembership = await addToTeam(teamId);
+      assert.equal(repeatedMembership.status, 200, JSON.stringify(repeatedMembership));
+      const membershipCount = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+         FROM irc_team_members
+         WHERE team_id = $1 AND user_id = $2`,
+        [teamId, employeeSession.userId],
+      );
+      assert.deepEqual(membershipCount.rows, [{ count: 1 }]);
+
+      const detail = await apiRequest(managerSession, `/communities/${communityId}`);
+      assert.equal(detail.status, 200, JSON.stringify(detail));
+      assert.ok(detail.body && typeof detail.body === "object");
+      const detailEmployee = (detail.body as { employees?: Array<{ userId: string; teamIds: number[] }> }).employees
+        ?.find((employee) => employee.userId === employeeSession.userId);
+      assert.deepEqual(detailEmployee?.teamIds, [teamId]);
+
+      const foreignTeamAssignment = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${foreignTeamId}/members/${employeeSession.userId}`,
+        { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" },
+      );
+      assert.equal(foreignTeamAssignment.status, 404, JSON.stringify(foreignTeamAssignment));
+
+      const removeFromTeam = await apiRequest(
+        managerSession,
+        `/communities/${communityId}/teams/${teamId}/members/${employeeSession.userId}`,
+        { method: "DELETE" },
+      );
+      assert.equal(removeFromTeam.status, 200, JSON.stringify(removeFromTeam));
+    } finally {
+      if (communityIds.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+      }
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");
@@ -2530,6 +3318,156 @@ describe("admin access controls", () => {
         ownerSession.userId,
         requesterSession.userId,
         reviewerSession.userId,
+      ]);
+    }
+  });
+
+  test("blocks a removed channel moderator from reviewing private-room requests", async () => {
+    const ownerSession = await createTestSession("moderator_revoke_owner");
+    const reviewerSession = await createTestSession("moderator_revoke_reviewer");
+    const requesterSession = await createTestSession("moderator_revoke_requester");
+    const channelIds: number[] = [];
+
+    try {
+      const reviewerProfile = await apiRequest(reviewerSession, "/me");
+      const requesterProfile = await apiRequest(requesterSession, "/me");
+      assert.equal(reviewerProfile.status, 200, JSON.stringify(reviewerProfile));
+      assert.equal(requesterProfile.status, 200, JSON.stringify(requesterProfile));
+
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `revoke-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [channelId, reviewerSession.userId],
+      );
+      const pending = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(pending.status, 202, JSON.stringify(pending));
+
+      const requests = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(requests.status, 200, JSON.stringify(requests));
+      assert.ok(Array.isArray(requests.body));
+      const requestId = (requests.body[0] as { id?: unknown })?.id;
+      assert.equal(typeof requestId, "number");
+
+      const kick = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/moderation`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "kick",
+            targetUserId: reviewerSession.userId,
+          }),
+        },
+      );
+      assert.equal(kick.status, 200, JSON.stringify(kick));
+
+      const deniedList = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(deniedList.status, 403, JSON.stringify(deniedList));
+      assert.deepEqual(deniedList.body, {
+        error: "Only channel operators can review join requests.",
+      });
+      const deniedDecision = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(deniedDecision.status, 403, JSON.stringify(deniedDecision));
+      assert.deepEqual(deniedDecision.body, {
+        error: "Only channel operators can review join requests.",
+      });
+
+      const stillPending = await pool.query<{ status: string }>(
+        `SELECT status
+         FROM irc_channel_join_requests
+         WHERE id = $1`,
+        [requestId],
+      );
+      assert.deepEqual(stillPending.rows, [{ status: "pending" }]);
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        reviewerSession.userId,
+        requesterSession.userId,
+      ]);
+    }
+  });
+
+  test("removes pending private-room requests when the room is deleted", async () => {
+    const ownerSession = await createTestSession("request_cleanup_owner");
+    const requesterSession = await createTestSession("request_cleanup_requester");
+    const channelIds: number[] = [];
+
+    try {
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `cleanup-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const pending = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(pending.status, 202, JSON.stringify(pending));
+      const beforeDelete = await pool.query(
+        "SELECT id FROM irc_channel_join_requests WHERE channel_id = $1",
+        [channelId],
+      );
+      assert.equal(beforeDelete.rows.length, 1);
+
+      const deleted = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}`,
+        { method: "DELETE" },
+      );
+      assert.equal(deleted.status, 200, JSON.stringify(deleted));
+      const afterDelete = await pool.query(
+        "SELECT id FROM irc_channel_join_requests WHERE channel_id = $1",
+        [channelId],
+      );
+      assert.deepEqual(afterDelete.rows, []);
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        requesterSession.userId,
       ]);
     }
   });
