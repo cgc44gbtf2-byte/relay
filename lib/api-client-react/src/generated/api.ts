@@ -27,6 +27,9 @@ import type {
   IrcMessage,
   IrcMessageInput,
   IrcState,
+  OnboardingProgress,
+  OnboardingProgressInput,
+  OnboardingState,
   StreamIrcEventsParams
 } from './api.schemas';
 
@@ -480,4 +483,170 @@ export function useStreamIrcEvents<TData = Awaited<ReturnType<typeof streamIrcEv
 
 
 
+
+export const getGetOnboardingStateUrl = () => {
+
+
+
+
+  return `/api/onboarding`
+}
+
+/**
+ * @summary Get the authenticated user's onboarding state
+ */
+export const getOnboardingState = async ( options?: Parameters<typeof customFetch>[1]): Promise<OnboardingState> => {
+
+  return customFetch<OnboardingState>(getGetOnboardingStateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetOnboardingStateQueryKey = () => {
+    return [
+    `/api/onboarding`
+    ] as const;
+    }
+
+
+export const getGetOnboardingStateQueryOptions = <TData = Awaited<ReturnType<typeof getOnboardingState>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOnboardingState>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOnboardingStateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOnboardingState>>> = ({ signal }) => getOnboardingState({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOnboardingState>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetOnboardingStateQueryResult = NonNullable<Awaited<ReturnType<typeof getOnboardingState>>>
+export type GetOnboardingStateQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Get the authenticated user's onboarding state
+ */
+
+export function useGetOnboardingState<TData = Awaited<ReturnType<typeof getOnboardingState>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOnboardingState>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetOnboardingStateQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getAdvanceOnboardingUrl = (communityId: number,) => {
+
+
+
+
+  return `/api/onboarding/${communityId}/progress`
+}
+
+/**
+ * @summary Advance onboarding for an owned community
+ */
+export const advanceOnboarding = async (communityId: number,
+    onboardingProgressInput: OnboardingProgressInput, options?: Parameters<typeof customFetch>[1]): Promise<OnboardingProgress> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<OnboardingProgress>(getAdvanceOnboardingUrl(communityId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(onboardingProgressInput)
+  }
+);}
+
+
+
+
+
+export const getAdvanceOnboardingMutationKey = () => ['advanceOnboarding'] as const;
+
+export const getAdvanceOnboardingMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof advanceOnboarding>>, TError,AdvanceOnboardingMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof advanceOnboarding>>, TError,AdvanceOnboardingMutationVariables, TContext> => {
+
+const mutationKey = getAdvanceOnboardingMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof advanceOnboarding>>, AdvanceOnboardingMutationVariables> = (props) => {
+          const {communityId,data} = props ?? {};
+
+          return  advanceOnboarding(communityId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdvanceOnboardingMutationResult = NonNullable<Awaited<ReturnType<typeof advanceOnboarding>>>
+    export type AdvanceOnboardingMutationBody = BodyType<OnboardingProgressInput>
+    export type AdvanceOnboardingMutationError = ErrorType<ErrorResponse>
+    export type AdvanceOnboardingMutationVariables = {communityId: number;data: BodyType<OnboardingProgressInput>}
+
+    /**
+ * @summary Advance onboarding for an owned community
+ */
+export const useAdvanceOnboarding = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof advanceOnboarding>>, TError,AdvanceOnboardingMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof advanceOnboarding>>,
+        TError,
+        AdvanceOnboardingMutationVariables,
+        TContext
+      > => {
+      return useMutation(getAdvanceOnboardingMutationOptions(options));
+    }
 
