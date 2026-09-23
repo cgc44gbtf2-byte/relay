@@ -23,3 +23,4 @@
 - [Public channel destinations](public-channel-destinations.md) — owner-directed public-channel moves target only public communities the owner owns, never arbitrary communities or business workspaces.
 - [Drizzle referenced unique indexes](drizzle-referenced-unique-indexes.md) — composite keys used by foreign keys should be unique constraints, not standalone indexes, to avoid phantom push conflicts.
 - [Drizzle foreign-key introspection](drizzle-fk-introspection.md) — a successful push may still plan repeated FK rewrites unless paired columns and truncated names are compared correctly.
+- [Audit filter test fixtures](audit-filter-test-fixtures.md) — include automatic workspace audit events and keep integer/text SQL parameters separate.

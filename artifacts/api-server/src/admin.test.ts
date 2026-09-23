@@ -3889,13 +3889,14 @@ describe("admin access controls", () => {
         `INSERT INTO irc_admin_audit_logs
           (actor_id, actor_display_name, community_id, action, resource_type, resource_id, target_id, target_label, details)
          VALUES
-          ($1, 'Owner actor', $3, 'created_workspace_team', 'team', 'owner-team', $3::text, $4, 'owner event'),
-          ($2, 'Filtered actor', $3, 'assigned_employee_team', 'team_membership', 'actor-team', $3::text, $4, 'matching event'),
-          ($2, 'Filtered actor', $3, 'updated_workspace_task', 'task', 'actor-task', $3::text, $4, 'different action')`,
+          ($1, 'Owner actor', $3, 'created_workspace_team', 'team', 'owner-team', $4, $5, 'owner event'),
+          ($2, 'Filtered actor', $3, 'assigned_employee_team', 'team_membership', 'actor-team', $4, $5, 'matching event'),
+          ($2, 'Filtered actor', $3, 'updated_workspace_task', 'task', 'actor-task', $4, $5, 'different action')`,
         [
           ownerSession.userId,
           actorSession.userId,
           communityId,
+          String(communityId),
           `community:${communityId}`,
         ],
       );
@@ -3914,7 +3915,7 @@ describe("admin access controls", () => {
           [actorSession.userId, "assigned_employee_team"],
         ],
       );
-      assert.deepEqual(actorPayload.actions, ["assigned_employee_team", "created_workspace_team", "updated_workspace_task"]);
+      assert.deepEqual(actorPayload.actions, ["assigned_employee_team", "created_community", "created_workspace_team", "updated_workspace_task"]);
 
       const actionFiltered = await apiRequest(
         ownerSession,
