@@ -1736,6 +1736,45 @@ describe("admin access controls", () => {
     );
     assert.equal(roleUpdate.status, 403);
     assert.deepEqual(roleUpdate.body, { error: "Admin access required." });
+
+    const beforeAssignments = await pool.query(
+      "SELECT id FROM irc_user_roles ORDER BY id",
+    );
+    const beforeCustomRoles = await pool.query(
+      "SELECT key FROM irc_custom_roles ORDER BY key",
+    );
+    const [roleAssignment, customRole] = await Promise.all([
+      apiRequest(memberSession, "/admin/role-assignments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: memberSession.userId,
+          role: "platform_moderator",
+          scopeType: "platform",
+        }),
+      }),
+      apiRequest(memberSession, "/admin/custom-roles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          label: "Unauthorized role",
+          scopeType: "community",
+          permissions: ["manage_community_members"],
+        }),
+      }),
+    ]);
+    for (const response of [roleAssignment, customRole]) {
+      assert.equal(response.status, 403, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Admin access required." });
+    }
+    assert.deepEqual(
+      (await pool.query("SELECT id FROM irc_user_roles ORDER BY id")).rows,
+      beforeAssignments.rows,
+    );
+    assert.deepEqual(
+      (await pool.query("SELECT key FROM irc_custom_roles ORDER BY key")).rows,
+      beforeCustomRoles.rows,
+    );
   });
 
   test("a non-admin cannot use health, user, or channel maintenance tools", async () => {

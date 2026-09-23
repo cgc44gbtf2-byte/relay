@@ -13,6 +13,7 @@ await esbuild({
     path.resolve(artifactDir, "src/admin.test.ts"),
     path.resolve(artifactDir, "src/cleanup-admin-test-users.test.ts"),
     path.resolve(artifactDir, "src/lib/channel-moderation-policy.test.ts"),
+    path.resolve(artifactDir, "src/lib/role-grant-policy.test.ts"),
     path.resolve(artifactDir, "src/lib/cors.test.ts"),
     path.resolve(artifactDir, "src/lib/ws.test.ts"),
     path.resolve(artifactDir, "src/lib/fixed-window-limiter.test.ts"),

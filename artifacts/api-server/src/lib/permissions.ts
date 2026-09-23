@@ -9,6 +9,7 @@ import {
   userRolesTable,
   usersTable,
 } from "@workspace/db";
+import { authorizationRoleRank } from "./role-grant-policy";
 
 export const PRIMARY_ROLES = ["admin", "platform_moderator", "moderator", "community_admin", "member"] as const;
 export type PrimaryRole = typeof PRIMARY_ROLES[number];
@@ -302,17 +303,6 @@ function roleAllows(role: string, permission: PermissionKey): boolean {
   return role in ROLE_PERMISSIONS && ROLE_PERMISSIONS[role as AuthorizationRole].includes(permission);
 }
 
-function roleRank(role: string): number {
-  return role === "admin" ? 8
-    : role === "platform_moderator" ? 7
-      : ["workspace_owner", "business_owner"].includes(role) ? 6
-        : role === "workspace_admin" ? 5
-          : ["department_admin", "community_admin"].includes(role) ? 4
-            : ["manager", "business_manager"].includes(role) ? 3
-              : role === "moderator" ? 2
-            : 1;
-}
-
 export async function hasPermission(
   userId: string,
   permission: PermissionKey,
@@ -483,7 +473,10 @@ export async function permissionsForUser(userId: string): Promise<{
   }
   const effectiveRole = [user?.role ?? "member", ...assignments.map((assignment) => assignment.role)]
     .filter((role) => role in ROLE_PERMISSIONS)
-    .sort((left, right) => roleRank(right) - roleRank(left))[0] ?? "member";
+    .sort(
+      (left, right) =>
+        authorizationRoleRank(right) - authorizationRoleRank(left),
+    )[0] ?? "member";
   return { role: effectiveRole, permissions: [...permissionSet], assignments };
 }
 

@@ -60,6 +60,7 @@ import {
   type PermissionKey,
 } from "../lib/permissions";
 import { createNotification, createNotifications } from "../lib/notifications";
+import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
 import { validateUploadMetadata } from "./storage";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
@@ -75,17 +76,6 @@ import {
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
-const workspaceRoleRank: Record<string, number> = {
-  member: 0,
-  moderator: 1,
-  manager: 2,
-  department_admin: 3,
-  workspace_admin: 4,
-  workspace_owner: 5,
-  community_admin: 3,
-  business_manager: 2,
-  business_owner: 5,
-};
 const invitationRoles = ["member", "employee", "contractor"] as const;
 
 function deletionConfirmation(body: unknown): string | null {
@@ -2549,8 +2539,10 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
         eq(userRolesTable.userId, userId),
         eq(userRolesTable.communityId, communityId),
       ));
-    const actorRank = Math.max(0, ...actorAssignments.map((assignment) => workspaceRoleRank[assignment.role] ?? 0));
-    if (actorRank <= (workspaceRoleRank[role] ?? 0)) {
+    if (!canGrantWorkspaceRole(
+      actorAssignments.map((assignment) => assignment.role),
+      role,
+    )) {
       res.status(403).json({ error: "You can only assign roles below your own workspace role." });
       return;
     }
