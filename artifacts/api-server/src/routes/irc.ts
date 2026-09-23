@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   and,
   asc,
@@ -634,7 +634,14 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
   await db.delete(channelInvitesTable).where(and(eq(channelInvitesTable.channelId, channel.id), eq(channelInvitesTable.userId, userId)));
   const user = await publicUser(userId);
-  const event = { type: "presence", channelId: channel.id, action: "join", user };
+  const event = {
+    type: "presence",
+    eventId: randomUUID(),
+    occurredAt: new Date().toISOString(),
+    channelId: channel.id,
+    action: "join",
+    user,
+  };
   wsHub.broadcastChannel(channel.id, event);
   res.json({ ok: true, status: "member" });
 });
@@ -814,7 +821,14 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
     ));
   });
   wsHub.revokeChannelAccess(channel.id, userId);
-  wsHub.broadcastChannel(channel.id, { type: "presence", channelId: channel.id, action: "leave", userId });
+  wsHub.broadcastChannel(channel.id, {
+    type: "presence",
+    eventId: randomUUID(),
+    occurredAt: new Date().toISOString(),
+    channelId: channel.id,
+    action: "leave",
+    userId,
+  });
   res.json({ ok: true });
 });
 
