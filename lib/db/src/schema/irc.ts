@@ -385,7 +385,11 @@ export const categoriesTable = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("irc_categories_owner_name_idx").on(table.ownerId, table.name),
+    uniqueIndex("irc_categories_owner_community_name_idx").on(
+      table.ownerId,
+      table.communityId,
+      table.name,
+    ),
     index("irc_categories_community_idx").on(table.communityId),
     index("irc_categories_community_name_idx").on(table.communityId, table.name),
   ],

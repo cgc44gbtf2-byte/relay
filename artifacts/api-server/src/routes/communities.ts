@@ -346,6 +346,7 @@ router.get("/permissions/me", requireAuth, async (req: AuthenticatedRequest, res
 });
 
 router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  await ensurePermissionCatalog();
   if (!(await hasPermission(getUserId(req), "manage_roles"))) {
     res.status(403).json({ error: "Role management permission required." });
     return;

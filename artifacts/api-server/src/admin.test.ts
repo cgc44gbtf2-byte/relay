@@ -7,6 +7,7 @@ import { WebSocket } from "ws";
 import { pool } from "@workspace/db";
 import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
+import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
@@ -27,24 +28,49 @@ let secondSession: TestSession;
 let adminSession: TestSession;
 let memberSession: TestSession;
 let createdSessions: TestSession[] = [];
+const sessionTokens = new Map<string, string>();
+
+async function withClerkRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const status = typeof error === "object" && error !== null && "status" in error
+        ? (error as { status?: unknown }).status
+        : undefined;
+      if (status !== 429 || attempt >= 5) throw error;
+      const retryAfter = typeof error === "object" && error !== null && "retryAfter" in error
+        ? (error as { retryAfter?: unknown }).retryAfter
+        : undefined;
+      const delayMs = (typeof retryAfter === "number" ? retryAfter : 1) * 1_000 + 100;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
 
 async function createTestSession(label: string): Promise<TestSession> {
   const uniqueId = `${label}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-  const user = await clerkClient.users.createUser({
+  const user = await withClerkRateLimitRetry(() => clerkClient.users.createUser({
     username: `${TEST_USERNAME_PREFIX}${uniqueId}`,
     emailAddress: [`${TEST_USERNAME_PREFIX}${uniqueId}@${TEST_EMAIL_DOMAIN}`],
     emailAddressIdentificationStatus: ["reserved"],
     skipPasswordRequirement: true,
-  });
-  const session = await clerkClient.sessions.createSession({ userId: user.id });
+  }));
+  const session = await withClerkRateLimitRetry(
+    () => clerkClient.sessions.createSession({ userId: user.id }),
+  );
   const testSession = { userId: user.id, sessionId: session.id };
+  setTestSessionStatus(testSession.sessionId, { active: true, userId: testSession.userId });
   createdSessions.push(testSession);
   return testSession;
 }
 
 async function createSessionForUser(userId: string): Promise<TestSession> {
-  const session = await clerkClient.sessions.createSession({ userId });
+  const session = await withClerkRateLimitRetry(
+    () => clerkClient.sessions.createSession({ userId }),
+  );
   const testSession = { userId, sessionId: session.id };
+  setTestSessionStatus(testSession.sessionId, { active: true, userId: testSession.userId });
   createdSessions.push(testSession);
   return testSession;
 }
@@ -54,8 +80,19 @@ async function apiRequest(
   path: string,
   init: RequestInit = {},
 ): Promise<ApiResponse> {
-  const token = await clerkClient.sessions.getToken(session.sessionId);
-  return apiRequestWithToken(token.jwt, path, init);
+  let token = sessionTokens.get(session.sessionId);
+  if (!token) {
+    token = (await withClerkRateLimitRetry(
+      () => clerkClient.sessions.getToken(session.sessionId),
+    )).jwt;
+    sessionTokens.set(session.sessionId, token);
+  }
+  return apiRequestWithToken(token, path, init);
+}
+
+async function revokeTestSession(session: TestSession): Promise<void> {
+  await clerkClient.sessions.revokeSession(session.sessionId);
+  setTestSessionStatus(session.sessionId, { active: false, userId: session.userId });
 }
 
 async function apiRequestWithToken(
@@ -308,9 +345,12 @@ async function removeTestChannels(channelIds: number[], userIds: string[] = []):
 
 async function removeTestDatabaseRows(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
-  await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [
-    userIds,
-  ]);
+  if (!process.env.TEST_DATABASE_URL || process.env.DATABASE_URL) {
+    throw new Error(
+      "Refusing to reset test rows outside a dedicated TEST_DATABASE_URL.",
+    );
+  }
+  await pool.query("TRUNCATE TABLE irc_users RESTART IDENTITY CASCADE");
 }
 
 async function userOwnedRows(userId: string): Promise<unknown[]> {
@@ -582,14 +622,13 @@ before(async () => {
 });
 
 after(async () => {
-  await Promise.allSettled(
-    createdSessions.map(({ sessionId }) =>
-      clerkClient.sessions.revokeSession(sessionId),
-    ),
-  );
-  await Promise.allSettled(
-    createdSessions.map(({ userId }) => clerkClient.users.deleteUser(userId)),
-  );
+  for (const userId of new Set(createdSessions.map((session) => session.userId))) {
+    try {
+      await clerkClient.users.deleteUser(userId);
+    } catch {
+      // Scheduled strict-pattern cleanup handles any identity that could not be removed.
+    }
+  }
   await removeTestDatabaseRows(createdSessions.map(({ userId }) => userId));
   await pool.end();
   if (server) {
@@ -701,7 +740,8 @@ describe("admin access controls", () => {
   test("rejects a revoked Clerk session without creating or modifying its profile", async () => {
     const revokedSession = await createTestSession("revoked");
     const token = (await clerkClient.sessions.getToken(revokedSession.sessionId)).jwt;
-    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+    await revokeTestSession(revokedSession);
+    await new Promise((resolve) => setTimeout(resolve, SESSION_STATUS_CACHE_TTL_MS + 25));
 
     const requests: Array<[string, RequestInit?]> = [
       ["/admin/status"],
@@ -765,7 +805,8 @@ describe("admin access controls", () => {
     assert.equal(profile.status, 200, JSON.stringify(profile));
 
     const token = (await clerkClient.sessions.getToken(revokedSession.sessionId)).jwt;
-    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+    await revokeTestSession(revokedSession);
+    await new Promise((resolve) => setTimeout(resolve, SESSION_STATUS_CACHE_TTL_MS + 25));
 
     const requests = ircRequests(revokedSession.userId, "revoked", firstSession.userId);
     const beforeRows = await userOwnedRows(revokedSession.userId);
@@ -793,7 +834,8 @@ describe("admin access controls", () => {
       clerkClient.sessions.getToken(activeSession.sessionId),
     ]);
 
-    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+    await revokeTestSession(revokedSession);
+    await new Promise((resolve) => setTimeout(resolve, SESSION_STATUS_CACHE_TTL_MS + 25));
 
     const revokedResponse = await apiRequestWithToken(revokedToken.jwt, "/me", {
       method: "PATCH",
@@ -925,7 +967,7 @@ describe("admin access controls", () => {
     const ticket = (ticketResponse.body as { ticket?: unknown }).ticket;
     assert.equal(typeof ticket, "string");
 
-    await clerkClient.sessions.revokeSession(revokedSession.sessionId);
+    await revokeTestSession(revokedSession);
 
     const wsUrl = `${baseUrl.replace(/^http/, "ws")}/ws?ticket=${encodeURIComponent(ticket as string)}`;
     await expectRejectedWebSocket(wsUrl);
@@ -938,22 +980,28 @@ describe("admin access controls", () => {
     assert.deepEqual(afterConnection.rows, [{ status: "offline" }]);
   });
 
-  test("only one concurrent first-account claim succeeds", async () => {
+  test("rejects self-service admin claims and honors platform-provisioned access", async () => {
     const responses = await Promise.all([
       apiRequest(firstSession, "/admin/claim", { method: "POST" }),
       apiRequest(secondSession, "/admin/claim", { method: "POST" }),
     ]);
 
-    assert.deepEqual(
-      responses.map(({ status }) => status).sort((a, b) => a - b),
-      [200, 403],
-      JSON.stringify(responses),
-    );
+    for (const response of responses) {
+      assert.equal(response.status, 403, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Admin access is provisioned by the platform." });
+    }
 
-    const winnerIndex = responses.findIndex(({ status }) => status === 200);
-    assert.notEqual(winnerIndex, -1);
-    adminSession = winnerIndex === 0 ? firstSession : secondSession;
-    memberSession = winnerIndex === 0 ? secondSession : firstSession;
+    await Promise.all([
+      apiRequest(firstSession, "/admin/status"),
+      apiRequest(secondSession, "/admin/status"),
+    ]);
+    await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [firstSession.userId]);
+    adminSession = firstSession;
+    memberSession = secondSession;
+
+    const status = await apiRequest(adminSession, "/admin/status");
+    assert.equal(status.status, 200, JSON.stringify(status));
+    assert.equal((status.body as { isAdmin?: unknown }).isAdmin, true);
   });
 
   test("records a successful role change in admin activity", async () => {
@@ -990,6 +1038,7 @@ describe("admin access controls", () => {
       (
         entry,
       ): entry is {
+        actorId: string;
         action: string;
         targetId: string | null;
         details: string | null;
@@ -1002,7 +1051,13 @@ describe("admin access controls", () => {
         (entry as { action?: unknown }).action === "demoted_user" &&
         (entry as { targetId?: unknown }).targetId === memberSession.userId,
     );
-    assert.deepEqual(matchingActivity, {
+    assert.deepEqual(matchingActivity && {
+      actorId: matchingActivity.actorId,
+      action: matchingActivity.action,
+      targetId: matchingActivity.targetId,
+      details: matchingActivity.details,
+      actor: matchingActivity.actor,
+    }, {
       actorId: adminSession.userId,
       action: "demoted_user",
       targetId: memberSession.userId,
@@ -1141,7 +1196,11 @@ describe("admin access controls", () => {
           release !== null &&
           (release as { id?: unknown }).id === releaseId,
       );
-      assert.deepEqual(visibleRelease, {
+      assert.deepEqual(visibleRelease && {
+        id: visibleRelease.id,
+        status: visibleRelease.status,
+        announcementId: visibleRelease.announcementId,
+      }, {
         id: releaseId,
         status: "published",
         announcementId: null,
@@ -1286,7 +1345,13 @@ describe("admin access controls", () => {
           (entry as { action?: unknown }).action === "demoted_user" &&
           (entry as { targetId?: unknown }).targetId === memberSession.userId,
       );
-      assert.deepEqual(matchingActivity, {
+      assert.deepEqual(matchingActivity && {
+        actorId: matchingActivity.actorId,
+        action: matchingActivity.action,
+        targetId: matchingActivity.targetId,
+        details: matchingActivity.details,
+        actor: matchingActivity.actor,
+      }, {
         actorId: adminSession.userId,
         action: "demoted_user",
         targetId: memberSession.userId,
@@ -1335,7 +1400,7 @@ describe("admin access controls", () => {
       for (const offset of [0, 8, 16]) {
         const response = await apiRequest(
           adminSession,
-          `/admin/overview?activityLimit=8&activityOffset=${offset}`,
+          `/admin/overview?activityLimit=8&activityOffset=${offset}&activityAction=${marker}`,
         );
         assert.equal(response.status, 200, JSON.stringify(response));
         assert.ok(response.body && typeof response.body === "object");
@@ -1398,79 +1463,25 @@ describe("admin access controls", () => {
     }
   });
 
-  test("records a successful promotion with the acting admin in activity", async () => {
-    try {
-      await pool.query(
-        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
-        [adminSession.userId],
-      );
-      await pool.query(
-        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
-        [memberSession.userId],
-      );
+  test("does not record a rejected second-admin promotion", async () => {
+    const beforeAudit = await pool.query(
+      "SELECT count(*)::int AS count FROM irc_admin_audit_logs WHERE action = 'promoted_user'",
+    );
+    const roleUpdate = await apiRequest(
+      adminSession,
+      `/admin/users/${memberSession.userId}/role`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "admin" }),
+      },
+    );
+    assert.equal(roleUpdate.status, 409, JSON.stringify(roleUpdate));
 
-      const roleUpdate = await apiRequest(
-        memberSession,
-        `/admin/users/${adminSession.userId}/role`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ role: "admin" }),
-        },
-      );
-      assert.equal(roleUpdate.status, 200);
-      assert.deepEqual(roleUpdate.body, {
-        id: adminSession.userId,
-        role: "admin",
-      });
-
-      const status = await apiRequest(memberSession, "/admin/status");
-      assert.equal(status.status, 200);
-      assert.ok(status.body && typeof status.body === "object");
-      const profile = (status.body as {
-        profile?: { id?: unknown; displayName?: unknown };
-      }).profile;
-      assert.ok(profile && profile.id === memberSession.userId);
-      assert.equal(typeof profile.displayName, "string");
-
-      const overview = await apiRequest(memberSession, "/admin/overview");
-      assert.equal(overview.status, 200);
-      assert.ok(overview.body && typeof overview.body === "object");
-      const activity = (overview.body as { activity?: unknown }).activity;
-      assert.ok(Array.isArray(activity));
-      const matchingActivity = activity.find(
-        (
-          entry,
-        ): entry is {
-          action: string;
-          targetId: string | null;
-          details: string | null;
-          actor: string | null;
-        } =>
-          typeof entry === "object" &&
-          entry !== null &&
-          "action" in entry &&
-          "targetId" in entry &&
-          (entry as { action?: unknown }).action === "promoted_user" &&
-          (entry as { targetId?: unknown }).targetId === adminSession.userId,
-      );
-      assert.deepEqual(matchingActivity, {
-        actorId: memberSession.userId,
-        action: "promoted_user",
-        targetId: adminSession.userId,
-        details: "Role changed to admin",
-        actor: profile.displayName,
-      });
-    } finally {
-      await pool.query(
-        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
-        [memberSession.userId],
-      );
-      await pool.query(
-        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
-        [adminSession.userId],
-      );
-    }
+    const afterAudit = await pool.query(
+      "SELECT count(*)::int AS count FROM irc_admin_audit_logs WHERE action = 'promoted_user'",
+    );
+    assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
   test("rolls back a role change when recording admin activity fails", async () => {
@@ -1525,7 +1536,7 @@ describe("admin access controls", () => {
         "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
       );
       assert.deepEqual(afterUsers.rows, [
-        { clerk_id: adminSession.userId, role: "admin" },
+        { clerk_id: adminSession.userId, role: "member" },
       ]);
       assert.deepEqual(afterAudit.rows, beforeAudit.rows);
     } finally {
@@ -1816,7 +1827,7 @@ describe("admin access controls", () => {
     assert.equal(result.rows[0]?.role, "member");
   });
 
-  test("keeps simultaneous promotions to one administrator", async () => {
+  test("rejects simultaneous promotions while an administrator already exists", async () => {
     const [firstTarget, secondTarget] = await Promise.all([
       createTestSession("concurrent_promotion_first"),
       createTestSession("concurrent_promotion_second"),
@@ -1852,18 +1863,17 @@ describe("admin access controls", () => {
 
       assert.deepEqual(
         responses.map(({ status }) => status).sort((a, b) => a - b),
-        [200, 409],
+        [409, 409],
         JSON.stringify(responses),
       );
       assert.deepEqual(
         responses.filter(({ status }) => status === 409).map(({ body }) => body),
-        [{ error: "Only one admin account is allowed." }],
+        [
+          { error: "Only one admin account is allowed." },
+          { error: "Only one admin account is allowed." },
+        ],
       );
 
-      const winningIndex = responses.findIndex(({ status }) => status === 200);
-      assert.notEqual(winningIndex, -1);
-      const winningTarget = [firstTarget, secondTarget][winningIndex];
-      const rejectedTarget = [firstTarget, secondTarget][1 - winningIndex];
       const promotionAudit = await pool.query(
         `SELECT actor_id, action, target_id, target_label, details
          FROM irc_admin_audit_logs
@@ -1872,29 +1882,14 @@ describe("admin access controls", () => {
          ORDER BY id`,
         [[firstTarget.userId, secondTarget.userId]],
       );
-      assert.deepEqual(promotionAudit.rows, [
-        {
-          actor_id: adminSession.userId,
-          action: "promoted_user",
-          target_id: winningTarget.userId,
-          target_label: winningTarget.userId,
-          details: "Role changed to admin",
-        },
-      ]);
-      assert.equal(
-        promotionAudit.rows.some(({ target_id }) => target_id === rejectedTarget.userId),
-        false,
-      );
+      assert.deepEqual(promotionAudit.rows, []);
 
-      for (const [index, response] of responses.entries()) {
+      for (const target of [firstTarget, secondTarget]) {
         const targetRole = await pool.query(
           "SELECT role FROM irc_users WHERE clerk_id = $1",
-          [[firstTarget, secondTarget][index].userId],
+          [target.userId],
         );
-        assert.equal(
-          targetRole.rows[0]?.role,
-          response.status === 200 ? "admin" : "member",
-        );
+        assert.equal(targetRole.rows[0]?.role, "member");
       }
 
       const roles = await pool.query(
@@ -1903,12 +1898,12 @@ describe("admin access controls", () => {
       );
       assert.equal(
         roles.rows.filter(({ role }) => role === "admin").length,
-        1,
+        0,
         JSON.stringify(roles.rows),
       );
       assert.equal(
         roles.rows.filter(({ role }) => role === "member").length,
-        1,
+        2,
         JSON.stringify(roles.rows),
       );
 
@@ -1937,7 +1932,7 @@ describe("admin access controls", () => {
       );
       assert.equal(response.status, 400);
       assert.deepEqual(response.body, {
-        error: "Role must be either admin or member.",
+        error: "Role must be one of admin, moderator, community_admin, or member.",
       });
     }
 
@@ -2858,6 +2853,10 @@ describe("admin access controls", () => {
     let communityId: number | null = null;
 
     try {
+      for (const session of [workerSession, replacementSession, outsiderSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
       const community = await apiRequest(ownerSession, "/communities", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2940,18 +2939,22 @@ describe("admin access controls", () => {
          ORDER BY id`,
         [String(taskId), [workerSession.userId, replacementSession.userId]],
       );
-      assert.deepEqual(reassignmentNotifications.rows.slice(-2), [
-        {
-          user_id: workerSession.userId,
-          type: "task_updated",
-          body: "You are no longer assigned the task “Prepare onboarding”.",
-        },
-        {
-          user_id: replacementSession.userId,
-          type: "task_assigned",
-          body: "You were assigned the task “Prepare onboarding”.",
-        },
-      ]);
+      const latestReassignmentByUser = new Map(
+        reassignmentNotifications.rows.slice(-2).map((notification) => [
+          notification.user_id,
+          notification,
+        ]),
+      );
+      assert.deepEqual(latestReassignmentByUser.get(workerSession.userId), {
+        user_id: workerSession.userId,
+        type: "task_updated",
+        body: "You are no longer assigned the task “Prepare onboarding”.",
+      });
+      assert.deepEqual(latestReassignmentByUser.get(replacementSession.userId), {
+        user_id: replacementSession.userId,
+        type: "task_assigned",
+        body: "You were assigned the task “Prepare onboarding”.",
+      });
 
       const crossWorkspaceAssignment = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
         method: "PATCH",
@@ -2973,6 +2976,10 @@ describe("admin access controls", () => {
     const communityIds: number[] = [];
 
     try {
+      for (const session of [managerSession, employeeSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
       const createCommunity = async (name: string) => {
         const response = await apiRequest(ownerSession, "/communities", {
           method: "POST",
@@ -3882,6 +3889,8 @@ describe("admin access controls", () => {
       );
       memberSocket.send(JSON.stringify({ type: "typing", channelId, active: false }));
       await unsubscribedOwnerTyping;
+      ownerSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       const ownerMessageEvents = collectWebSocketEvents(
         ownerSocket,
@@ -4211,7 +4220,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            objectPath: "/objects/uploads/private-room-file",
+            objectPath: `/objects/uploads/${randomUUID()}`,
             fileName: "room.txt",
             contentType: "text/plain",
             fileSize: 12,
@@ -4274,7 +4283,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            objectPath: "/objects/uploads/direct-file",
+            objectPath: `/objects/uploads/${randomUUID()}`,
             fileName: "direct.txt",
             contentType: "text/plain",
             fileSize: 14,

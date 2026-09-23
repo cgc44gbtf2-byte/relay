@@ -9,7 +9,6 @@ import {
   customRolesTable,
   db,
   messagesTable,
-  notificationsTable,
   permissionDefinitionsTable,
   rolePermissionsTable,
   serverAnnouncementsTable,
@@ -17,6 +16,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
+import { createNotifications } from "../lib/notifications";
 import { channelNotFoundError } from "./errors";
 import { ensurePermissionCatalog, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
 import { isPositiveSafeInteger, isValidQuery } from "../lib/validation";
@@ -273,15 +273,12 @@ router.post("/admin/announcements", requireAuth, async (req: AuthenticatedReques
     return;
   }
   const [announcement] = await db.insert(serverAnnouncementsTable).values({ authorId: actor.clerkId, body }).returning();
-  await db.insert(notificationsTable).select(
-    db
-      .select({
-        userId: usersTable.clerkId,
-        type: sql<string>`${"server_announcement"}`.as("type"),
-        body: sql<string>`${body}`.as("body"),
-      })
-      .from(usersTable),
-  );
+  const recipients = await db.select({ userId: usersTable.clerkId }).from(usersTable);
+  await createNotifications(recipients.map(({ userId }) => userId), {
+    type: "server_announcement",
+    category: "announcement",
+    body,
+  });
   await writeAudit(
     actor.clerkId,
     actor.displayName,

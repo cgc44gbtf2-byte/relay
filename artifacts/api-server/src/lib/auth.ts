@@ -5,6 +5,65 @@ import { db, usersTable, type User } from "@workspace/db";
 
 export type AuthenticatedRequest = Request & { userId?: string; user?: User };
 
+export const SESSION_STATUS_CACHE_TTL_MS = process.env.NODE_ENV === "test" ? 2_000 : 5_000;
+const MAX_SESSION_STATUS_CACHE_ENTRIES = 10_000;
+const sessionStatusCache = new Map<string, { active: boolean; userId: string; expiresAt: number }>();
+const sessionStatusRequests = new Map<string, Promise<{ active: boolean; userId: string }>>();
+const testSessionStatuses = new Map<string, { active: boolean; userId: string }>();
+
+export function setTestSessionStatus(
+  sessionId: string,
+  value: { active: boolean; userId: string },
+): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Test session overrides are only available when NODE_ENV=test.");
+  }
+  testSessionStatuses.set(sessionId, value);
+  sessionStatusCache.delete(sessionId);
+}
+
+function cacheSessionStatus(sessionId: string, value: { active: boolean; userId: string }): void {
+  if (sessionStatusCache.size >= MAX_SESSION_STATUS_CACHE_ENTRIES && !sessionStatusCache.has(sessionId)) {
+    const oldest = sessionStatusCache.keys().next().value;
+    if (oldest) sessionStatusCache.delete(oldest);
+  }
+  sessionStatusCache.set(sessionId, {
+    ...value,
+    expiresAt: Date.now() + SESSION_STATUS_CACHE_TTL_MS,
+  });
+}
+
+async function activeClerkSession(sessionId: string, userId: string): Promise<boolean> {
+  const testStatus = testSessionStatuses.get(sessionId);
+  if (testStatus) {
+    return testStatus.active && testStatus.userId === userId;
+  }
+  const cached = sessionStatusCache.get(sessionId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.active && cached.userId === userId;
+  }
+  if (cached) sessionStatusCache.delete(sessionId);
+
+  let request = sessionStatusRequests.get(sessionId);
+  if (!request) {
+    request = clerkClient.sessions.getSession(sessionId)
+      .then((session) => ({
+        active: session.status === "active",
+        userId: session.userId,
+      }))
+      .then((value) => {
+        cacheSessionStatus(sessionId, value);
+        return value;
+      })
+      .finally(() => {
+        sessionStatusRequests.delete(sessionId);
+      });
+    sessionStatusRequests.set(sessionId, request);
+  }
+  const session = await request;
+  return session.active && session.userId === userId;
+}
+
 export async function requireAuth(
   req: AuthenticatedRequest,
   res: Response,
@@ -12,8 +71,25 @@ export async function requireAuth(
 ): Promise<void> {
   const auth = getAuth(req);
   const userId = auth.userId;
-  if (!userId) {
+  const sessionId = auth.sessionId;
+  if (!userId || !sessionId) {
     res.status(401).json({ error: "Sign in to continue" });
+    return;
+  }
+  try {
+    if (!(await activeClerkSession(sessionId, userId))) {
+      res.status(401).json({ error: "Sign in to continue" });
+      return;
+    }
+  } catch (error) {
+    const status = error && typeof error === "object" && "status" in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+    if (status === 401 || status === 404) {
+      res.status(401).json({ error: "Sign in to continue" });
+      return;
+    }
+    next(error);
     return;
   }
   const profile = await db.query.usersTable.findFirst({

@@ -13,6 +13,7 @@ const TEST_PUBLISHABLE_KEY_PREFIX = "pk_test_";
 const CLEANUP_EVENT = "admin_test_user_cleanup";
 const CLEANUP_WEBHOOK_MAX_ATTEMPTS = 3;
 const CLEANUP_WEBHOOK_RETRY_DELAY_MS = 250;
+const CLERK_RATE_LIMIT_MAX_ATTEMPTS = 5;
 
 type CleanupUser = {
   id: string;
@@ -75,6 +76,24 @@ const defaultDependencies: CleanupDependencies = {
   database: pool,
 };
 
+async function clerkRequestWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const status = typeof error === "object" && error !== null && "status" in error
+        ? (error as { status?: unknown }).status
+        : undefined;
+      if (status !== 429 || attempt >= CLERK_RATE_LIMIT_MAX_ATTEMPTS) throw error;
+      const retryAfter = typeof error === "object" && error !== null && "retryAfter" in error
+        ? (error as { retryAfter?: unknown }).retryAfter
+        : undefined;
+      const delayMs = (typeof retryAfter === "number" ? retryAfter : 1) * 1_000 + 100;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 export function assertSafeCleanupEnvironment(): void {
   const secretKey = process.env.CLERK_SECRET_KEY;
   const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
@@ -133,11 +152,11 @@ export async function listMatchingUsers(
   let offset = 0;
 
   while (true) {
-    const page = await clerk.users.getUserList({
+    const page = await clerkRequestWithRetry(() => clerk.users.getUserList({
       query: TEST_USERNAME_PREFIX,
       limit: PAGE_SIZE,
       offset,
-    });
+    }));
     matchingUsers.push(
       ...page.data.filter(isAdminRegressionTestUser).map((user) => ({
         id: user.id,
@@ -163,11 +182,11 @@ export async function listUserSessions(
   let offset = 0;
 
   while (true) {
-    const page = await clerk.sessions.getSessionList({
+    const page = await clerkRequestWithRetry(() => clerk.sessions.getSessionList({
       userId,
       limit: PAGE_SIZE,
       offset,
-    });
+    }));
     sessions.push(
       ...page.data.map(({ id, status }) => ({
         id,
@@ -216,7 +235,9 @@ export async function cleanupUsers(
       await Promise.all(
         activeSessions.map(async ({ id }) => {
           try {
-            await dependencies.clerk.sessions.revokeSession(id);
+            await clerkRequestWithRetry(
+              () => dependencies.clerk.sessions.revokeSession(id),
+            );
           } catch (error) {
             failures.push(
               `session ${id} for ${user.username ?? user.id}: ${formatError(
@@ -233,7 +254,9 @@ export async function cleanupUsers(
     }
 
     try {
-      await dependencies.clerk.users.deleteUser(user.id);
+      await clerkRequestWithRetry(
+        () => dependencies.clerk.users.deleteUser(user.id),
+      );
       console.log(
         `Deleted ${user.username ?? user.id} and revoked ${
           sessions.filter(({ status }) => status === "active").length
