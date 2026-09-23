@@ -6,11 +6,21 @@ import type { Duplex } from "node:stream";
 import { clerkClient } from "@clerk/express";
 import { canReadChannel, channelForRead } from "./channel-access";
 
-type Client = { socket: WebSocket; userId: string; channelIds: Set<number> };
+type Client = {
+  socket: WebSocket;
+  userId: string;
+  channelIds: Set<number>;
+  channelGenerations: Map<number, number>;
+  typingWindowStartedAt: number;
+  typingFrameCount: number;
+  lastTypingAt: number;
+  sessionCheck: ReturnType<typeof setInterval>;
+};
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
 
 class Hub {
   private clients = new Set<Client>();
+  private channelClients = new Map<number, Set<Client>>();
   private tickets = new Map<string, Ticket>();
 
   issueTicket(userId: string, sessionId: string): string {
@@ -27,7 +37,7 @@ class Hub {
   }
 
   broadcastChannel(channelId: number, event: unknown, excludedUserId?: string): void {
-    for (const client of this.clients) {
+    for (const client of this.channelClients.get(channelId) ?? []) {
       if (client.userId !== excludedUserId && client.channelIds.has(channelId)) {
         this.send(client.socket, event);
       }
@@ -42,19 +52,21 @@ class Hub {
 
   revokeChannelAccess(channelId: number, userId: string): void {
     for (const client of this.clients) {
-      if (client.userId === userId) client.channelIds.delete(channelId);
+      if (client.userId !== userId) continue;
+      this.removeChannelSubscription(client, channelId);
     }
   }
 
   broadcastChannelRemoved(channelId: number): void {
     for (const client of this.clients) {
       this.send(client.socket, { type: "channel_removed", channelId });
-      client.channelIds.delete(channelId);
+      this.removeChannelSubscription(client, channelId);
     }
+    this.channelClients.delete(channelId);
   }
 
   attach(server: Server): void {
-    const wss = new WebSocketServer({ noServer: true });
+    const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
     server.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "", "http://localhost");
       if (url.pathname !== "/api/ws") return;
@@ -90,11 +102,22 @@ class Hub {
     }
 
     wss.handleUpgrade(request, socket, head, (ws) => {
-      const client: Client = {
+      const client = {
         socket: ws,
         userId: ticket.userId,
         channelIds: new Set(),
-      };
+        channelGenerations: new Map(),
+        typingWindowStartedAt: Date.now(),
+        typingFrameCount: 0,
+        lastTypingAt: 0,
+        sessionCheck: setInterval(() => {
+          void clerkClient.sessions.getSession(ticket.sessionId)
+            .then((session) => {
+              if (session.userId !== ticket.userId || session.status !== "active") ws.close(1008, "Session is no longer active.");
+            })
+            .catch(() => ws.close(1008, "Session could not be revalidated."));
+        }, 60_000),
+      } satisfies Client;
       this.clients.add(client);
       void db
         .update(usersTable)
@@ -111,22 +134,40 @@ class Hub {
             (message.type !== "subscribe" &&
               message.type !== "unsubscribe" &&
               message.type !== "typing") ||
-            !Number.isInteger(message.channelId)
+            !Number.isSafeInteger(message.channelId) ||
+            Number(message.channelId) <= 0
           ) {
             return;
           }
 
           const channelId = Number(message.channelId);
+          if (message.type === "typing") {
+            const now = Date.now();
+            if (now - client.typingWindowStartedAt >= 1000) {
+              client.typingWindowStartedAt = now;
+              client.typingFrameCount = 0;
+            }
+            if (client.typingFrameCount >= 20 || now - client.lastTypingAt < 75) return;
+            client.typingFrameCount += 1;
+            client.lastTypingAt = now;
+          }
           if (message.type === "unsubscribe") {
-            client.channelIds.delete(channelId);
+            this.removeChannelSubscription(client, channelId);
             return;
           }
 
+          const generation = client.channelGenerations.get(channelId) ?? 0;
           void channelForRead(channelId)
             .then(async (channel) => {
               if (!channel || !(await canReadChannel(channel, client.userId))) return;
+              if (
+                !this.clients.has(client)
+                || (client.channelGenerations.get(channelId) ?? 0) !== generation
+              ) {
+                return;
+              }
               if (message.type === "subscribe") {
-                client.channelIds.add(channelId);
+                this.addChannelSubscription(client, channelId);
               } else if (client.channelIds.has(channelId)) {
                 this.broadcastChannel(
                   channelId,
@@ -146,14 +187,40 @@ class Hub {
         }
       });
       ws.on("close", () => {
+        clearInterval(client.sessionCheck);
         this.clients.delete(client);
+        for (const channelId of client.channelIds) {
+          this.removeChannelSubscription(client, channelId);
+        }
         void db
           .update(usersTable)
           .set({ status: "offline", lastSeenAt: new Date() })
           .where(eq(usersTable.clerkId, ticket.userId));
       });
+      ws.on("error", () => {
+        if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close();
+      });
       this.send(ws, { type: "ready" });
     });
+  }
+
+  private addChannelSubscription(client: Client, channelId: number): void {
+    client.channelIds.add(channelId);
+    const subscribers = this.channelClients.get(channelId) ?? new Set<Client>();
+    subscribers.add(client);
+    this.channelClients.set(channelId, subscribers);
+  }
+
+  private removeChannelSubscription(client: Client, channelId: number): void {
+    client.channelGenerations.set(
+      channelId,
+      (client.channelGenerations.get(channelId) ?? 0) + 1,
+    );
+    client.channelIds.delete(channelId);
+    const subscribers = this.channelClients.get(channelId);
+    if (!subscribers) return;
+    subscribers.delete(client);
+    if (subscribers.size === 0) this.channelClients.delete(channelId);
   }
 
   private send(socket: WebSocket, event: unknown): void {
