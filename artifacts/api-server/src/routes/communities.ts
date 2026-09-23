@@ -7,6 +7,8 @@ import {
   announcementAttachmentsTable,
   announcementReadReceiptsTable,
   categoriesTable,
+  channelBansTable,
+  channelInvitesTable,
   channelMembersTable,
   channelJoinRequestsTable,
   channelsTable,
@@ -22,6 +24,9 @@ import {
   db,
   employeeProfilesTable,
   locationsTable,
+  messageAttachmentsTable,
+  messageReactionsTable,
+  messagesTable,
   moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
@@ -53,6 +58,7 @@ import {
   type PermissionKey,
 } from "../lib/permissions";
 import { createNotification, createNotifications } from "../lib/notifications";
+import { wsHub } from "../lib/ws";
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
@@ -69,8 +75,96 @@ const workspaceRoleRank: Record<string, number> = {
 };
 const invitationRoles = ["member", "employee", "contractor"] as const;
 
+function onboardingCommunity(community: typeof communitiesTable.$inferSelect, joined = true, canManage = false) {
+  return {
+    id: community.id,
+    name: community.name,
+    slug: community.slug,
+    plan: community.plan,
+    onboardingStep: community.onboardingStep,
+    joined,
+    canManage,
+  };
+}
+
+function onboardingNextStep(ownerCommunity: ReturnType<typeof onboardingCommunity> | null, hasMembership: boolean) {
+  if (!ownerCommunity) return hasMembership ? "start" : "create";
+  if (ownerCommunity.onboardingStep >= 9) return "start";
+  return ownerCommunity.onboardingStep >= 2 ? "invite" : "configure";
+}
+
+async function provisionFreeCommunity(userId: string, displayName: string) {
+  const slug = `relay-${slugify(userId).slice(-20) || randomUUID().slice(0, 8)}`;
+  const name = `${displayName.trim().slice(0, 56) || "Relay"} community`;
+  const existing = await db.select().from(communitiesTable).where(and(
+    eq(communitiesTable.ownerId, userId),
+    eq(communitiesTable.plan, "free_community"),
+  )).orderBy(desc(communitiesTable.createdAt)).limit(1);
+  if (existing[0]) return existing[0];
+  try {
+    return await db.transaction(async (tx) => {
+      const [created] = await tx.insert(communitiesTable).values({
+        name,
+        slug,
+        description: "A free Relay community.",
+        businessType: "community",
+        plan: "free_community",
+        onboardingStep: 2,
+        isPrivate: false,
+        ownerId: userId,
+      }).returning();
+      await tx.insert(communityMembersTable).values({ communityId: created.id, userId, status: "owner" });
+      await tx.insert(employeeProfilesTable).values({ communityId: created.id, userId, employmentStatus: "active", onboardedAt: new Date() });
+      await tx.insert(userRolesTable).values({
+        userId,
+        role: "community_admin",
+        scopeType: "community",
+        communityId: created.id,
+        grantedBy: userId,
+      });
+      const [generalCategory] = await tx.insert(categoriesTable).values({
+        name: "community",
+        description: "Shared rooms for the community.",
+        ownerId: userId,
+        communityId: created.id,
+      }).returning({ id: categoriesTable.id });
+      const defaultChannels = [
+        ["#welcome", "Introduce yourself and meet the community."],
+        ["#general", "The main room for conversation."],
+      ];
+      const createdChannels = await tx.insert(channelsTable).values(defaultChannels.map(([channelName, topic]) => ({
+        name: channelName,
+        topic,
+        ownerId: userId,
+        communityId: created.id,
+        categoryId: generalCategory.id,
+        isPrivate: false,
+      }))).returning({ id: channelsTable.id });
+      if (createdChannels.length) {
+        await tx.insert(channelMembersTable).values(createdChannels.map((channel) => ({
+          channelId: channel.id,
+          userId,
+          role: "owner",
+        })));
+      }
+      return created;
+    });
+  } catch {
+    const [createdByAnotherRequest] = await db.select().from(communitiesTable).where(and(
+      eq(communitiesTable.ownerId, userId),
+      eq(communitiesTable.plan, "free_community"),
+    )).orderBy(desc(communitiesTable.createdAt)).limit(1);
+    if (createdByAnotherRequest) return createdByAnotherRequest;
+    throw new Error("Unable to create a free community");
+  }
+}
+
 async function requireWorkspaceManager(userId: string, communityId: number): Promise<boolean> {
   return communityPermission(userId, communityId, "manage_community");
+}
+
+async function requireOrganizationManager(userId: string, communityId: number): Promise<boolean> {
+  return communityPermission(userId, communityId, "manage_organization");
 }
 
 type CommunityAuditMetadata = {
@@ -252,10 +346,73 @@ router.get("/permissions/catalog", requireAuth, async (req: AuthenticatedRequest
   });
 });
 
+router.get("/onboarding", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const profile = await ensureProfile(userId);
+  await provisionFreeCommunity(userId, profile.displayName);
+  const [ownedCommunities, memberships] = await Promise.all([
+    db.select().from(communitiesTable)
+      .where(and(eq(communitiesTable.ownerId, userId), eq(communitiesTable.plan, "free_community")))
+      .orderBy(desc(communitiesTable.createdAt)),
+    db.select({
+      community: communitiesTable,
+    }).from(communityMembersTable)
+      .innerJoin(communitiesTable, eq(communitiesTable.id, communityMembersTable.communityId))
+      .where(and(
+        eq(communityMembersTable.userId, userId),
+        eq(communitiesTable.plan, "free_community"),
+      ))
+      .orderBy(desc(communitiesTable.createdAt)),
+  ]);
+  const ownerCommunity = ownedCommunities[0] ? onboardingCommunity(ownedCommunities[0], true, true) : null;
+  const communities = memberships.map(({ community }) => onboardingCommunity(
+    community,
+    true,
+    community.ownerId === userId,
+  ));
+  res.json({
+    nextStep: onboardingNextStep(ownerCommunity, communities.length > 0),
+    ownerCommunity,
+    communities,
+  });
+});
+
+router.post("/onboarding/:communityId/progress", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const requestedStep = Number(req.body?.step);
+  if (!Number.isInteger(communityId) || ![2, 9].includes(requestedStep)) {
+    res.status(400).json({ error: "Onboarding step must be 2 or 9." });
+    return;
+  }
+  const [community] = await db.select().from(communitiesTable).where(eq(communitiesTable.id, communityId));
+  if (!community) {
+    res.status(404).json({ error: "Community not found." });
+    return;
+  }
+  if (community.ownerId !== userId) {
+    res.status(403).json({ error: "Only the community owner can advance onboarding." });
+    return;
+  }
+  const [updated] = community.onboardingStep >= requestedStep
+    ? [community]
+    : await db.update(communitiesTable)
+      .set({ onboardingStep: requestedStep })
+      .where(eq(communitiesTable.id, communityId))
+      .returning();
+  const summary = onboardingCommunity(updated, true, true);
+  res.json({
+    community: summary,
+    nextStep: onboardingNextStep(summary, true),
+  });
+});
+
 router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   await ensureProfile(userId);
-  const communities = await db.select().from(communitiesTable).orderBy(asc(communitiesTable.name));
+  const communities = await db.select().from(communitiesTable)
+    .where(eq(communitiesTable.plan, "paid_workspace"))
+    .orderBy(asc(communitiesTable.name));
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
@@ -311,6 +468,8 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
         businessHours,
         contactEmail,
         contactPhone,
+        plan: "paid_workspace",
+        onboardingStep: req.body?.onboarding === true ? 1 : 9,
         isPrivate,
         ownerId: userId,
       }).returning();
@@ -361,6 +520,14 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
     await writeCommunityAudit(userId, "created_community", community.id, `Created ${community.name}`);
     res.status(201).json({ ...community, joined: true, canManage: true, defaultChannelsCreated: 6 });
   } catch {
+    const [existing] = await db.select().from(communitiesTable).where(and(
+      eq(communitiesTable.ownerId, userId),
+      eq(communitiesTable.slug, slug),
+    ));
+    if (existing) {
+      res.status(200).json({ ...existing, joined: true, canManage: true, defaultChannelsCreated: 0 });
+      return;
+    }
     res.status(409).json({ error: "That community slug is already in use." });
   }
 });
@@ -516,7 +683,14 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.updatedAt)),
     taskCommentsQuery,
     taskAttachmentsQuery,
-    db.select({ teamId: teamMembersTable.teamId, userId: teamMembersTable.userId }).from(teamMembersTable)
+    db.select({
+      teamId: teamMembersTable.teamId,
+      userId: teamMembersTable.userId,
+      role: teamMembersTable.role,
+      status: teamMembersTable.status,
+      joinedAt: teamMembersTable.joinedAt,
+      endedAt: teamMembersTable.endedAt,
+    }).from(teamMembersTable)
       .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
       .where(eq(teamsTable.communityId, community.id)),
     db.select({
@@ -538,9 +712,16 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       .where(eq(serverAnnouncementsTable.communityId, community.id)),
   ]);
   const canManage = await communityPermission(userId, community.id, "manage_community");
+  const canManageOrganization = await requireOrganizationManager(userId, community.id);
   const viewerIsMember = members.some((member) => member.id === userId);
   const visibleChannels = channels.filter((channel) => !channel.isPrivate || viewerIsMember || canManage);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
+  const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
+  for (const membership of teamMemberships) {
+    const existing = teamMembershipsByUserId.get(membership.userId) ?? [];
+    existing.push(membership);
+    teamMembershipsByUserId.set(membership.userId, existing);
+  }
   const directoryEmployees = members.map((member) => {
     const profile = employeeProfilesByUserId.get(member.id);
     return {
@@ -553,6 +734,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       departmentId: profile?.departmentId ?? null,
       locationId: profile?.locationId ?? null,
       managerId: profile?.managerId ?? null,
+      teamIds: (teamMembershipsByUserId.get(member.id) ?? [])
+        .filter((membership) => membership.status === "active")
+        .map((membership) => membership.teamId),
       onboardedAt: profile?.onboardedAt ?? null,
       offboardedAt: profile?.offboardedAt ?? null,
       presenceStatus: member.status,
@@ -601,6 +785,8 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
     })),
     canManage,
+    canManageOrganization,
+    teamMemberships,
   });
 });
 
@@ -835,6 +1021,10 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
   const status = typeof req.body?.status === "string" ? req.body.status : undefined;
   const priority = typeof req.body?.priority === "string" ? req.body.priority : undefined;
   const dueDate = req.body?.dueDate === null ? null : req.body?.dueDate ? new Date(req.body.dueDate) : undefined;
+  const hasAssignedTo = typeof req.body?.assignedTo === "string" || req.body?.assignedTo === null;
+  const assignedTo = hasAssignedTo && typeof req.body?.assignedTo === "string" && req.body.assignedTo
+    ? req.body.assignedTo
+    : hasAssignedTo ? null : undefined;
   if (status !== undefined && !allowedStatuses.includes(status)) {
     res.status(400).json({ error: "Invalid task status." });
     return;
@@ -847,21 +1037,61 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
     res.status(400).json({ error: "Invalid due date." });
     return;
   }
+  if (assignedTo) {
+    const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, assignedTo)));
+    if (!member) {
+      res.status(400).json({ error: "The assignee must be a member of this workspace." });
+      return;
+    }
+  }
   const [updated] = await db.update(workspaceTasksTable).set({
     ...(typeof req.body?.title === "string" ? { title: req.body.title.trim().slice(0, 160) } : {}),
     ...(typeof req.body?.description === "string" ? { description: req.body.description.trim().slice(0, 10000) } : {}),
-    ...(typeof req.body?.assignedTo === "string" || req.body?.assignedTo === null ? { assignedTo: req.body.assignedTo || null } : {}),
+    ...(assignedTo === undefined ? {} : { assignedTo }),
     ...(status === undefined ? {} : { status, completedAt: status === "completed" ? new Date() : null }),
     ...(priority === undefined ? {} : { priority }),
     ...(dueDate === undefined ? {} : { dueDate }),
     updatedAt: new Date(),
   }).where(eq(workspaceTasksTable.id, taskId)).returning();
-  if (updated.assignedTo && updated.assignedTo !== current.assignedTo) {
+  const assignmentChanged = updated.assignedTo !== current.assignedTo;
+  const changedFields: string[] = [];
+  if (updated.title !== current.title) changedFields.push("title");
+  if (updated.description !== current.description) changedFields.push("description");
+  if (updated.status !== current.status) changedFields.push(`status → ${updated.status}`);
+  if (updated.priority !== current.priority) changedFields.push(`priority → ${updated.priority}`);
+  const currentDueDate = current.dueDate?.getTime() ?? null;
+  const updatedDueDate = updated.dueDate?.getTime() ?? null;
+  if (updatedDueDate !== currentDueDate) changedFields.push(updated.dueDate ? "due date" : "due date cleared");
+  if (updated.assignedTo && assignmentChanged) {
     await createNotification({
       userId: updated.assignedTo,
       type: "task_assigned",
       category: "task_assigned",
       body: `You were assigned the task “${updated.title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: updated.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  }
+  if (current.assignedTo && assignmentChanged) {
+    await createNotification({
+      userId: current.assignedTo,
+      type: "task_updated",
+      category: "task_updated",
+      body: `You are no longer assigned the task “${updated.title}”.`,
+      communityId,
+      entityType: "workspace_task",
+      entityId: updated.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+  } else if (updated.assignedTo && changedFields.length > 0) {
+    await createNotification({
+      userId: updated.assignedTo,
+      type: "task_updated",
+      category: "task_updated",
+      body: `Task “${updated.title}” updated: ${changedFields.join(", ")}.`,
       communityId,
       entityType: "workspace_task",
       entityId: updated.id,
@@ -1007,6 +1237,20 @@ router.post("/communities/:communityId/teams", requireAuth, async (req: Authenti
     res.status(400).json({ error: "A team name is required." });
     return;
   }
+  if (departmentId !== null && (!Number.isSafeInteger(departmentId) || !(await db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+    eq(departmentsTable.id, departmentId),
+    eq(departmentsTable.communityId, communityId),
+  )).limit(1)).length)) {
+    res.status(400).json({ error: "Department does not belong to this workspace." });
+    return;
+  }
+  if (locationId !== null && (!Number.isSafeInteger(locationId) || !(await db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+    eq(locationsTable.id, locationId),
+    eq(locationsTable.communityId, communityId),
+  )).limit(1)).length)) {
+    res.status(400).json({ error: "Location does not belong to this workspace." });
+    return;
+  }
   const [team] = await db.insert(teamsTable).values({ communityId, name, description, departmentId, locationId }).returning();
   await writeCommunityAudit(userId, "created_workspace_team", communityId, name);
   res.status(201).json(team);
@@ -1099,6 +1343,194 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
   res.json(updated);
 });
 
+router.patch("/communities/:communityId/employees/:employeeId/organization", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const employeeId = param(req, "employeeId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+  const fields = ["departmentId", "locationId", "managerId"] as const;
+  if (!fields.some((field) => Object.hasOwn(body, field))) {
+    res.status(400).json({ error: "At least one organization assignment is required." });
+    return;
+  }
+  const parseNullableId = (value: unknown): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null || value === "") return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  };
+  const departmentId = parseNullableId(body.departmentId);
+  const locationId = parseNullableId(body.locationId);
+  const managerId = body.managerId === undefined
+    ? undefined
+    : body.managerId === null || body.managerId === ""
+      ? null
+      : typeof body.managerId === "string" ? body.managerId : undefined;
+  if ((Object.hasOwn(body, "departmentId") && departmentId === undefined)
+    || (Object.hasOwn(body, "locationId") && locationId === undefined)
+    || (Object.hasOwn(body, "managerId") && managerId === undefined)) {
+    res.status(400).json({ error: "Organization assignments must use valid IDs." });
+    return;
+  }
+  const [employee] = await db.select().from(employeeProfilesTable).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, employeeId),
+  ));
+  if (!employee) {
+    res.status(404).json({ error: "Employee profile not found." });
+    return;
+  }
+  if (departmentId !== undefined && departmentId !== null) {
+    const [department] = await db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+      eq(departmentsTable.id, departmentId),
+      eq(departmentsTable.communityId, communityId),
+    ));
+    if (!department) {
+      res.status(400).json({ error: "Department does not belong to this workspace." });
+      return;
+    }
+  }
+  if (locationId !== undefined && locationId !== null) {
+    const [location] = await db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+      eq(locationsTable.id, locationId),
+      eq(locationsTable.communityId, communityId),
+    ));
+    if (!location) {
+      res.status(400).json({ error: "Location does not belong to this workspace." });
+      return;
+    }
+  }
+  if (managerId !== undefined && managerId !== null) {
+    const [manager] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .innerJoin(employeeProfilesTable, and(
+        eq(employeeProfilesTable.communityId, communityMembersTable.communityId),
+        eq(employeeProfilesTable.userId, communityMembersTable.userId),
+      ))
+      .where(and(
+        eq(communityMembersTable.communityId, communityId),
+        eq(communityMembersTable.userId, managerId),
+        eq(employeeProfilesTable.employmentStatus, "active"),
+      ));
+    if (!manager || managerId === employeeId) {
+      res.status(400).json({ error: "Manager must be another active workspace employee." });
+      return;
+    }
+  }
+  const [updated] = await db.update(employeeProfilesTable).set({
+    ...(departmentId === undefined ? {} : { departmentId }),
+    ...(locationId === undefined ? {} : { locationId }),
+    ...(managerId === undefined ? {} : { managerId }),
+  }).where(and(
+    eq(employeeProfilesTable.communityId, communityId),
+    eq(employeeProfilesTable.userId, employeeId),
+  )).returning();
+  await writeCommunityAudit(userId, "assigned_employee_organization", communityId, {
+    resourceType: "employee",
+    resourceId: employeeId,
+    targetId: employeeId,
+    details: JSON.stringify({
+      departmentId: updated?.departmentId ?? null,
+      locationId: updated?.locationId ?? null,
+      managerId: updated?.managerId ?? null,
+    }),
+  });
+  res.json(updated);
+});
+
+router.put("/communities/:communityId/teams/:teamId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const teamId = Number(param(req, "teamId"));
+  const memberId = param(req, "memberId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  if (!Number.isSafeInteger(teamId) || teamId <= 0) {
+    res.status(400).json({ error: "Invalid team." });
+    return;
+  }
+  const [team] = await db.select({ id: teamsTable.id }).from(teamsTable).where(and(
+    eq(teamsTable.id, teamId),
+    eq(teamsTable.communityId, communityId),
+  ));
+  const [member] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .innerJoin(employeeProfilesTable, and(
+      eq(employeeProfilesTable.communityId, communityMembersTable.communityId),
+      eq(employeeProfilesTable.userId, communityMembersTable.userId),
+    ))
+    .where(and(
+      eq(communityMembersTable.communityId, communityId),
+      eq(communityMembersTable.userId, memberId),
+      eq(employeeProfilesTable.employmentStatus, "active"),
+    ));
+  if (!team || !member) {
+    res.status(404).json({ error: "Team or employee not found in this workspace." });
+    return;
+  }
+  const role = typeof req.body?.role === "string" ? req.body.role : "member";
+  const status = typeof req.body?.status === "string" ? req.body.status : "active";
+  if (!["member", "lead", "manager"].includes(role) || !["active", "inactive"].includes(status)) {
+    res.status(400).json({ error: "Invalid team membership." });
+    return;
+  }
+  const [membership] = await db.insert(teamMembersTable).values({
+    teamId,
+    userId: memberId,
+    role,
+    status,
+    endedAt: status === "active" ? null : new Date(),
+  }).onConflictDoUpdate({
+    target: [teamMembersTable.teamId, teamMembersTable.userId],
+    set: { role, status, endedAt: status === "active" ? null : new Date() },
+  }).returning();
+  await writeCommunityAudit(userId, "assigned_employee_team", communityId, {
+    resourceType: "team_membership",
+    resourceId: `${teamId}:${memberId}`,
+    targetId: memberId,
+    details: `${memberId} → team ${teamId} (${role}, ${status})`,
+  });
+  res.json(membership);
+});
+
+router.delete("/communities/:communityId/teams/:teamId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const teamId = Number(param(req, "teamId"));
+  const memberId = param(req, "memberId");
+  if (!Number.isInteger(communityId) || !(await requireOrganizationManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot assign organization units in this workspace." });
+    return;
+  }
+  const [team] = await db.select({ id: teamsTable.id }).from(teamsTable).where(and(
+    eq(teamsTable.id, teamId),
+    eq(teamsTable.communityId, communityId),
+  ));
+  if (!team) {
+    res.status(404).json({ error: "Team not found in this workspace." });
+    return;
+  }
+  const deleted = await db.delete(teamMembersTable).where(and(
+    eq(teamMembersTable.teamId, teamId),
+    eq(teamMembersTable.userId, memberId),
+  )).returning();
+  if (!deleted.length) {
+    res.status(404).json({ error: "Team membership not found." });
+    return;
+  }
+  await writeCommunityAudit(userId, "removed_employee_team", communityId, {
+    resourceType: "team_membership",
+    resourceId: `${teamId}:${memberId}`,
+    targetId: memberId,
+    details: `${memberId} ← team ${teamId}`,
+  });
+  res.json({ ok: true });
+});
+
 router.post("/communities/:communityId/invitations", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
@@ -1108,6 +1540,11 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
   }
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase().slice(0, 320) : "";
   const role = typeof req.body?.role === "string" ? req.body.role.trim().slice(0, 60) : "member";
+  const [community] = await db.select({ plan: communitiesTable.plan })
+    .from(communitiesTable)
+    .where(eq(communitiesTable.id, communityId))
+    .limit(1);
+  const invitationRole = community?.plan === "free_community" ? "member" : role;
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     res.status(400).json({ error: "A valid employee email is required." });
     return;
@@ -1117,14 +1554,28 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     return;
   }
   const rawToken = randomUUID();
-  const [invitation] = await db.insert(workspaceInvitationsTable).values({
-    communityId,
-    email,
-    role,
-    invitedBy: userId,
-    tokenHash: createHash("sha256").update(rawToken).digest("hex"),
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-  }).returning();
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const [existingPending] = await db.select().from(workspaceInvitationsTable).where(and(
+    eq(workspaceInvitationsTable.communityId, communityId),
+    eq(workspaceInvitationsTable.email, email),
+    eq(workspaceInvitationsTable.status, "pending"),
+  ));
+  const [invitation] = existingPending
+    ? await db.update(workspaceInvitationsTable).set({
+      role: invitationRole,
+      invitedBy: userId,
+      tokenHash,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      revokedAt: null,
+    }).where(eq(workspaceInvitationsTable.id, existingPending.id)).returning()
+    : await db.insert(workspaceInvitationsTable).values({
+      communityId,
+      email,
+      role: invitationRole,
+      invitedBy: userId,
+      tokenHash,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    }).returning();
   await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
   res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken });
 });
@@ -1632,6 +2083,31 @@ router.patch("/communities/:communityId/categories/:categoryId", requireAuth, as
   res.json(updated);
 });
 
+router.delete("/communities/:communityId/categories/:categoryId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const categoryId = Number(param(req, "categoryId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(categoryId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "You cannot delete categories in this community." });
+    return;
+  }
+  const [category] = await db.select({ id: categoriesTable.id, name: categoriesTable.name })
+    .from(categoriesTable)
+    .where(and(eq(categoriesTable.id, categoryId), eq(categoriesTable.communityId, communityId)));
+  if (!category) {
+    res.status(404).json({ error: "Category not found." });
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await tx.update(channelsTable)
+      .set({ categoryId: null })
+      .where(and(eq(channelsTable.communityId, communityId), eq(channelsTable.categoryId, categoryId)));
+    await tx.delete(categoriesTable).where(eq(categoriesTable.id, categoryId));
+  });
+  await writeCommunityAudit(userId, "deleted_community_category", communityId, category.name);
+  res.json({ ok: true, categoryId });
+});
+
 router.patch("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
@@ -1658,7 +2134,6 @@ router.patch("/communities/:communityId", requireAuth, async (req: Authenticated
     ...(businessHours === undefined ? {} : { businessHours }),
     ...(contactEmail === undefined ? {} : { contactEmail }),
     ...(contactPhone === undefined ? {} : { contactPhone }),
-    onboardingStep: 9,
   }).where(eq(communitiesTable.id, communityId)).returning();
   if (!updated) {
     res.status(404).json({ error: "Community not found." });
@@ -1705,6 +2180,86 @@ router.post("/communities/:communityId/channels", requireAuth, async (req: Authe
   await db.insert(channelMembersTable).values({ channelId: channel.id, userId, role: "owner" });
   await writeCommunityAudit(userId, "created_community_channel", communityId, channel.name);
   res.status(201).json({ ...channel, passwordHash: undefined });
+});
+
+router.delete("/communities/:communityId/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const channelId = Number(param(req, "channelId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(channelId)) {
+    res.status(403).json({ error: "You cannot delete channels in this community." });
+    return;
+  }
+  const deletion = await db.transaction(async (tx) => {
+    const [channel] = await tx
+      .select({ id: channelsTable.id, name: channelsTable.name })
+      .from(channelsTable)
+      .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
+      .for("update");
+    const [actorMembership] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, channelId),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+    const actorCanManageChannel = await hasPermission(
+      userId,
+      "manage_channel",
+      { communityId, channelId },
+      tx,
+      true,
+    );
+    if (actorMembership?.role !== "owner" && !actorCanManageChannel) {
+      return { outcome: "forbidden" } as const;
+    }
+    if (!channel) return { outcome: "not_found" } as const;
+    const requestIds = await tx
+      .select({ id: channelJoinRequestsTable.id })
+      .from(channelJoinRequestsTable)
+      .where(eq(channelJoinRequestsTable.channelId, channelId));
+    await tx.delete(notificationsTable).where(and(
+      eq(notificationsTable.entityType, "channel"),
+      eq(notificationsTable.entityId, String(channelId)),
+    ));
+    if (requestIds.length) {
+      await tx.delete(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "channel_join_request"),
+        inArray(notificationsTable.entityId, requestIds.map(({ id }) => String(id))),
+      ));
+    }
+    await tx.delete(channelJoinRequestsTable).where(eq(channelJoinRequestsTable.channelId, channelId));
+    await tx.delete(channelInvitesTable).where(eq(channelInvitesTable.channelId, channelId));
+    await tx.delete(channelBansTable).where(eq(channelBansTable.channelId, channelId));
+    const channelMessages = await tx.select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(eq(messagesTable.channelId, channelId));
+    if (channelMessages.length) {
+      await tx.delete(messageAttachmentsTable).where(inArray(messageAttachmentsTable.messageId, channelMessages.map((message) => message.id)));
+      await tx.delete(messageReactionsTable).where(inArray(messageReactionsTable.messageId, channelMessages.map((message) => message.id)));
+    }
+    await tx.delete(channelMembersTable).where(eq(channelMembersTable.channelId, channelId));
+    await tx.delete(messagesTable).where(eq(messagesTable.channelId, channelId));
+    const [deleted] = await tx
+      .delete(channelsTable)
+      .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
+      .returning({ id: channelsTable.id });
+    return deleted
+      ? { outcome: "deleted", channel } as const
+      : { outcome: "not_found" } as const;
+  });
+  if (deletion.outcome === "forbidden") {
+    res.status(403).json({ error: "You cannot delete channels in this community." });
+    return;
+  }
+  if (deletion.outcome === "not_found") {
+    res.status(404).json({ error: "Channel not found." });
+    return;
+  }
+  wsHub.broadcastChannelRemoved(channelId);
+  await writeCommunityAudit(userId, "deleted_community_channel", communityId, deletion.channel.name);
+  res.json({ ok: true, channelId });
 });
 
 router.patch("/communities/:communityId/members/:memberId/role", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1849,6 +2404,26 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
   }
   await writeCommunityAudit(userId, isScheduled ? "scheduled_community_announcement" : "published_community_announcement", communityId, title);
   res.status(201).json(announcement);
+});
+
+router.delete("/communities/:communityId/announcements/:announcementId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const announcementId = Number(param(req, "announcementId"));
+  if (!Number.isInteger(communityId) || !Number.isInteger(announcementId) || !(await communityPermission(userId, communityId, "manage_community"))) {
+    res.status(403).json({ error: "You cannot delete announcements in this community." });
+    return;
+  }
+  const [announcement] = await db.select({ id: serverAnnouncementsTable.id, title: serverAnnouncementsTable.title })
+    .from(serverAnnouncementsTable)
+    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  if (!announcement) {
+    res.status(404).json({ error: "Announcement not found." });
+    return;
+  }
+  await db.delete(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.id, announcementId));
+  await writeCommunityAudit(userId, "deleted_community_announcement", communityId, announcement.title);
+  res.json({ ok: true, announcementId });
 });
 
 router.post("/communities/:communityId/announcements/:announcementId/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
