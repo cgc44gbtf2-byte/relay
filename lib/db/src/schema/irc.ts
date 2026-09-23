@@ -44,6 +44,7 @@ export const communitiesTable = pgTable(
     description: text("description").notNull().default(""),
     rules: text("rules").notNull().default(""),
     businessType: text("business_type").notNull().default("service_business"),
+    plan: text("plan").notNull().default("paid_workspace"),
     services: text("services").notNull().default(""),
     serviceArea: text("service_area").notNull().default(""),
     businessHours: text("business_hours").notNull().default(""),
@@ -55,7 +56,12 @@ export const communitiesTable = pgTable(
     ownerId: text("owner_id").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("irc_communities_slug_idx").on(table.slug)],
+  (table) => [
+    uniqueIndex("irc_communities_slug_idx").on(table.slug),
+    uniqueIndex("irc_communities_free_owner_idx")
+      .on(table.ownerId)
+      .where(sql`${table.plan} = 'free_community'`),
+  ],
 );
 
 export const permissionDefinitionsTable = pgTable(
@@ -440,16 +446,17 @@ export const messagesTable = pgTable("irc_messages", {
   senderId: text("sender_id").notNull().references(() => usersTable.clerkId),
   recipientId: text("recipient_id").references(() => usersTable.clerkId),
   threadKey: text("thread_key"),
+  replyToId: uuid("reply_to_id"),
   body: text("body").notNull(),
   kind: text("kind").notNull().default("message"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   deletedBy: text("deleted_by").references(() => usersTable.clerkId),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt),
+  index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt, table.id),
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
   index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
-  index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt),
+  index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt, table.id),
 ]);
 
 export const messageAttachmentsTable = pgTable("irc_message_attachments", {
