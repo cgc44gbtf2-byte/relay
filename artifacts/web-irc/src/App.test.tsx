@@ -32,6 +32,7 @@ type Channel = {
   ownerId: string;
   categoryId: number | null;
   communityId: number | null;
+  communityName?: string | null;
   isPrivate: boolean;
   isInviteOnly: boolean;
   joined: boolean;
@@ -414,8 +415,30 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(screen.queryByTestId("select-public-space")).toBeNull());
     expect(fetch).toHaveBeenCalledWith("/api/channels/1/public-space",
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ communityId: 41 }) }));
-    expect(screen.getByText("Mira's community")).toBeTruthy();
+    expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Mira's community");
     expect(screen.getByText("stale history")).toBeTruthy();
+  });
+
+  it("shows the current workspace as rooms change and distinguishes direct messages", async () => {
+    await renderChat({
+      missingRequest: "send",
+      fallbackChannels: [
+        { ...room(2, "#fallback-room"), communityId: 12, communityName: "Northwind" },
+        { ...room(3, "#support"), communityId: 13, communityName: "Bluebird" },
+      ],
+    });
+    expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Public network, outside a workspace");
+
+    const editor = screen.getByPlaceholderText("message #deleted-room");
+    fireEvent.change(editor, { target: { value: "hello" } });
+    fireEvent.submit(editor.closest("form")!);
+    await waitFor(() => expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Northwind"));
+
+    fireEvent.click(screen.getByRole("button", { name: /support/i }));
+    await waitFor(() => expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Bluebird"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Message Orion" }));
+    expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Direct message outside a workspace");
   });
 
   it.each([
