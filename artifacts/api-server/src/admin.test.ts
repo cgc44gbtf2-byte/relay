@@ -5242,4 +5242,87 @@ describe("admin access controls", () => {
       ]);
     }
   });
+
+  test("manages notifications only for their recipient and retains cleared deadline tombstones", async () => {
+    await apiRequest(firstSession, "/me");
+    await apiRequest(secondSession, "/me");
+    const unique = randomUUID();
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO irc_notifications (user_id, type, category, body, entity_type, entity_id)
+       VALUES ($1, 'task_deadline', 'task_deadline', $2, 'workspace_task', $3),
+              ($1, 'general', 'general', $4, NULL, NULL),
+              ($5, 'general', 'general', $6, NULL, NULL)
+       RETURNING id`,
+      [firstSession.userId, `Deadline ${unique}`, `test-${unique}`, `Other ${unique}`, secondSession.userId, `Keep ${unique}`],
+    );
+    const [deadlineId, otherId, otherUserId] = inserted.rows.map((row) => row.id);
+    let directMessageId: string | undefined;
+    let directNoticeId: number | undefined;
+    try {
+      const directMessage = await pool.query<{ id: string }>(
+        "INSERT INTO irc_messages (sender_id, recipient_id, thread_key, body) VALUES ($1, $2, $3, $4) RETURNING id",
+        [secondSession.userId, firstSession.userId, `notification-test:${unique}`, `Private details ${unique}`],
+      );
+      directMessageId = directMessage.rows[0].id;
+      const directNotice = await pool.query<{ id: number }>(
+        `INSERT INTO irc_notifications (user_id, type, category, body, entity_type, entity_id)
+         VALUES ($1, 'direct_message', 'direct_message', 'You have a new direct message.', 'message', $2)
+         RETURNING id`,
+        [firstSession.userId, directMessageId],
+      );
+      directNoticeId = directNotice.rows[0].id;
+      const directDetail = await apiRequest(firstSession, `/notifications/${directNoticeId}/detail`);
+      assert.equal(directDetail.status, 200, JSON.stringify(directDetail));
+      assert.equal((directDetail.body as { message: { body: string } }).message.body, `Private details ${unique}`);
+      assert.equal((await apiRequest(secondSession, `/messages/${directMessageId}`, { method: "DELETE" })).status, 200);
+      const deletedMessageDetail = await apiRequest(firstSession, `/notifications/${directNoticeId}/detail`);
+      assert.equal((deletedMessageDetail.body as { message: { body: string } }).message.body, "[message deleted]");
+
+      for (const [path, init] of [
+        [`/notifications/${deadlineId}/detail`, undefined],
+        [`/notifications/${deadlineId}/archive`, { method: "POST" }],
+        [`/notifications/${deadlineId}/restore`, { method: "POST" }],
+        [`/notifications/${deadlineId}`, { method: "DELETE" }],
+      ] as const) {
+        const response = await apiRequest(secondSession, path, init);
+        assert.equal(response.status, 404, JSON.stringify(response));
+      }
+      const detail = await apiRequest(firstSession, `/notifications/${deadlineId}/detail`);
+      assert.equal(detail.status, 200);
+      assert.equal((detail.body as { notification: { body: string } }).notification.body, `Deadline ${unique}`);
+
+      assert.equal((await apiRequest(firstSession, `/notifications/${deadlineId}/archive`, { method: "POST" })).status, 200);
+      const inbox = await apiRequest(firstSession, "/notifications");
+      assert.equal((inbox.body as Array<{ id: number }>).some(({ id }) => id === deadlineId), false);
+      const archived = await apiRequest(firstSession, "/notifications?archived=true");
+      assert.equal((archived.body as Array<{ id: number }>).some(({ id }) => id === deadlineId), true);
+
+      assert.equal((await apiRequest(firstSession, `/notifications/${deadlineId}/restore`, { method: "POST" })).status, 200);
+      assert.equal((await apiRequest(firstSession, "/notifications/read-all", { method: "POST" })).status, 200);
+      const read = await pool.query<{ read_at: Date | null }>("SELECT read_at FROM irc_notifications WHERE id = $1", [deadlineId]);
+      assert.notEqual(read.rows[0]?.read_at, null);
+      const otherUserRead = await pool.query<{ read_at: Date | null }>("SELECT read_at FROM irc_notifications WHERE id = $1", [otherUserId]);
+      assert.equal(otherUserRead.rows[0]?.read_at, null);
+      assert.equal((await apiRequest(firstSession, `/notifications/${otherId}`, { method: "DELETE" })).status, 200);
+      assert.equal((await apiRequest(firstSession, "/notifications/clear", { method: "DELETE" })).status, 200);
+      const cleared = await pool.query<{ body: string; deleted_at: Date | null }>(
+        "SELECT body, deleted_at FROM irc_notifications WHERE id = $1",
+        [deadlineId],
+      );
+      assert.equal(cleared.rows[0]?.body, "");
+      assert.notEqual(cleared.rows[0]?.deleted_at, null);
+      const otherUserNotice = await pool.query<{ body: string; deleted_at: Date | null }>(
+        "SELECT body, deleted_at FROM irc_notifications WHERE id = $1",
+        [otherUserId],
+      );
+      assert.equal(otherUserNotice.rows[0]?.body, `Keep ${unique}`);
+      assert.equal(otherUserNotice.rows[0]?.deleted_at, null);
+      const afterClear = await apiRequest(firstSession, "/notifications");
+      assert.equal((afterClear.body as Array<{ id: number }>).some(({ id }) => id === deadlineId), false);
+      assert.equal((await apiRequest(firstSession, `/notifications/${deadlineId}/detail`)).status, 404);
+    } finally {
+      await pool.query("DELETE FROM irc_notifications WHERE id = ANY($1::int[])", [[deadlineId, otherId, otherUserId, directNoticeId].filter((id): id is number => id !== undefined)]);
+      if (directMessageId) await pool.query("DELETE FROM irc_messages WHERE id = $1", [directMessageId]);
+    }
+  });
 });

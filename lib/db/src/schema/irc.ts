@@ -569,6 +569,8 @@ export const notificationsTable = pgTable("irc_notifications", {
   entityId: text("entity_id"),
   actionUrl: text("action_url"),
   readAt: timestamp("read_at", { withTimezone: true }),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_notifications_user_created_idx").on(table.userId, table.createdAt),

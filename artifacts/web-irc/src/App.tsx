@@ -49,22 +49,10 @@ import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute 
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { clearTestAccountReturnContext, readTestAccountReturnContext, writeTestAccountReturnContext } from "./test-account-switch";
+import { NotificationCenter, type Notification, type LinkedNotificationMessage } from "./components/notification-center";
 
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
-const notificationCategoryLabels: Record<Notification["category"], string> = {
-  direct_message: "Direct messages",
-  mention: "Mentions",
-  task_assigned: "Tasks assigned",
-  task_updated: "Task updates",
-  task_deadline: "Task deadlines",
-  announcement: "Announcements",
-  document_acknowledgement: "Document acknowledgments",
-  join_request: "Join requests",
-  report: "Reports",
-  administrative_action: "Administrative actions",
-  general: "Other",
-};
 const clerkPubKey = publishableKeyFromHost(
   window.location.hostname,
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
@@ -114,18 +102,6 @@ type ChatMessage = {
 };
 type Member = Profile & { role: string; mutedUntil?: string | null };
 type JoinRequest = { id: number; status: string; createdAt: string; user: Profile };
-type Notification = {
-  id: number;
-  type: string;
-  category: "direct_message" | "mention" | "task_assigned" | "task_updated" | "task_deadline" | "announcement" | "document_acknowledgement" | "join_request" | "report" | "administrative_action" | "general";
-  body: string;
-  communityId?: number | null;
-  entityType?: string | null;
-  entityId?: string | null;
-  actionUrl?: string | null;
-  readAt?: string | null;
-  createdAt: string;
-};
 type AppConfig = {
   siteName: string;
   landingEyebrow: string;
@@ -493,7 +469,7 @@ function ChatApp() {
   const [userSearch, setUserSearch] = useState("");
   const [userResults, setUserResults] = useState<Profile[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [notificationFilter, setNotificationFilter] = useState<"all" | Notification["category"]>("all");
+  const [notificationRevision, setNotificationRevision] = useState(0);
   const [panel, setPanel] = useState<"notifications" | "profile" | "search" | null>(null);
   const [showMembers, setShowMembers] = useState(true);
   const [newChannelOpen, setNewChannelOpen] = useState(false);
@@ -597,9 +573,6 @@ function ChatApp() {
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
   const unread = notifications.filter((notification) => !notification.readAt).length;
   useEffect(() => { setMoveSpaceOpen(false); }, [currentChannelId]);
-  const visibleNotifications = notificationFilter === "all"
-    ? notifications
-    : notifications.filter((notification) => notification.category === notificationFilter);
 
   useEffect(() => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) {
@@ -677,10 +650,15 @@ function ChatApp() {
         connectedSocket.onmessage = (event) => {
         try {
            if (cancelled) return;
-           const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
+           const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; notificationIds?: number[]; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
            if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => upsertMessage(items, data.message!));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
+           if (data.type === "notifications_read_all" && data.notificationIds) setNotifications((items) => items.map((item) => data.notificationIds!.includes(item.id) ? { ...item, readAt: data.readAt ?? new Date().toISOString() } : item));
+           if (data.type === "notification_archived" || data.type === "notification_deleted") setNotifications((items) => items.filter((item) => item.id !== data.notificationId));
+           if (data.type === "notifications_cleared" && data.notificationIds) setNotifications((items) => items.filter((item) => !data.notificationIds!.includes(item.id)));
+           if (data.type === "notification_restored") void api<Notification[]>("/notifications").then(setNotifications).catch(() => undefined);
+           if (["notification_archived", "notification_deleted", "notification_restored", "notifications_cleared"].includes(data.type)) setNotificationRevision((value) => value + 1);
           if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
            if (data.type === "channel_list_changed") void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
@@ -976,19 +954,14 @@ function ChatApp() {
     setSearchResults(await api<ChatMessage[]>(`/search/messages?q=${encodeURIComponent(search)}`));
     setPanel("search");
   };
-  const markRead = async (notice: Notification) => {
-    if (!notice.readAt) {
-      try {
-        await api(`/notifications/${notice.id}/read`, { method: "POST", body: "{}" });
-        setNotifications((items) => items.map((item) => item.id === notice.id ? { ...item, readAt: new Date().toISOString() } : item));
-      } catch {
-        // Opening the notification should still work if marking it read fails.
-      }
+  const openNotificationMessage = (message: LinkedNotificationMessage) => {
+    if (message.channelId) {
+      setActiveDm(null);
+      setCurrentChannelId(message.channelId);
+    } else if (message.sender) {
+      setActiveDm({ ...message.sender, status: "offline" });
     }
     setPanel(null);
-    if (notice.actionUrl?.startsWith("/")) {
-      setLocation(notice.actionUrl);
-    }
   };
   const editTopic = async () => {
     if (!currentChannel || !["owner", "moderator"].includes(actorRole ?? "")) return;
@@ -1254,7 +1227,7 @@ function ChatApp() {
         </form>
       </Overlay>}
 
-      {panel === "notifications" && <Overlay title="Business notifications" onClose={() => setPanel(null)}><div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", "direct_message", "mention", "task_assigned", "task_updated", "task_deadline", "announcement", "document_acknowledgement", "join_request", "report", "administrative_action"] as const).map((category) => <button key={category} onClick={() => setNotificationFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${notificationFilter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{category === "all" ? "All" : notificationCategoryLabels[category]}</button>)}</div><div className="space-y-2">{visibleNotifications.length === 0 ? <p className="font-mono text-xs text-muted-foreground">You are all caught up.</p> : visibleNotifications.map((notice) => <button key={notice.id} onClick={() => void markRead(notice)} className={`flex w-full items-start gap-3 rounded-lg p-3 text-left ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{notificationCategoryLabels[notice.category]}</span><span className="block font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{timeLabel(notice.createdAt)} {notice.readAt ? "· read" : "· new"}{notice.actionUrl ? " · open" : ""}</span></span></button>)}</div></Overlay>}
+      {panel === "notifications" && <NotificationCenter notifications={notifications} setNotifications={setNotifications} request={api} revision={notificationRevision} onClose={() => setPanel(null)} onNavigate={(url) => { setPanel(null); setLocation(url); }} onOpenMessage={openNotificationMessage} />}
        {organizeChannelOpen && currentChannel && <Overlay title={`Organize ${currentChannel.name}`} onClose={() => { if (!organizeWorking) setOrganizeChannelOpen(false); }}><form onSubmit={moveCurrentChannel} className="space-y-4"><p className="text-xs text-muted-foreground">Move this channel to a category without affecting its members or messages.</p><label className="block font-mono text-xs">category<select value={organizeCategoryId} onChange={(event) => setOrganizeCategoryId(event.target.value)} className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3"><option value="">uncategorized</option>{categories.filter((category) => category.communityId === currentChannel.communityId).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{organizeError && <p role="alert" className="text-xs text-destructive">{organizeError}</p>}<div className="flex justify-end gap-2"><button type="button" disabled={organizeWorking} onClick={() => setOrganizeChannelOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button><button disabled={organizeWorking || organizeCategoryId === (currentChannel.categoryId === null ? "" : String(currentChannel.categoryId))} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{organizeWorking ? "moving…" : "save category"}</button></div></form></Overlay>}
         {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a><a href={`${basePath}/community-upgrades`} data-testid="link-community-upgrades" className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10">request public community</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}

@@ -218,6 +218,10 @@ function installApi({
     if (url === "/api/notifications" && method === "GET") {
       return notificationsFailure ? jsonResponse({ error: "notifications unavailable" }, 500) : jsonResponse(notifications);
     }
+    if (url.match(/^\/api\/notifications\/\d+\/detail$/) && method === "GET") {
+      const notice = notifications.find((item) => url === `/api/notifications/${item.id}/detail`);
+      return notice ? jsonResponse({ notification: notice, message: null }) : jsonResponse({ error: "Not found" }, 404);
+    }
     if (url.match(/^\/api\/notifications\/\d+\/read$/) && method === "POST") return jsonResponse({ ok: true });
     if (url === "/api/storage/uploads/request-url" && method === "POST") {
       return jsonResponse({
@@ -767,6 +771,8 @@ describe("deleted room recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     fireEvent.click(screen.getByRole("button", { name: /Open the workspace task/ }));
 
+    expect(screen.getByTestId("text-notification-full-content").textContent).toBe("Open the workspace task");
+    fireEvent.click(screen.getByTestId("button-open-notification-context"));
     await waitFor(() => expect(window.location.pathname).toBe("/communities/1"));
     expect(screen.queryByText("Open the workspace task")).toBeNull();
   });

@@ -167,7 +167,7 @@ async function canReviewJoinRequests(channelId: number, userId: string): Promise
   return Boolean(member && ["owner", "moderator"].includes(member.role));
 }
 
-async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null): Promise<void> {
+async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null, messageId: string): Promise<void> {
   const names = [...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase());
   if (names.length === 0) return;
   const mentioned = await db
@@ -180,8 +180,8 @@ async function notifyMentionedUsers(body: string, senderId: string, channelId: n
     type: "mention",
     category: "mention",
     body: channelId ? "You were mentioned in a channel." : "You were mentioned.",
-    entityType: channelId ? "channel" : null,
-    entityId: channelId,
+    entityType: "message",
+    entityId: messageId,
   });
 }
 
@@ -960,7 +960,7 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
   const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, replyToId, body }).returning();
   const view = await messageView(message);
   res.status(201).json(view);
-  void notifyMentionedUsers(body, userId, channel.id).catch((error) => {
+  void notifyMentionedUsers(body, userId, channel.id, message.id).catch((error) => {
     logger.warn({ err: error, messageId: message.id }, "Message mention notifications failed.");
   });
   wsHub.broadcastChannel(channel.id, { type: "message", message: view });
@@ -1698,8 +1698,45 @@ router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, re
 router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   await ensureTaskDeadlineNotifications(userId);
-  const rows = await db.select().from(notificationsTable).where(eq(notificationsTable.userId, userId)).orderBy(desc(notificationsTable.createdAt)).limit(100);
+  const archived = req.query.archived === "true";
+  const rows = await db.select().from(notificationsTable).where(and(
+    eq(notificationsTable.userId, userId),
+    isNull(notificationsTable.deletedAt),
+    archived ? sql`${notificationsTable.archivedAt} IS NOT NULL` : isNull(notificationsTable.archivedAt),
+  )).orderBy(desc(notificationsTable.createdAt)).limit(100);
   res.json(rows.map((row) => ({ ...row, category: categoryForNotification(row.type, row.category) })));
+});
+
+router.get("/notifications/:id/detail", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const notificationId = Number(param(req, "id"));
+  if (!Number.isSafeInteger(notificationId) || notificationId < 1) {
+    res.status(400).json({ error: "Invalid notification ID." });
+    return;
+  }
+  const userId = getUserId(req);
+  const [notice] = await db.select().from(notificationsTable).where(and(
+    eq(notificationsTable.id, notificationId),
+    eq(notificationsTable.userId, userId),
+    isNull(notificationsTable.deletedAt),
+  )).limit(1);
+  if (!notice) {
+    res.status(404).json({ error: "Notification not found." });
+    return;
+  }
+  let message: Awaited<ReturnType<typeof messageView>> | null = null;
+  if (notice.entityType === "message" && notice.entityId) {
+    const [row] = await db.select().from(messagesTable).where(eq(messagesTable.id, notice.entityId)).limit(1);
+    const channel = row?.channelId
+      ? await db.query.channelsTable.findFirst({ where: eq(channelsTable.id, row.channelId) })
+      : null;
+    if (row && (
+      (row.channelId === null && (row.senderId === userId || row.recipientId === userId))
+      || (channel && await canReadChannel(channel, userId))
+    )) {
+      message = await messageView(row, userId);
+    }
+  }
+  res.json({ notification: { ...notice, category: categoryForNotification(notice.type, notice.category) }, message });
 });
 
 router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1749,11 +1786,15 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
 router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const notificationId = Number(param(req, "id"));
+  if (!Number.isSafeInteger(notificationId) || notificationId < 1) {
+    res.status(400).json({ error: "Invalid notification ID." });
+    return;
+  }
   const readAt = new Date();
   const [updated] = await db
     .update(notificationsTable)
     .set({ readAt })
-    .where(and(eq(notificationsTable.id, notificationId), eq(notificationsTable.userId, userId)))
+    .where(and(eq(notificationsTable.id, notificationId), eq(notificationsTable.userId, userId), isNull(notificationsTable.deletedAt)))
     .returning({ id: notificationsTable.id, readAt: notificationsTable.readAt });
   if (updated) {
     wsHub.broadcastUser(userId, {
@@ -1762,6 +1803,73 @@ router.post("/notifications/:id/read", requireAuth, async (req: AuthenticatedReq
       readAt: updated.readAt,
     });
   }
+  res.json({ ok: true });
+});
+
+router.post("/notifications/read-all", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const readAt = new Date();
+  const updated = await db.update(notificationsTable).set({ readAt }).where(and(
+    eq(notificationsTable.userId, userId),
+    isNull(notificationsTable.archivedAt),
+    isNull(notificationsTable.deletedAt),
+    isNull(notificationsTable.readAt),
+  )).returning({ id: notificationsTable.id });
+  wsHub.broadcastUser(userId, { type: "notifications_read_all", notificationIds: updated.map((item) => item.id), readAt });
+  res.json({ updated: updated.length, readAt });
+});
+
+router.post("/notifications/:id/archive", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const id = Number(param(req, "id"));
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ error: "Invalid notification ID." });
+    return;
+  }
+  const userId = getUserId(req);
+  const [updated] = await db.update(notificationsTable).set({ archivedAt: new Date() }).where(and(
+    eq(notificationsTable.id, id), eq(notificationsTable.userId, userId), isNull(notificationsTable.deletedAt),
+  )).returning({ id: notificationsTable.id });
+  if (!updated) { res.status(404).json({ error: "Notification not found." }); return; }
+  wsHub.broadcastUser(userId, { type: "notification_archived", notificationId: id });
+  res.json({ ok: true });
+});
+
+router.post("/notifications/:id/restore", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const id = Number(param(req, "id"));
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ error: "Invalid notification ID." });
+    return;
+  }
+  const userId = getUserId(req);
+  const [updated] = await db.update(notificationsTable).set({ archivedAt: null }).where(and(
+    eq(notificationsTable.id, id), eq(notificationsTable.userId, userId), isNull(notificationsTable.deletedAt),
+  )).returning({ id: notificationsTable.id });
+  if (!updated) { res.status(404).json({ error: "Notification not found." }); return; }
+  wsHub.broadcastUser(userId, { type: "notification_restored", notificationId: id });
+  res.json({ ok: true });
+});
+
+router.delete("/notifications/clear", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const deleted = await db.update(notificationsTable).set({ deletedAt: new Date(), body: "", actionUrl: null })
+    .where(and(eq(notificationsTable.userId, userId), isNull(notificationsTable.archivedAt), isNull(notificationsTable.deletedAt)))
+    .returning({ id: notificationsTable.id });
+  wsHub.broadcastUser(userId, { type: "notifications_cleared", notificationIds: deleted.map((item) => item.id) });
+  res.json({ deleted: deleted.length });
+});
+
+router.delete("/notifications/:id", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const id = Number(param(req, "id"));
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ error: "Invalid notification ID." });
+    return;
+  }
+  const userId = getUserId(req);
+  const [deleted] = await db.update(notificationsTable).set({ deletedAt: new Date(), body: "", actionUrl: null }).where(and(
+    eq(notificationsTable.id, id), eq(notificationsTable.userId, userId), isNull(notificationsTable.deletedAt),
+  )).returning({ id: notificationsTable.id });
+  if (!deleted) { res.status(404).json({ error: "Notification not found." }); return; }
+  wsHub.broadcastUser(userId, { type: "notification_deleted", notificationId: id });
   res.json({ ok: true });
 });
 
