@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -254,7 +254,7 @@ describe("deleted room recovery", () => {
     });
 
     expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
-    expect(screen.getByText("stale history")).toBeTruthy();
+    expect(await screen.findByText("stale history")).toBeTruthy();
   });
 
   it("shows a retry state when core channel bootstrap fails", async () => {
@@ -270,6 +270,49 @@ describe("deleted room recovery", () => {
     fireEvent.click(retry);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
+  });
+
+  it("does not let an older user search overwrite newer results", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+    });
+    const baseFetch = vi.mocked(fetch);
+    let resolveOlder!: (response: Response) => void;
+    let resolveNewer!: (response: Response) => void;
+    const olderResponse = new Promise<Response>((resolve) => { resolveOlder = resolve; });
+    const newerResponse = new Promise<Response>((resolve) => { resolveNewer = resolve; });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/users/search?q=al") return olderResponse;
+      if (url === "/api/users/search?q=alex") return newerResponse;
+      return baseFetch(input, init);
+    }));
+
+    const search = screen.getByPlaceholderText("find a person");
+    fireEvent.change(search, { target: { value: "al" } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/users/search?q=al", expect.anything()));
+    fireEvent.change(search, { target: { value: "alex" } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/users/search?q=alex", expect.anything()));
+
+    await act(async () => {
+      resolveNewer(new Response(JSON.stringify([{ ...profile, id: "user-alex", displayName: "Alex" }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      await newerResponse;
+    });
+    expect(await screen.findByText("Alex")).toBeTruthy();
+
+    await act(async () => {
+      resolveOlder(new Response(JSON.stringify([{ ...profile, id: "user-albert", displayName: "Albert" }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      await olderResponse;
+    });
+    expect(screen.getByText("Alex")).toBeTruthy();
+    expect(screen.queryByText("Albert")).toBeNull();
   });
 
   it.each([
