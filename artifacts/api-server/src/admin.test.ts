@@ -4202,6 +4202,126 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps channel and direct messages committed when notifications fail", async () => {
+    const senderSession = await createTestSession("notify_sender");
+    const recipientSession = await createTestSession("notify_recipient");
+    const channelIds: number[] = [];
+    const messageIds: string[] = [];
+    let communityId: number | null = null;
+    const triggerName = `fail_message_notification_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+
+    try {
+      const [senderProfile, recipientProfile] = await Promise.all([
+        apiRequest(senderSession, "/me"),
+        apiRequest(recipientSession, "/me"),
+      ]);
+      assert.equal(senderProfile.status, 200, JSON.stringify(senderProfile));
+      assert.equal(recipientProfile.status, 200, JSON.stringify(recipientProfile));
+      assert.ok(recipientProfile.body && typeof recipientProfile.body === "object");
+      const recipientUsername = (recipientProfile.body as { username?: unknown }).username;
+      assert.equal(typeof recipientUsername, "string");
+
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, is_private)
+         VALUES ($1, $2, $3, true)
+         RETURNING id`,
+        [
+          `Notification failure ${randomUUID().slice(0, 8)}`,
+          `notification-failure-${randomUUID()}`,
+          senderSession.userId,
+        ],
+      );
+      communityId = community.rows[0]?.id ?? null;
+      assert.equal(typeof communityId, "number");
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, senderSession.userId, recipientSession.userId],
+      );
+
+      const channelResponse = await apiRequest(senderSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `notify-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Notification failure boundary",
+        }),
+      });
+      assert.equal(channelResponse.status, 201, JSON.stringify(channelResponse));
+      assert.ok(channelResponse.body && typeof channelResponse.body === "object");
+      const channelId = (channelResponse.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [channelId, recipientSession.userId],
+      );
+
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           RAISE EXCEPTION 'forced notification failure';
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_notifications
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+
+      const channelBody = `Channel delivery survives @${recipientUsername}`;
+      const directBody = "Direct delivery survives notification failure";
+      const [channelMessage, directMessage] = await Promise.all([
+        apiRequest(senderSession, `/channels/${channelId}/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: channelBody }),
+        }),
+        apiRequest(senderSession, `/dm/${recipientSession.userId}/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: directBody }),
+        }),
+      ]);
+      for (const response of [channelMessage, directMessage]) {
+        assert.equal(response.status, 201, JSON.stringify(response));
+        assert.ok(response.body && typeof response.body === "object");
+        const messageId = (response.body as { id?: unknown }).id;
+        assert.equal(typeof messageId, "string");
+        messageIds.push(messageId as string);
+      }
+
+      const committedMessages = await pool.query<{ body: string }>(
+        `SELECT body
+         FROM irc_messages
+         WHERE id = ANY($1::uuid[])`,
+        [messageIds],
+      );
+      assert.deepEqual(
+        committedMessages.rows.map((row) => row.body).sort(),
+        [channelBody, directBody].sort(),
+      );
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON irc_notifications`);
+      await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
+      if (messageIds.length) {
+        await pool.query("DELETE FROM irc_messages WHERE id = ANY($1::uuid[])", [messageIds]);
+      }
+      await removeTestChannels(channelIds, [
+        senderSession.userId,
+        recipientSession.userId,
+      ]);
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_community_members WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("keeps room and direct-message attachments behind message access", async () => {
     const ownerSession = await createTestSession("attachment_owner");
     const memberSession = await createTestSession("attachment_member");

@@ -327,6 +327,21 @@ describe("deleted room recovery", () => {
     expect(await screen.findByText("stale history")).toBeTruthy();
   });
 
+  it("keeps a sent message visible when notifications are unavailable", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notificationsFailure: true,
+    });
+
+    const editor = screen.getByPlaceholderText("message #deleted-room");
+    fireEvent.change(editor, { target: { value: "still delivered" } });
+    fireEvent.submit(editor.closest("form")!);
+
+    expect(await screen.findByText("sent")).toBeTruthy();
+    expect((editor as HTMLTextAreaElement).value).toBe("");
+  });
+
   it("shows a retry state when core channel bootstrap fails", async () => {
     installApi({
       missingRequest: "event",
