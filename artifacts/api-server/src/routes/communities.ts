@@ -975,8 +975,12 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
   const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 160) : "";
   const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 10000) : "";
   const assignedTo = typeof req.body?.assignedTo === "string" && req.body.assignedTo ? req.body.assignedTo : null;
-  const departmentId = req.body?.departmentId ? Number(req.body.departmentId) : null;
-  const locationId = req.body?.locationId ? Number(req.body.locationId) : null;
+  const departmentId = req.body?.departmentId === undefined || req.body?.departmentId === null || req.body?.departmentId === ""
+    ? null
+    : Number(req.body.departmentId);
+  const locationId = req.body?.locationId === undefined || req.body?.locationId === null || req.body?.locationId === ""
+    ? null
+    : Number(req.body.locationId);
   const priority = typeof req.body?.priority === "string" ? req.body.priority : "medium";
   const dueDate = req.body?.dueDate ? new Date(req.body.dueDate) : null;
   if (!title) {
@@ -985,6 +989,34 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
   }
   if (!["low", "medium", "high", "urgent"].includes(priority) || (dueDate && Number.isNaN(dueDate.getTime()))) {
     res.status(400).json({ error: "Invalid task priority or due date." });
+    return;
+  }
+  if (
+    (departmentId !== null && (!Number.isSafeInteger(departmentId) || departmentId <= 0))
+    || (locationId !== null && (!Number.isSafeInteger(locationId) || locationId <= 0))
+  ) {
+    res.status(400).json({ error: "Task organization assignments must use valid IDs." });
+    return;
+  }
+  const [departments, locations] = await Promise.all([
+    departmentId === null
+      ? Promise.resolve([])
+      : db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+        eq(departmentsTable.id, departmentId),
+        eq(departmentsTable.communityId, communityId),
+      )),
+    locationId === null
+      ? Promise.resolve([])
+      : db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+        eq(locationsTable.id, locationId),
+        eq(locationsTable.communityId, communityId),
+      )),
+  ]);
+  if (
+    (departmentId !== null && departments.length === 0)
+    || (locationId !== null && locations.length === 0)
+  ) {
+    res.status(400).json({ error: "Task organization assignments must belong to this workspace." });
     return;
   }
   if (assignedTo) {

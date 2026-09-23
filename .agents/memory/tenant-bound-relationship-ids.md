@@ -8,3 +8,5 @@ Whenever persisted data carries IDs for workspace-owned relationships, validate 
 **Why:** Validating only at creation is insufficient because legacy, imported, administrative, or previously corrupted rows may contain IDs from another tenant.
 
 **How to apply:** Scope relational lookups by both resource ID and workspace ID before any mutation. Fail atomically rather than silently applying only the valid subset.
+
+For composite self-references such as `(parent_id, workspace_id)`, do not use a generic `ON DELETE SET NULL` when the workspace column is non-null: PostgreSQL will try to null every referencing column. Use restrictive deletion unless a safe, explicitly modeled replacement behavior exists.

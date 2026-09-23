@@ -6,6 +6,7 @@ import {
   communitiesTable,
   communityMembersTable,
   db,
+  documentFoldersTable,
   documentVersionsTable,
   pool,
   usersTable,
@@ -222,6 +223,74 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       );
     } finally {
       await db.delete(businessDocumentsTable).where(eq(businessDocumentsTable.id, document.id));
+    }
+  });
+
+  test("document folder parents cannot cross workspaces or leave dangling children", async () => {
+    const [foreignCommunity] = await db.insert(communitiesTable).values({
+      name: `Foreign folders ${suffix}`,
+      slug: `foreign-folders-${suffix}`,
+      ownerId: ids.owner,
+      plan: "paid_workspace",
+    }).returning({ id: communitiesTable.id });
+    let homeParentId: number | undefined;
+    let homeChildId: number | undefined;
+    try {
+      const [foreignParent] = await db.insert(documentFoldersTable).values({
+        communityId: foreignCommunity.id,
+        name: "Foreign parent",
+        createdBy: ids.owner,
+      }).returning({ id: documentFoldersTable.id });
+      await assert.rejects(
+        () => db.insert(documentFoldersTable).values({
+          communityId,
+          parentId: foreignParent.id,
+          name: "Cross-workspace child",
+          createdBy: ids.owner,
+        }),
+        (error: unknown) => {
+          const code = typeof error === "object" && error !== null && "cause" in error
+            ? (error as { cause?: { code?: unknown } }).cause?.code
+            : undefined;
+          return code === "23503";
+        },
+      );
+
+      const [homeParent] = await db.insert(documentFoldersTable).values({
+        communityId,
+        name: "Home parent",
+        createdBy: ids.owner,
+      }).returning({ id: documentFoldersTable.id });
+      homeParentId = homeParent.id;
+      const [homeChild] = await db.insert(documentFoldersTable).values({
+        communityId,
+        parentId: homeParent.id,
+        name: "Home child",
+        createdBy: ids.owner,
+      }).returning({ id: documentFoldersTable.id });
+      homeChildId = homeChild.id;
+      await assert.rejects(
+        () => db.delete(documentFoldersTable).where(eq(documentFoldersTable.id, homeParent.id)),
+        (error: unknown) => {
+          const code = typeof error === "object" && error !== null && "cause" in error
+            ? (error as { cause?: { code?: unknown } }).cause?.code
+            : undefined;
+          return code === "23503";
+        },
+      );
+      assert.deepEqual(
+        await db.select({ parentId: documentFoldersTable.parentId }).from(documentFoldersTable)
+          .where(eq(documentFoldersTable.id, homeChild.id)),
+        [{ parentId: homeParent.id }],
+      );
+    } finally {
+      if (homeChildId !== undefined) {
+        await db.delete(documentFoldersTable).where(eq(documentFoldersTable.id, homeChildId));
+      }
+      if (homeParentId !== undefined) {
+        await db.delete(documentFoldersTable).where(eq(documentFoldersTable.id, homeParentId));
+      }
+      await db.delete(communitiesTable).where(eq(communitiesTable.id, foreignCommunity.id));
     }
   });
 

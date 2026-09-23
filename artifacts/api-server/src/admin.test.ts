@@ -3224,6 +3224,81 @@ describe("admin access controls", () => {
     }
   });
 
+  test("prevents tasks from using another workspace's department or location", async () => {
+    const workspaceIds: number[] = [];
+    try {
+      for (const label of ["Task Scope Home", "Task Scope Foreign"]) {
+        const workspace = await pool.query<{ id: number }>(
+          `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+           VALUES ($1, $2, $3, 'paid_workspace', true)
+           RETURNING id`,
+          [label, `task-scope-${randomUUID()}`, adminSession.userId],
+        );
+        const id = workspace.rows[0]?.id;
+        assert.ok(id);
+        workspaceIds.push(id);
+      }
+      const [homeWorkspaceId, foreignWorkspaceId] = workspaceIds;
+      assert.ok(homeWorkspaceId);
+      assert.ok(foreignWorkspaceId);
+      const homeDepartment = await pool.query<{ id: number }>(
+        "INSERT INTO irc_departments (community_id, name) VALUES ($1, 'Home Department') RETURNING id",
+        [homeWorkspaceId],
+      );
+      const homeLocation = await pool.query<{ id: number }>(
+        "INSERT INTO irc_locations (community_id, name) VALUES ($1, 'Home Location') RETURNING id",
+        [homeWorkspaceId],
+      );
+      const foreignDepartment = await pool.query<{ id: number }>(
+        "INSERT INTO irc_departments (community_id, name) VALUES ($1, 'Foreign Department') RETURNING id",
+        [foreignWorkspaceId],
+      );
+      const foreignLocation = await pool.query<{ id: number }>(
+        "INSERT INTO irc_locations (community_id, name) VALUES ($1, 'Foreign Location') RETURNING id",
+        [foreignWorkspaceId],
+      );
+
+      const rejected = await apiRequest(adminSession, `/communities/${homeWorkspaceId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Cross-workspace task",
+          departmentId: foreignDepartment.rows[0]?.id,
+          locationId: foreignLocation.rows[0]?.id,
+        }),
+      });
+      assert.equal(rejected.status, 400, JSON.stringify(rejected));
+      assert.deepEqual(rejected.body, {
+        error: "Task organization assignments must belong to this workspace.",
+      });
+      assert.equal(
+        (await pool.query(
+          "SELECT 1 FROM irc_workspace_tasks WHERE community_id = $1 AND title = 'Cross-workspace task'",
+          [homeWorkspaceId],
+        )).rowCount,
+        0,
+      );
+
+      const accepted = await apiRequest(adminSession, `/communities/${homeWorkspaceId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Workspace-scoped task",
+          departmentId: homeDepartment.rows[0]?.id,
+          locationId: homeLocation.rows[0]?.id,
+        }),
+      });
+      assert.equal(accepted.status, 201, JSON.stringify(accepted));
+    } finally {
+      if (workspaceIds.length) {
+        await pool.query(
+          "DELETE FROM irc_communities WHERE id = ANY($1::int[])",
+          [workspaceIds],
+        );
+      }
+    }
+  });
+
   test("lets organization managers assign employees without crossing workspace boundaries", async () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");

@@ -1,5 +1,6 @@
 import {
   boolean,
+  foreignKey,
   integer,
   pgTable,
   primaryKey,
@@ -252,6 +253,12 @@ export const documentFoldersTable = pgTable("irc_document_folders", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_document_folders_community_idx").on(table.communityId),
+  uniqueIndex("irc_document_folders_id_community_uidx").on(table.id, table.communityId),
+  foreignKey({
+    columns: [table.parentId, table.communityId],
+    foreignColumns: [table.id, table.communityId],
+    name: "irc_document_folders_parent_tenant_fk",
+  }).onDelete("restrict"),
 ]);
 
 export const businessDocumentsTable = pgTable("irc_business_documents", {
