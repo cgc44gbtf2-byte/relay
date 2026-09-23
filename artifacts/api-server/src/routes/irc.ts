@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Response } from "express";
 import { clerkClient } from "@clerk/express";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -47,8 +47,30 @@ import { categoryForNotification, createNotification, createNotifications, hasNo
 import { logger } from "../lib/logger";
 import { isValidQuery } from "../lib/validation";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
+import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
 
 const router: IRouter = Router();
+const channelJoinLimiter = new FixedWindowLimiter(20, 60_000);
+const channelInviteLimiter = new FixedWindowLimiter(30, 60_000);
+const userSearchLimiter = new FixedWindowLimiter(60, 60_000);
+const messageSearchLimiter = new FixedWindowLimiter(60, 60_000);
+
+function enforceRateLimit(
+  req: AuthenticatedRequest,
+  res: Response,
+  limiter: FixedWindowLimiter,
+  message: string,
+): boolean {
+  const result = limiter.check(
+    rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"),
+  );
+  if (result.allowed) return true;
+  res
+    .set("Retry-After", String(result.retryAfterSeconds))
+    .status(429)
+    .json({ error: message });
+  return false;
+}
 
 function param(req: AuthenticatedRequest, key: string): string {
   const value = req.params[key];
@@ -581,6 +603,7 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
 });
 
 router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!enforceRateLimit(req, res, channelJoinLimiter, "Too many channel join requests.")) return;
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
@@ -816,6 +839,7 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
 });
 
 router.post("/channels/:channelId/invites", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!enforceRateLimit(req, res, channelInviteLimiter, "Too many channel invite requests.")) return;
   const userId = getUserId(req);
   const channel = await channelFor(param(req, "channelId"));
   const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
@@ -1509,6 +1533,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
 });
 
 router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!enforceRateLimit(req, res, userSearchLimiter, "Too many user search requests.")) return;
   const userId = getUserId(req);
   const rawQuery = req.query.q;
   const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
@@ -1667,6 +1692,7 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
 });
 
 router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!enforceRateLimit(req, res, messageSearchLimiter, "Too many message search requests.")) return;
   const userId = getUserId(req);
   const rawQuery = req.query.q;
   const q = typeof rawQuery === "string" ? rawQuery.trim() : "";

@@ -208,7 +208,10 @@ export const teamMembersTable = pgTable("irc_team_members", {
   status: text("status").notNull().default("active"),
   joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
-}, (table) => [primaryKey({ columns: [table.teamId, table.userId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.teamId, table.userId] }),
+  index("irc_team_members_user_idx").on(table.userId),
+]);
 
 export const employeeProfilesTable = pgTable("irc_employee_profiles", {
   communityId: integer("community_id").notNull().references(() => communitiesTable.id, { onDelete: "cascade" }),
@@ -225,7 +228,12 @@ export const employeeProfilesTable = pgTable("irc_employee_profiles", {
   offboardingAt: timestamp("offboarding_at", { withTimezone: true }),
   offboardedAt: timestamp("offboarded_at", { withTimezone: true }),
   notes: text("notes").notNull().default(""),
-}, (table) => [primaryKey({ columns: [table.communityId, table.userId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.communityId, table.userId] }),
+  index("irc_employee_profiles_community_department_idx").on(table.communityId, table.departmentId),
+  index("irc_employee_profiles_community_location_idx").on(table.communityId, table.locationId),
+  index("irc_employee_profiles_manager_idx").on(table.managerId),
+]);
 
 export const workspaceInvitationsTable = pgTable("irc_workspace_invitations", {
   id: serial("id").primaryKey(),
@@ -323,7 +331,10 @@ export const documentPermissionsTable = pgTable("irc_document_permissions", {
   permission: text("permission").notNull().default("viewer"),
   grantedBy: text("granted_by").notNull().references(() => usersTable.clerkId),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [primaryKey({ columns: [table.documentId, table.userId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.documentId, table.userId] }),
+  index("irc_document_acknowledgements_user_idx").on(table.userId),
+]);
 
 export const documentAcknowledgementsTable = pgTable("irc_document_acknowledgements", {
   documentId: integer("document_id").notNull().references(() => businessDocumentsTable.id, { onDelete: "cascade" }),
@@ -339,6 +350,7 @@ export const documentDownloadsTable = pgTable("irc_document_downloads", {
   downloadedAt: timestamp("downloaded_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_document_downloads_document_idx").on(table.documentId),
+  index("irc_document_downloads_user_idx").on(table.userId),
   foreignKey({
     columns: [table.versionId, table.documentId],
     foreignColumns: [documentVersionsTable.id, documentVersionsTable.documentId],
@@ -364,6 +376,7 @@ export const workspaceTasksTable = pgTable("irc_workspace_tasks", {
 }, (table) => [
   index("irc_workspace_tasks_community_updated_idx").on(table.communityId, table.updatedAt),
   index("irc_workspace_tasks_community_status_due_idx").on(table.communityId, table.status, table.dueDate),
+  index("irc_workspace_tasks_assignee_status_due_idx").on(table.assignedTo, table.status, table.dueDate),
   foreignKey({
     columns: [table.departmentId, table.communityId],
     foreignColumns: [departmentsTable.id, departmentsTable.communityId],
@@ -486,6 +499,7 @@ export const channelJoinRequestsTable = pgTable(
   (table) => [
     uniqueIndex("irc_channel_join_requests_channel_user_idx").on(table.channelId, table.userId),
     index("irc_channel_join_requests_user_status_idx").on(table.userId, table.status),
+    index("irc_channel_join_requests_channel_status_idx").on(table.channelId, table.status),
   ],
 );
 
@@ -555,7 +569,10 @@ export const blocksTable = pgTable(
     blockedId: text("blocked_id").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.blockerId, table.blockedId] })],
+  (table) => [
+    primaryKey({ columns: [table.blockerId, table.blockedId] }),
+    index("irc_blocks_blocked_idx").on(table.blockedId),
+  ],
 );
 
 export const notificationsTable = pgTable("irc_notifications", {
@@ -574,6 +591,12 @@ export const notificationsTable = pgTable("irc_notifications", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_notifications_user_created_idx").on(table.userId, table.createdAt),
+  index("irc_notifications_user_visibility_idx").on(
+    table.userId,
+    table.archivedAt,
+    table.deletedAt,
+    table.createdAt,
+  ),
 ]);
 
 export const serverAnnouncementsTable = pgTable("irc_server_announcements", {
@@ -631,7 +654,11 @@ export const moderationActionsTable = pgTable("irc_moderation_actions", {
   action: text("action").notNull(),
   details: text("details"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("irc_moderation_actions_community_created_idx").on(table.communityId, table.createdAt),
+  index("irc_moderation_actions_channel_created_idx").on(table.channelId, table.createdAt),
+  index("irc_moderation_actions_actor_created_idx").on(table.actorId, table.createdAt),
+]);
 
 export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   id: serial("id").primaryKey(),
@@ -649,6 +676,8 @@ export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_admin_audit_logs_community_created_idx").on(table.communityId, table.createdAt, table.id),
+  index("irc_admin_audit_logs_community_action_created_idx").on(table.communityId, table.action, table.createdAt, table.id),
+  index("irc_admin_audit_logs_community_actor_created_idx").on(table.communityId, table.actorId, table.createdAt, table.id),
   index("irc_admin_audit_logs_legacy_target_created_idx").on(table.targetId, table.targetLabel, table.createdAt, table.id),
 ]);
 
