@@ -104,6 +104,7 @@ function installApi({
   channelFailureOnce = false,
   dmPaginationFailureOnce = false,
   joinFailureOnce = false,
+  createChannelFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
 }: {
@@ -124,6 +125,7 @@ function installApi({
   channelFailureOnce?: boolean;
   dmPaginationFailureOnce?: boolean;
   joinFailureOnce?: boolean;
+  createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
 }) {
@@ -137,6 +139,7 @@ function installApi({
   let historyCalls = 0;
   let dmPaginationCalls = 0;
   let joinCalls = 0;
+  let createChannelCalls = 0;
 
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -193,6 +196,13 @@ function installApi({
       const initialCall = channelFailureOnce ? 2 : 1;
       return jsonResponse(channelListCalls === initialCall ? [deleted, fallback] : fallbackChannels);
     }
+    if (url === "/api/channels" && method === "POST") {
+      createChannelCalls += 1;
+      if (createChannelFailureOnce && createChannelCalls === 1) {
+        return jsonResponse({ error: "channel creation temporarily unavailable" }, 500);
+      }
+      return jsonResponse({ ...room(3, "#retry-room"), topic: "Retry topic", description: "Retry description" });
+    }
     if (url === "/api/channels/1/messages" && method === "GET") {
       historyCalls += 1;
       return missingRequest === "history"
@@ -206,6 +216,12 @@ function installApi({
       return jsonResponse({ messages: [] });
     }
     if (url === "/api/channels/2/members" && method === "GET") {
+      return jsonResponse(members());
+    }
+    if (url === "/api/channels/3/messages" && method === "GET") {
+      return jsonResponse({ messages: [] });
+    }
+    if (url === "/api/channels/3/members" && method === "GET") {
       return jsonResponse(members());
     }
     if (url === "/api/channels/1/messages" && method === "POST") {
@@ -392,6 +408,34 @@ describe("deleted room recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
     expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
     expect(screen.queryByText("join temporarily unavailable")).toBeNull();
+  });
+
+  it("preserves channel details after creation fails and succeeds on retry", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      createChannelFailureOnce: true,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    const nameInput = screen.getByPlaceholderText("#room-name") as HTMLInputElement;
+    const topicInput = screen.getByPlaceholderText("What is this room about?") as HTMLInputElement;
+    const descriptionInput = screen.getByPlaceholderText("A short description for members") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "#retry-room" } });
+    fireEvent.change(topicInput, { target: { value: "Retry topic" } });
+    fireEvent.change(descriptionInput, { target: { value: "Retry description" } });
+    fireEvent.click(screen.getByLabelText("private room (owner approval)"));
+    fireEvent.click(screen.getByRole("button", { name: "create room" }));
+
+    expect(await screen.findByText("channel creation temporarily unavailable")).toBeTruthy();
+    expect(nameInput.value).toBe("#retry-room");
+    expect(topicInput.value).toBe("Retry topic");
+    expect(descriptionInput.value).toBe("Retry description");
+    expect((screen.getByLabelText("private room (owner approval)") as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "create room" }));
+    expect(await screen.findByRole("heading", { name: "#retry-room" })).toBeTruthy();
+    expect(screen.queryByText("channel creation temporarily unavailable")).toBeNull();
   });
 
   it.each([
