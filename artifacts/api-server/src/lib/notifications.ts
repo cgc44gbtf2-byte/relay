@@ -1,10 +1,12 @@
 import { and, eq } from "drizzle-orm";
 import { db, notificationsTable } from "@workspace/db";
+import { wsHub } from "./ws";
 
 export type NotificationCategory =
   | "direct_message"
   | "mention"
   | "task_assigned"
+  | "task_updated"
   | "task_deadline"
   | "announcement"
   | "document_acknowledgement"
@@ -17,6 +19,7 @@ const categoryByType: Record<string, NotificationCategory> = {
   direct_message: "direct_message",
   mention: "mention",
   task_assigned: "task_assigned",
+  task_updated: "task_updated",
   task_deadline: "task_deadline",
   community_announcement: "announcement",
   server_announcement: "announcement",
@@ -46,7 +49,7 @@ export type NotificationInput = {
 };
 
 export async function createNotification(input: NotificationInput): Promise<void> {
-  await db.insert(notificationsTable).values({
+  const [created] = await db.insert(notificationsTable).values({
     userId: input.userId,
     type: input.type,
     category: input.category ?? categoryForNotification(input.type),
@@ -55,13 +58,19 @@ export async function createNotification(input: NotificationInput): Promise<void
     entityType: input.entityType ?? null,
     entityId: input.entityId === undefined || input.entityId === null ? null : String(input.entityId),
     actionUrl: input.actionUrl ?? null,
-  });
+  }).returning();
+  if (created) {
+    wsHub.broadcastUser(input.userId, {
+      type: "notification",
+      notification: { ...created, category: categoryForNotification(created.type, created.category) },
+    });
+  }
 }
 
 export async function createNotifications(userIds: string[], input: Omit<NotificationInput, "userId">): Promise<void> {
   const uniqueUserIds = [...new Set(userIds)];
   if (uniqueUserIds.length === 0) return;
-  await db.insert(notificationsTable).values(uniqueUserIds.map((userId) => ({
+  const created = await db.insert(notificationsTable).values(uniqueUserIds.map((userId) => ({
     userId,
     type: input.type,
     category: input.category ?? categoryForNotification(input.type),
@@ -70,7 +79,13 @@ export async function createNotifications(userIds: string[], input: Omit<Notific
     entityType: input.entityType ?? null,
     entityId: input.entityId === undefined || input.entityId === null ? null : String(input.entityId),
     actionUrl: input.actionUrl ?? null,
-  })));
+  }))).returning();
+  for (const notification of created) {
+    wsHub.broadcastUser(notification.userId, {
+      type: "notification",
+      notification: { ...notification, category: categoryForNotification(notification.type, notification.category) },
+    });
+  }
 }
 
 export async function hasNotificationForEntity(userId: string, type: string, entityType: string, entityId: string | number): Promise<boolean> {
