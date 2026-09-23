@@ -3862,6 +3862,78 @@ describe("admin access controls", () => {
     }
   });
 
+  test("filters workspace activity by actor and action", async () => {
+    const ownerSession = await createTestSession("activity_filter_owner");
+    const actorSession = await createTestSession("activity_filter_actor");
+    const communityIds: number[] = [];
+    const unique = randomUUID().replaceAll("-", "");
+
+    try {
+      for (const session of [ownerSession, actorSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+
+      const createCommunity = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `Activity filters ${unique.slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(createCommunity.status, 201, JSON.stringify(createCommunity));
+      assert.ok(createCommunity.body && typeof createCommunity.body === "object");
+      const communityId = (createCommunity.body as { id?: unknown }).id;
+      assert.equal(typeof communityId, "number");
+      communityIds.push(communityId as number);
+
+      await pool.query(
+        `INSERT INTO irc_admin_audit_logs
+          (actor_id, actor_display_name, community_id, action, resource_type, resource_id, target_id, target_label, details)
+         VALUES
+          ($1, 'Owner actor', $3, 'created_workspace_team', 'team', 'owner-team', $3::text, $4, 'owner event'),
+          ($2, 'Filtered actor', $3, 'assigned_employee_team', 'team_membership', 'actor-team', $3::text, $4, 'matching event'),
+          ($2, 'Filtered actor', $3, 'updated_workspace_task', 'task', 'actor-task', $3::text, $4, 'different action')`,
+        [
+          ownerSession.userId,
+          actorSession.userId,
+          communityId,
+          `community:${communityId}`,
+        ],
+      );
+
+      const actorFiltered = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/activity?userId=${encodeURIComponent(actorSession.userId)}`,
+      );
+      assert.equal(actorFiltered.status, 200, JSON.stringify(actorFiltered));
+      assert.ok(actorFiltered.body && typeof actorFiltered.body === "object");
+      const actorPayload = actorFiltered.body as { entries?: Array<{ actorId: string; action: string }>; actions?: string[] };
+      assert.deepEqual(
+        actorPayload.entries?.map((entry) => [entry.actorId, entry.action]),
+        [
+          [actorSession.userId, "updated_workspace_task"],
+          [actorSession.userId, "assigned_employee_team"],
+        ],
+      );
+      assert.deepEqual(actorPayload.actions, ["assigned_employee_team", "created_workspace_team", "updated_workspace_task"]);
+
+      const actionFiltered = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/activity?action=assigned_employee_team`,
+      );
+      assert.equal(actionFiltered.status, 200, JSON.stringify(actionFiltered));
+      assert.ok(actionFiltered.body && typeof actionFiltered.body === "object");
+      const actionPayload = actionFiltered.body as { entries?: Array<{ actorId: string; action: string }> };
+      assert.deepEqual(actionPayload.entries?.map((entry) => [entry.actorId, entry.action]), [
+        [actorSession.userId, "assigned_employee_team"],
+      ]);
+    } finally {
+      if (communityIds.length) {
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE community_id = ANY($1::int[])", [communityIds]);
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+      }
+    }
+  });
+
   test("keeps private history and WebSocket subscriptions behind moderator approval", async () => {
     const ownerSession = await createTestSession("channel_owner");
     const requesterSession = await createTestSession("channel_requester");
