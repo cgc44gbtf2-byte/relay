@@ -166,6 +166,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     [messageCount],
     users,
     channels,
+    categories,
     recentMessages,
     activity,
   ] = await Promise.all([
@@ -198,13 +199,27 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         name: channelsTable.name,
         topic: channelsTable.topic,
         ownerId: channelsTable.ownerId,
+        communityId: channelsTable.communityId,
+        communityName: communitiesTable.name,
         createdAt: channelsTable.createdAt,
         memberCount: count(channelMembersTable.userId),
       })
       .from(channelsTable)
       .leftJoin(channelMembersTable, eq(channelMembersTable.channelId, channelsTable.id))
-      .groupBy(channelsTable.id)
+      .leftJoin(communitiesTable, eq(communitiesTable.id, channelsTable.communityId))
+      .groupBy(channelsTable.id, communitiesTable.name)
       .orderBy(asc(channelsTable.name)),
+    db
+      .select({
+        id: categoriesTable.id,
+        name: categoriesTable.name,
+        description: categoriesTable.description,
+        communityId: categoriesTable.communityId,
+        communityName: communitiesTable.name,
+      })
+      .from(categoriesTable)
+      .leftJoin(communitiesTable, eq(communitiesTable.id, categoriesTable.communityId))
+      .orderBy(asc(categoriesTable.name)),
     db
       .select({
         id: messagesTable.id,
@@ -250,6 +265,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     },
     users,
     channels,
+    categories,
     recentMessages,
     activity,
     activityPagination: {
