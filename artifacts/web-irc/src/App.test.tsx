@@ -17,7 +17,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App from "./App";
+import App, { DocumentCenter } from "./App";
 
 type Channel = {
   id: number;
@@ -665,5 +665,35 @@ describe("deleted room recovery", () => {
         String(input) === "/api/messages/message-1" && init?.method === "DELETE",
       )).toBe(true);
     });
+  });
+});
+
+describe("frontend route and document error hardening", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders a branded 404 page for an unknown route", () => {
+    window.history.pushState({}, "", "/does-not-exist");
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "Nothing here." })).toBeTruthy();
+    expect(screen.getByText("404 · route not found")).toBeTruthy();
+    expect(screen.queryByText("Real rooms.")).toBeNull();
+  });
+
+  it("surfaces document loading failures instead of showing an empty state", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse({ error: "documents unavailable" }, 503)));
+    const detail = {
+      community: { id: 7 },
+      canManage: false,
+    } as Parameters<typeof DocumentCenter>[0]["detail"];
+
+    render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={vi.fn()} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("documents unavailable");
+    expect(screen.getByRole("button", { name: "Dismiss error" })).toBeTruthy();
+    expect(screen.queryByText("No documents match this search.")).toBeNull();
   });
 });

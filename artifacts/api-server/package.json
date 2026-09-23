@@ -9,7 +9,7 @@
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/admin.test.cjs ./dist-tests/cleanup-admin-test-users.test.cjs",
-    "test:unit": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/lib/channel-moderation-policy.test.cjs ./dist-tests/lib/cors.test.cjs ./dist-tests/lib/ws.test.cjs",
+    "test:unit": "node ./build-tests.mjs && NODE_ENV=test node --test ./dist-tests/lib/channel-moderation-policy.test.cjs ./dist-tests/lib/cors.test.cjs ./dist-tests/lib/ws.test.cjs ./dist-tests/lib/fixed-window-limiter.test.cjs ./dist-tests/routes/storage.test.cjs ./dist-tests/lib/validation.test.cjs",
     "posttest": "pnpm run cleanup:test-users:scheduled",
     "cleanup:test-users": "node ./build-cleanup.mjs && NODE_ENV=test node ./dist-cleanup/cleanup-admin-test-users-cli.cjs",
     "cleanup:test-users:scheduled": "NODE_ENV=test pnpm run cleanup:test-users -- --apply",

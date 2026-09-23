@@ -19,6 +19,7 @@ import {
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { channelNotFoundError } from "./errors";
 import { ensurePermissionCatalog, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
+import { isPositiveSafeInteger, isValidQuery } from "../lib/validation";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -148,8 +149,17 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     });
     return;
   }
-  const activityActor = typeof req.query.activityActor === "string" ? req.query.activityActor.trim() : "";
-  const activityAction = typeof req.query.activityAction === "string" ? req.query.activityAction.trim() : "";
+  const rawActivityActor = req.query.activityActor;
+  const rawActivityAction = req.query.activityAction;
+  const activityActor = typeof rawActivityActor === "string" ? rawActivityActor.trim() : "";
+  const activityAction = typeof rawActivityAction === "string" ? rawActivityAction.trim() : "";
+  if (
+    (typeof rawActivityActor === "string" && !isValidQuery(rawActivityActor))
+    || (typeof rawActivityAction === "string" && !isValidQuery(rawActivityAction))
+  ) {
+    res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
+    return;
+  }
   const [
     [userStats],
     [channelCount],
@@ -288,7 +298,12 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     res.status(403).json({ error: "Admin access required." });
     return;
   }
-  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const rawQuery = req.query.q;
+  const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+  if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
+    res.status(400).json({ error: "User search must be 200 characters or fewer." });
+    return;
+  }
   const requestedRole = typeof req.query.role === "string" ? req.query.role : "";
   const role = PRIMARY_ROLES.includes(requestedRole as typeof PRIMARY_ROLES[number])
     ? requestedRole as typeof PRIMARY_ROLES[number]
@@ -550,7 +565,10 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     return;
   }
   const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "channel" ? channelId : null;
-  if (scopeType !== "platform" && !Number.isInteger(scopedId)) {
+  if (
+    (scopeType !== "platform" && !isPositiveSafeInteger(scopedId))
+    || [communityId, categoryId, channelId].some((id) => id !== null && !isPositiveSafeInteger(id))
+  ) {
     res.status(400).json({ error: "The selected scope is required." });
     return;
   }
@@ -604,7 +622,7 @@ router.delete("/admin/role-assignments/:assignmentId", requireAuth, async (req: 
     return;
   }
   const assignmentId = Number(Array.isArray(req.params.assignmentId) ? req.params.assignmentId[0] : req.params.assignmentId);
-  if (!Number.isInteger(assignmentId)) {
+  if (!isPositiveSafeInteger(assignmentId)) {
     res.status(400).json({ error: "Invalid role assignment." });
     return;
   }

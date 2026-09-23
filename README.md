@@ -125,6 +125,12 @@ Relay evaluates permissions across platform, workspace, department/category, and
 - Explicitly provisioned administrative access
 - Environment-based credentials with no secrets committed to the repository
 
+The WebSocket ticket and upload-URL endpoints have small, process-local
+fixed-window abuse controls (10 requests per authenticated user and request
+IP per minute). Counters are intentionally in memory: each API process tracks
+its own requests, and restarting a process clears its counters. This is not a
+replacement for distributed rate limiting.
+
 ## Platform Overview
 
 ```text
@@ -254,6 +260,7 @@ Authenticated API tests require a separate disposable `TEST_DATABASE_URL`. Test 
 ## Ownership and license diligence
 
 - [IP ownership register](docs/IP-OWNERSHIP.md) — source, brand, domain, schema, documentation, and custom-system transfer checklist
+- [Release 1 data retention](docs/DATA-RETENTION.md) — retained records, future archive candidates, legal holds, and the current no-automatic-deletion posture
 - [Dependency inventory](docs/DEPENDENCY-INVENTORY.md) — exact installed direct and transitive package versions
 - [Third-party license inventory](docs/THIRD-PARTY-LICENSES.md) — dependency screening and acquisition blockers
 - [License compliance report](docs/LICENSE-COMPLIANCE.md) — obligations, unresolved terms, and readiness status

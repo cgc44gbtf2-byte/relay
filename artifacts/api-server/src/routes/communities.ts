@@ -41,7 +41,7 @@ import {
   workspaceTaskCommentsTable,
   workspaceTaskAttachmentsTable,
 } from "@workspace/db";
-import { signedObjectUrlForPath } from "./storage";
+import { isValidUploadedObjectPath, signedObjectUrlForPath } from "./storage";
 import {
   ensureProfile,
   getUserId,
@@ -59,6 +59,7 @@ import {
 } from "../lib/permissions";
 import { createNotification, createNotifications } from "../lib/notifications";
 import { wsHub } from "../lib/ws";
+import { validateUploadMetadata } from "./storage";
 
 const router: IRouter = Router();
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
@@ -1138,7 +1139,7 @@ router.post("/communities/:communityId/tasks/:taskId/attachments", requireAuth, 
     res.status(404).json({ error: "Task not found." });
     return;
   }
-  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
     res.status(400).json({ error: "Invalid task attachment." });
     return;
   }
@@ -1917,7 +1918,7 @@ router.post("/communities/:communityId/documents", requireAuth, async (req: Auth
     res.status(400).json({ error: "A valid document title, category, visibility, and expiration are required." });
     return;
   }
-  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
@@ -1966,7 +1967,7 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
     res.status(404).json({ error: "Document not found." });
     return;
   }
-  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
@@ -2469,18 +2470,20 @@ router.post("/communities/:communityId/announcements/:announcementId/attachments
   const [announcement] = await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
     .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId), eq(serverAnnouncementsTable.authorId, userId)));
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
-  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
-  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
-  const fileSize = Number(req.body?.fileSize);
+  const metadata = validateUploadMetadata({
+    name: req.body?.fileName,
+    size: req.body?.fileSize,
+    contentType: req.body?.contentType,
+  });
   if (!announcement) {
     res.status(404).json({ error: "Announcement not found." });
     return;
   }
-  if (!objectPath.startsWith("/objects/") || !fileName || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+  if (!isValidUploadedObjectPath(objectPath) || !metadata || metadata.size > 10_000_000) {
     res.status(400).json({ error: "Invalid announcement attachment." });
     return;
   }
-  const [attachment] = await db.insert(announcementAttachmentsTable).values({ announcementId, uploaderId: userId, objectPath, fileName, contentType, fileSize }).returning();
+  const [attachment] = await db.insert(announcementAttachmentsTable).values({ announcementId, uploaderId: userId, objectPath, fileName: metadata.name, contentType: metadata.contentType, fileSize: metadata.size }).returning();
   res.status(201).json(attachment);
 });
 

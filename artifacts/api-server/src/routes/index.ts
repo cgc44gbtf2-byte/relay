@@ -8,8 +8,10 @@ import communitiesRouter from "./communities";
 import developerRouter from "./developer";
 import { requireAuth, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
+import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
 
 const router: IRouter = Router();
+const wsTicketLimiter = new FixedWindowLimiter(10, 60_000);
 
 router.use(healthRouter);
 router.use(ircRouter);
@@ -21,6 +23,11 @@ router.get("/ws-ticket", requireAuth, (req: AuthenticatedRequest, res) => {
   const sessionId = getAuth(req).sessionId;
   if (!sessionId) {
     res.status(401).json({ error: "Sign in to continue" });
+    return;
+  }
+  const result = wsTicketLimiter.check(rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"));
+  if (!result.allowed) {
+    res.set("Retry-After", String(result.retryAfterSeconds)).status(429).json({ error: "Too many WebSocket ticket requests." });
     return;
   }
   res.json({ ticket: wsHub.issueTicket(getUserId(req), sessionId) });

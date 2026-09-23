@@ -39,11 +39,12 @@ import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from
 import { wsHub } from "../lib/ws";
 import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
-import { signedObjectUrlForPath } from "./storage";
+import { isValidUploadedObjectPath, signedObjectUrlForPath, validateUploadMetadata } from "./storage";
 import { channelNotFoundError } from "./errors";
 import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
 import { logger } from "../lib/logger";
+import { isValidQuery } from "../lib/validation";
 
 const router: IRouter = Router();
 
@@ -875,7 +876,12 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
     res.status(403).json({ error: "Join the private channel before reading its history." });
     return;
   }
-  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const rawQuery = req.query.q;
+  const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+  if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
+    res.status(400).json({ error: "Search queries must be 200 characters or fewer." });
+    return;
+  }
   const rows = await db.select().from(messagesTable).where(and(
     eq(messagesTable.channelId, channel.id),
     query ? ilike(messagesTable.body, `%${query}%`) : undefined,
@@ -1082,16 +1088,15 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     return;
   }
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
-  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 160) : "";
-  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.trim().slice(0, 120) : "application/octet-stream";
-  const fileSize = Number(req.body?.fileSize);
+  const metadata = validateUploadMetadata({
+    name: req.body?.fileName,
+    size: req.body?.fileSize,
+    contentType: req.body?.contentType,
+  });
   if (
-    !/^\/objects\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(objectPath)
-    || !fileName
-    || fileName.includes("/")
-    || !Number.isSafeInteger(fileSize)
-    || fileSize < 1
-    || fileSize > 10_000_000
+    !isValidUploadedObjectPath(objectPath)
+    || !metadata
+    || metadata.size > 10_000_000
   ) {
     res.status(400).json({ error: "Invalid attachment metadata." });
     return;
@@ -1100,9 +1105,9 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     messageId,
     uploaderId: userId,
     objectPath,
-    fileName,
-    contentType,
-    fileSize,
+    fileName: metadata.name,
+    contentType: metadata.contentType,
+    fileSize: metadata.size,
   }).returning();
   const updatedView = await messageView(message, userId);
   broadcastMessageEvent(message, { type: "message", message: updatedView });
@@ -1268,7 +1273,12 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
 
 router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const rawQuery = req.query.q;
+  const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
+  if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
+    res.status(400).json({ error: "Search queries must be 200 characters or fewer." });
+    return;
+  }
   if (q.length < 2) {
     res.json([]);
     return;
@@ -1421,7 +1431,12 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
 
 router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const rawQuery = req.query.q;
+  const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
+  if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
+    res.status(400).json({ error: "Search queries must be 200 characters or fewer." });
+    return;
+  }
   if (q.length < 2) {
     res.json([]);
     return;
