@@ -28,6 +28,16 @@ export function upsertMessage<T extends TimestampedMessage>(messages: T[], incom
   return [...messages, incoming].sort(compareMessages);
 }
 
+export function upsertBoundedMessage<T extends TimestampedMessage>(
+  messages: T[],
+  incoming: T,
+  maxLength: number,
+): T[] {
+  const next = upsertMessage(messages, incoming);
+  if (maxLength <= 0) return [];
+  return next.length > maxLength ? next.slice(-maxLength) : next;
+}
+
 export function upsertBoundedMessageGroup<T extends TimestampedMessage>(
   messages: T[],
   incoming: T,

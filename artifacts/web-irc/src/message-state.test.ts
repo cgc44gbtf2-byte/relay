@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeRefreshedMessages, upsertBoundedMessageGroup, upsertMessage } from "./message-state";
+import { mergeRefreshedMessages, upsertBoundedMessage, upsertBoundedMessageGroup, upsertMessage } from "./message-state";
 
 type TestMessage = {
   id: string;
@@ -53,6 +53,19 @@ describe("message state", () => {
         reactions: 2,
       }),
     ]);
+  });
+
+  it("bounds a busy channel while retaining the newest messages", () => {
+    let messages = Array.from({ length: 100 }, (_, index) => message(index));
+
+    for (let index = 100; index < 1_100; index += 1) {
+      messages = upsertBoundedMessage(messages, message(index), 100);
+    }
+
+    expect(messages).toHaveLength(100);
+    expect(messages[0].id).toBe("message-1000");
+    expect(messages.at(-1)?.id).toBe("message-1099");
+    expect(new Set(messages.map(({ id }) => id)).size).toBe(100);
   });
 
   it("does not let reconnect history erase newer realtime frames", () => {
