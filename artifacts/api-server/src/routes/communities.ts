@@ -787,6 +787,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     })),
     canManage,
     canManageOrganization,
+    isOwner: community.ownerId === userId,
     teamMemberships,
   });
 });

@@ -39,6 +39,7 @@ import {
   SignIn,
   SignUp,
   useClerk,
+  useSession,
   useUser,
 } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
@@ -47,6 +48,7 @@ import { mergeRefreshedMessages, upsertBoundedMessageGroup, upsertMessage } from
 import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { clearTestAccountReturnContext, readTestAccountReturnContext, writeTestAccountReturnContext } from "./test-account-switch";
 
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -76,6 +78,8 @@ type Profile = {
   avatarUrl?: string | null;
   status: string;
   role?: string;
+  isTestAccount?: boolean;
+  testRole?: string | null;
 };
 type Category = { id: number; name: string; description: string; ownerId: string };
 type Channel = {
@@ -470,7 +474,8 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
 
 function ChatApp() {
   const { user } = useUser();
-  const { signOut } = useClerk();
+  const { signOut, client, setActive } = useClerk();
+  const { session } = useSession();
   const [, setLocation] = useLocation();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -516,6 +521,8 @@ function ChatApp() {
   const [connection, setConnection] = useState("connecting");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [bootstrapError, setBootstrapError] = useState("");
+  const [returnOwnerError, setReturnOwnerError] = useState("");
+  const [returningToOwner, setReturningToOwner] = useState(false);
   const [channelRefreshError, setChannelRefreshError] = useState("");
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
@@ -1045,6 +1052,30 @@ function ChatApp() {
     await api(`/users/${member.id}/block`, { method: "POST", body: "{}" });
     window.alert(`${member.displayName} is now blocked.`);
   };
+  const returnToOwner = async () => {
+    if (returningToOwner) return;
+    setReturningToOwner(true);
+    setReturnOwnerError("");
+    try {
+      const context = readTestAccountReturnContext();
+      const ownerSession = context && client?.sessions?.find((item) => item.id === context.ownerSessionId);
+      if (
+        !context
+        || !ownerSession
+        || ownerSession.status !== "active"
+        || ownerSession.user?.id !== context.ownerUserId
+      ) {
+        throw new Error("Your owner session is no longer available. Sign out and sign in again to return to the owner account.");
+      }
+      if (!setActive) throw new Error("Clerk session switching is unavailable.");
+      await setActive({ session: context.ownerSessionId });
+      clearTestAccountReturnContext();
+      window.location.assign(`${basePath}/chat`);
+    } catch (reason) {
+      setReturnOwnerError(reason instanceof Error ? reason.message : "Could not return to the owner account.");
+      setReturningToOwner(false);
+    }
+  };
   const renderChannel = (channel: Channel) => <div key={channel.id}><button disabled={joiningChannelId === channel.id} onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)} className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}><span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span><span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span></button>{joinErrors[channel.id] && <p className="px-2 pb-1 font-mono text-[9px] leading-4 text-destructive">{joinErrors[channel.id]}</p>}</div>;
   if (!profile && bootstrapError) {
     return (
@@ -1078,7 +1109,7 @@ function ChatApp() {
           <div className="relative"><Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} placeholder="find a person" className="h-9 w-full rounded-md border border-sidebar-border bg-sidebar-accent/40 pl-9 pr-3 font-mono text-[11px] outline-none focus:border-primary" /></div>
           {userResults.length > 0 && <div className="mt-2 space-y-1 rounded-md border border-sidebar-border bg-sidebar-accent/60 p-1">{userResults.map((result) => <button key={result.id} onClick={() => { setActiveDm(result); setUserSearch(""); setUserResults([]); }} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-sidebar-accent"><Avatar user={result} size="sm" /><span className="min-w-0 truncate font-mono text-xs">{result.displayName}</span></button>)}</div>}
         </div>
-        <button className="m-3 flex items-center gap-2 rounded-md bg-sidebar-accent/60 p-2.5 text-left" onClick={() => setPanel("profile")}><Avatar user={profile} size="sm" /><span className="min-w-0 flex-1 truncate"><span className="block font-mono text-xs">{profile.displayName}</span><span className="block font-mono text-[9px] text-muted-foreground">@{profile.username}</span></span><ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /></button>
+        <button className="m-3 flex items-center gap-2 rounded-md bg-sidebar-accent/60 p-2.5 text-left" onClick={() => setPanel("profile")}><Avatar user={profile} size="sm" /><span className="min-w-0 flex-1 truncate"><span className="block font-mono text-xs">{profile.displayName}</span><span className="block font-mono text-[9px] text-muted-foreground">@{profile.username}</span>{profile.isTestAccount && <span className="mt-1 inline-block rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[8px] uppercase text-primary">test account · {profile.testRole?.replaceAll("_", " ")}</span>}</span><ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /></button>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -1092,6 +1123,14 @@ function ChatApp() {
             <button onClick={() => signOut({ redirectUrl: basePath || "/" })} className="hidden rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground sm:block" aria-label="Sign out"><LogOut className="h-4 w-4" /></button>
           </div>
         </header>
+        {profile.isTestAccount && <div className="border-b border-primary/30 bg-primary/10 px-4 py-3 font-mono text-xs sm:px-6">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-bold text-primary">test mode</span>
+            <span className="text-muted-foreground">You are viewing Relay as a test account.</span>
+            <button type="button" onClick={() => void returnToOwner()} disabled={returningToOwner} className="rounded border border-primary/50 px-2.5 py-1.5 text-[10px] font-bold text-primary hover:bg-primary/10 disabled:opacity-50">{returningToOwner ? "returning…" : "Return to owner"}</button>
+          </div>
+          {returnOwnerError && <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-destructive"><span>{returnOwnerError}</span><button type="button" onClick={() => void signOut({ redirectUrl: `${basePath}/sign-in` })} className="rounded border border-destructive/40 px-2 py-1 font-bold hover:bg-destructive/10">sign out and sign in</button></div>}
+        </div>}
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
@@ -1727,7 +1766,67 @@ type CommunityDetail = {
   }>;
   canManage: boolean;
   canManageOrganization: boolean;
+  isOwner: boolean;
 };
+
+type TestAccount = { id: string; role: string; displayName: string; username?: string | null };
+
+function TestAccountsPanel({ detail, setError, setNotice }: { detail: CommunityDetail; setError: (value: string) => void; setNotice: (value: string) => void }) {
+  const { client, setActive } = useClerk();
+  const { session } = useSession();
+  const { user } = useUser();
+  const [accounts, setAccounts] = useState<TestAccount[]>([]);
+  const [working, setWorking] = useState(false);
+  const roles = ["workspace_admin", "department_admin", "manager", "moderator", "member"];
+  const load = useCallback(async () => {
+    try {
+      setAccounts(await api<TestAccount[]>(`/communities/${detail.community.id}/test-accounts`));
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 404) return;
+      setError(reason instanceof Error ? reason.message : "Could not load test accounts");
+    }
+  }, [detail.community.id, setError]);
+  useEffect(() => { void load(); }, [load]);
+  if (!detail.isOwner) return null;
+  const provision = async () => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/test-accounts/provision`, { method: "POST", body: "{}" });
+      await load();
+      setNotice("Relay test accounts are ready.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not provision test accounts");
+    } finally { setWorking(false); }
+  };
+  const login = async (role: string) => {
+    setWorking(true);
+    try {
+      if (!session?.id || !session.user?.id || !user?.id || session.user.id !== user.id) {
+        throw new Error("Your owner session is unavailable or changed. Refresh and sign in again before switching accounts.");
+      }
+      const { ticket } = await api<{ ticket: string }>(`/communities/${detail.community.id}/test-accounts/${role}/login`, { method: "POST", body: "{}" });
+      if (!client || !setActive) throw new Error("Clerk sign-in is unavailable.");
+      const result = await client.signIn.create({ strategy: "ticket", ticket });
+      if (result.status !== "complete" || !result.createdSessionId) {
+        throw new Error(`Test account sign-in did not complete (${result.status}).`);
+      }
+      writeTestAccountReturnContext({
+        ownerSessionId: session.id,
+        ownerUserId: session.user.id,
+        workspaceId: detail.community.id,
+      });
+      await setActive({ session: result.createdSessionId });
+      window.location.assign(`${basePath}/chat`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not sign in to test account");
+      setWorking(false);
+    }
+  };
+  return <section className="rounded-xl border border-primary/25 bg-card p-5" data-testid="panel-test-accounts">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">development only</p><h2 className="mt-2 font-mono text-sm font-bold">Test accounts</h2><p className="mt-1 text-xs text-muted-foreground">Owner-only accounts for checking each workspace role.</p></div><button data-testid="button-provision-test-accounts" disabled={working} onClick={() => void provision()} className="rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">{working ? "working…" : "provision all"}</button></div>
+    <div className="mt-4 divide-y divide-border border-t border-border">{roles.map((role) => { const account = accounts.find((item) => item.role === role); return <div key={role} className="flex items-center gap-3 py-2.5"><span className="min-w-0 flex-1 font-mono text-xs">{role.replaceAll("_", " ")}</span>{account ? <><span className="truncate font-mono text-[10px] text-muted-foreground">{account.displayName}</span><button data-testid={`button-login-test-${role}`} disabled={working} onClick={() => void login(role)} className="rounded border border-border px-2 py-1 font-mono text-[9px] text-primary hover:bg-primary/10 disabled:opacity-50">log in</button></> : <span className="font-mono text-[10px] text-muted-foreground">not provisioned</span>}</div>; })}</div>
+  </section>;
+}
 
 type BusinessDashboardPayload = {
   stats: { employees: number; online: number; channels: number; openTasks: number; announcements: number; pendingRequests: number };
@@ -3034,6 +3133,7 @@ function CommunityConsole() {
               <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">team members</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.members.length} people in this workspace</p></div><div className="divide-y divide-border">{detail.members.map((member) => { const assignment = detail.assignments.find((item) => item.userId === member.id && item.scopeType === "community"); const role = assignment?.role ?? "member"; return <div key={member.id} className="flex items-center gap-3 px-5 py-3"><div className={`h-2 w-2 rounded-full ${member.status === "online" ? "bg-chart-4" : "bg-muted-foreground/40"}`} /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{member.username}</p></div><span className="font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>{detail.canManage && <select disabled={working} value={role} onChange={(event) => void changeMemberRole(member.id, event.target.value)} className="rounded border border-border bg-background px-2 py-1 font-mono text-[9px]"><option value="member">member</option><option value="moderator">moderator</option><option value="manager">manager</option><option value="department_admin">community / department admin</option><option value="workspace_admin">workspace admin</option><option value="workspace_owner">workspace owner</option></select>}</div>; })}</div></section>
                  <section className="rounded-xl border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">categories & channels</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Create rooms directly inside an operating category.</p></div><div className="border-b border-border p-5"><div className="space-y-4">{detail.categories.map((category) => { const categoryChannels = detail.channels.filter((channel) => channel.categoryId === category.id); return <div key={category.id} className="rounded-md border border-border/70 p-3"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs text-secondary-foreground">{category.name}</p><p className="mt-1 text-[10px] text-muted-foreground">{category.description || "No description"}</p></div><span className="font-mono text-[9px] text-muted-foreground">{categoryChannels.length} room{categoryChannels.length === 1 ? "" : "s"}</span></div>{categoryChannels.length > 0 && <div className="mt-3 space-y-2 border-t border-border pt-3">{categoryChannels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs text-foreground">{channel.name}</p><p className="truncate text-[10px] text-muted-foreground">{channel.topic || channel.description || "No topic set"}</p></div><span className="shrink-0 font-mono text-[9px] text-muted-foreground">{channel.isPrivate ? "private" : "public"}</span></div>)}</div>}</div>; })}{detail.categories.length === 0 && <p className="font-mono text-[10px] text-muted-foreground">No categories yet. Add one before creating a categorized room.</p>}{detail.channels.some((channel) => channel.categoryId === null) && <div className="rounded-md border border-dashed border-border p-3"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">uncategorized</p><div className="mt-2 space-y-1">{detail.channels.filter((channel) => channel.categoryId === null).map((channel) => <p key={channel.id} className="font-mono text-xs text-foreground">{channel.name} · {channel.isPrivate ? "private" : "public"}</p>)}</div></div>}</div>{detail.canManage && <><form onSubmit={createCategory} className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4"><input required value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="new category" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newCategoryDescription} onChange={(event) => setNewCategoryDescription(event.target.value)} placeholder="description" className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-2.5 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">add category</button></form><form onSubmit={createWorkspaceChannel} className="mt-4 space-y-2 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-primary">add a channel to a category</p><div className="grid gap-2 sm:grid-cols-2"><input required value={newWorkspaceChannelName} onChange={(event) => setNewWorkspaceChannelName(event.target.value)} placeholder="#channel-name" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><select required value={newWorkspaceChannelCategoryId} onChange={(event) => setNewWorkspaceChannelCategoryId(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">select category</option>{detail.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2"><input value={newWorkspaceChannelTopic} onChange={(event) => setNewWorkspaceChannelTopic(event.target.value)} placeholder="topic" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /><input value={newWorkspaceChannelDescription} onChange={(event) => setNewWorkspaceChannelDescription(event.target.value)} placeholder="description" className="h-8 rounded border border-input bg-background px-2 font-mono text-[10px]" /></div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={newWorkspaceChannelPrivate} onChange={(event) => setNewWorkspaceChannelPrivate(event.target.checked)} /> private channel (owner approval)</label><button disabled={working || detail.categories.length === 0} className="rounded bg-primary px-3 py-1.5 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">create categorized channel</button></form></>}</div></section>
              </div>
+              {detail.isOwner && <TestAccountsPanel detail={detail} setError={setError} setNotice={setNotice} />}
               {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
               {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />

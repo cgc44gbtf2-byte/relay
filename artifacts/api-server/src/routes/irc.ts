@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { clerkClient } from "@clerk/express";
 import { createHash, randomUUID } from "node:crypto";
 import {
   and,
@@ -297,7 +298,22 @@ async function messageView(message: typeof messagesTable.$inferSelect, viewerId?
 }
 
 router.get("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
-  const user = await ensureProfile(getUserId(req));
+  const userId = getUserId(req);
+  const user = await ensureProfile(userId);
+  let isTestAccount = false;
+  let testRole: string | null = null;
+  try {
+    const clerkUser = await clerkClient.users.getUser(userId);
+    const metadata = clerkUser.publicMetadata;
+    if (metadata && typeof metadata === "object" && (metadata as Record<string, unknown>).relay === "relay_test_account") {
+      isTestAccount = true;
+      testRole = typeof (metadata as Record<string, unknown>).role === "string"
+        ? (metadata as Record<string, unknown>).role as string
+        : null;
+    }
+  } catch {
+    // Profile responses remain available if Clerk metadata is temporarily unavailable.
+  }
   res.json({
     id: user.clerkId,
     username: user.username,
@@ -306,6 +322,8 @@ router.get("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise<v
     status: user.status,
     role: user.role,
     lastSeenAt: user.lastSeenAt,
+    isTestAccount,
+    testRole,
   });
 });
 

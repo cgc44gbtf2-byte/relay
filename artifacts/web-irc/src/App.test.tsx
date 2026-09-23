@@ -13,7 +13,12 @@ vi.mock("@clerk/react", () => ({
   Show: ({ children, when }: { children: ReactNode; when: string }) => when === "signed-in" ? children : null,
   SignIn: () => null,
   SignUp: () => null,
-  useClerk: () => ({ signOut: vi.fn() }),
+  useClerk: () => ({
+    signOut: vi.fn(),
+    setActive: vi.fn(),
+    client: { signIn: { create: vi.fn() }, sessions: [] },
+  }),
+  useSession: () => ({ session: { id: "session-1", user: { id: "user-1" } } }),
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
