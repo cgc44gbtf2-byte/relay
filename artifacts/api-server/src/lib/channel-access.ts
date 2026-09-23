@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import {
   channelMembersTable,
+  channelBansTable,
   channelsTable,
   communitiesTable,
   communityMembersTable,
@@ -18,6 +19,16 @@ export async function canReadChannel(
   channel: ReadableChannel,
   userId: string,
 ): Promise<boolean> {
+  const [ban] = await db
+    .select({ userId: channelBansTable.userId })
+    .from(channelBansTable)
+    .where(and(
+      eq(channelBansTable.channelId, channel.id),
+      eq(channelBansTable.userId, userId),
+    ))
+    .limit(1);
+  if (ban) return false;
+
   const communityId = channel.communityId ?? null;
   if (communityId !== null) {
     const [community] = await db
