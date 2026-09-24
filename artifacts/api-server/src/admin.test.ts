@@ -2931,6 +2931,189 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back a channel topic change when recording admin activity fails", async () => {
+    const ownerSession = await createTestSession("topic_audit_failure");
+    const channelIds: number[] = [];
+    const triggerName = `fail_topic_audit_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+    let triggerCreated = false;
+
+    try {
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `topic-failure-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Original topic",
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'updated_channel_topic' THEN
+             RAISE EXCEPTION 'forced topic audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      triggerCreated = true;
+
+      const beforeAudit = await pool.query(
+        `SELECT id, actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'updated_channel_topic' AND target_id = $1
+         ORDER BY id`,
+        [String(channelId)],
+      );
+      const response = await apiRequest(
+        adminSession,
+        `/admin/channels/${channelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Must roll back" }),
+        },
+      );
+      assert.equal(response.status, 500);
+
+      const afterChannel = await pool.query(
+        "SELECT topic FROM irc_channels WHERE id = $1",
+        [channelId],
+      );
+      const afterAudit = await pool.query(
+        `SELECT id, actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'updated_channel_topic' AND target_id = $1
+         ORDER BY id`,
+        [String(channelId)],
+      );
+      assert.deepEqual(afterChannel.rows, [{ topic: "Original topic" }]);
+      assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+    } finally {
+      if (triggerCreated) {
+        await pool.query(
+          `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+           DROP FUNCTION IF EXISTS "${functionName}"();`,
+        );
+      } else {
+        await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"();`);
+      }
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
+  test("restores messages when recording a channel clear fails", async () => {
+    const ownerSession = await createTestSession("clear_audit_failure");
+    const channelIds: number[] = [];
+    const triggerName = `fail_clear_audit_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+    let triggerCreated = false;
+
+    try {
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `clear-failure-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Clear rollback test",
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const sent = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "This message must survive." }),
+        },
+      );
+      assert.equal(sent.status, 201, JSON.stringify(sent));
+
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'cleared_channel_history' THEN
+             RAISE EXCEPTION 'forced clear audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      triggerCreated = true;
+
+      const beforeMessages = await pool.query(
+        "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY id",
+        [channelId],
+      );
+      const beforeAudit = await pool.query(
+        `SELECT id, actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'cleared_channel_history' AND target_id = $1
+         ORDER BY id`,
+        [String(channelId)],
+      );
+      const response = await apiRequest(
+        adminSession,
+        `/admin/channels/${channelId}/messages`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        },
+      );
+      assert.equal(response.status, 500);
+
+      const afterMessages = await pool.query(
+        "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY id",
+        [channelId],
+      );
+      const afterAudit = await pool.query(
+        `SELECT id, actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'cleared_channel_history' AND target_id = $1
+         ORDER BY id`,
+        [String(channelId)],
+      );
+      assert.deepEqual(afterMessages.rows, beforeMessages.rows);
+      assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+    } finally {
+      if (triggerCreated) {
+        await pool.query(
+          `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+           DROP FUNCTION IF EXISTS "${functionName}"();`,
+        );
+      } else {
+        await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"();`);
+      }
+      await removeTestChannels(channelIds, [ownerSession.userId]);
+    }
+  });
+
   test("reports channel member counts without loading every membership row", async () => {
     const ownerSession = await createTestSession("channel_count_owner");
     const memberSession = await createTestSession("channel_count_member");

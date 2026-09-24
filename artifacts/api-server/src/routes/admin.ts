@@ -699,6 +699,19 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
       })
       .where(eq(channelsTable.id, channelId))
       .returning();
+    const auditDetails = hasCategoryId
+      ? categoryId === null
+        ? "Moved to unassigned channels"
+        : `Moved to room ${categoryId}`
+      : topic || "Cleared channel topic";
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId,
+      actorDisplayName: actor.displayName,
+      action: hasCategoryId ? "moved_channel_room" : "updated_channel_topic",
+      targetId: String(channelId),
+      targetLabel: updated.name,
+      details: auditDetails,
+    });
     return { outcome: "updated", updated } as const;
   });
   if (result.outcome === "forbidden") {
@@ -714,19 +727,6 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     return;
   }
   const { updated } = result;
-  const auditDetails = hasCategoryId
-    ? categoryId === null
-      ? "Moved to unassigned channels"
-      : `Moved to room ${categoryId}`
-    : topic || "Cleared channel topic";
-  await writeAudit(
-    actor.clerkId,
-    actor.displayName,
-    hasCategoryId ? "moved_channel_room" : "updated_channel_topic",
-    String(channelId),
-    updated.name,
-    auditDetails,
-  );
   const { passwordHash: _passwordHash, ...safeChannel } = updated;
   wsHub.broadcastChannel(channelId, { type: "channel", channel: safeChannel });
   if (hasCategoryId) wsHub.broadcastChannelListChanged();
@@ -749,20 +749,33 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
     res.status(400).json({ error: "Invalid channel." });
     return;
   }
-  const [channel] = await db
-    .select({ id: channelsTable.id, name: channelsTable.name })
-    .from(channelsTable)
-    .where(eq(channelsTable.id, channelId));
-  if (!channel) {
+  const result = await db.transaction(async (tx) => {
+    const [channel] = await tx
+      .select({ id: channelsTable.id, name: channelsTable.name })
+      .from(channelsTable)
+      .where(eq(channelsTable.id, channelId))
+      .for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+
+    const deleted = await tx
+      .delete(messagesTable)
+      .where(eq(messagesTable.channelId, channelId))
+      .returning({ id: messagesTable.id });
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId,
+      actorDisplayName: actor.displayName,
+      action: "cleared_channel_history",
+      targetId: String(channelId),
+      targetLabel: channel.name,
+      details: `${deleted.length} messages deleted`,
+    });
+    return { outcome: "cleared", deleted: deleted.length } as const;
+  });
+  if (result.outcome === "not_found") {
     res.status(404).json(channelNotFoundError);
     return;
   }
-  const deleted = await db
-    .delete(messagesTable)
-    .where(eq(messagesTable.channelId, channelId))
-    .returning({ id: messagesTable.id });
-  await writeAudit(actor.clerkId, actor.displayName, "cleared_channel_history", String(channelId), channel.name, `${deleted.length} messages deleted`);
-  res.json({ ok: true, deleted: deleted.length });
+  res.json({ ok: true, deleted: result.deleted });
 });
 
 export default router;
