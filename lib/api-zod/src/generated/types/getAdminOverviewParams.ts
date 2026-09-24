@@ -34,4 +34,14 @@ activityActor?: string;
  * @maxLength 200
  */
 activityAction?: string;
+/**
+ * Inclusive UTC calendar date for the earliest activity to return; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityStartDate?: string;
+/**
+ * Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityEndDate?: string;
 };

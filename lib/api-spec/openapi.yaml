@@ -470,6 +470,14 @@ paths:
         - name: activityAction
           in: query
           schema: { type: string, maxLength: 200 }
+        - name: activityStartDate
+          in: query
+          description: Inclusive UTC calendar date for the earliest activity to return; must be YYYY-MM-DD.
+          schema: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        - name: activityEndDate
+          in: query
+          description: Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.
+          schema: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
       responses:
         "200":
           description: Administrative overview
@@ -774,4 +782,3 @@ components:
           type: string
           enum: [create, configure, invite, start]
       required: [community, nextStep]
-

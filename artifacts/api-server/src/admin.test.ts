@@ -2375,6 +2375,80 @@ describe("admin access controls", () => {
     }
   });
 
+  test("filters activity by inclusive date range together with actor, action, and pagination", async () => {
+    const marker = `audit_date_${randomUUID().replaceAll("-", "")}`;
+    const fixtures = [
+      { actor: `${marker} Alpha`, action: `${marker}_change`, createdAt: "2026-03-31T23:59:59.999Z" },
+      { actor: `${marker} Alpha`, action: `${marker}_change`, createdAt: "2026-04-01T00:00:00.000Z" },
+      { actor: `${marker} Alpha`, action: `${marker}_change`, createdAt: "2026-04-02T23:59:59.999Z" },
+      { actor: `${marker} Beta`, action: `${marker}_change`, createdAt: "2026-04-02T12:00:00.000Z" },
+      { actor: `${marker} Alpha`, action: `${marker}_other`, createdAt: "2026-04-02T13:00:00.000Z" },
+      { actor: `${marker} Alpha`, action: `${marker}_change`, createdAt: "2026-04-03T00:00:00.000Z" },
+    ];
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (const fixture of fixtures) {
+      const offset = parameters.length;
+      values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`);
+      parameters.push(
+        adminSession.userId,
+        fixture.actor,
+        fixture.action,
+        `${marker}_target`,
+        `${marker} target`,
+        fixture.createdAt,
+      );
+    }
+
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label, created_at)
+       VALUES ${values.join(", ")}
+       RETURNING id`,
+      parameters,
+    );
+    const fixtureIds = inserted.rows.map((row) => row.id);
+    const query = `/admin/overview?activityLimit=1&activityActor=${encodeURIComponent(`${marker} alpha`)}&activityAction=${encodeURIComponent(`${marker}_change`)}&activityStartDate=2026-04-01&activityEndDate=2026-04-02`;
+
+    try {
+      const firstPageResponse = await apiRequest(adminSession, `${query}&activityOffset=0`);
+      assert.equal(firstPageResponse.status, 200, JSON.stringify(firstPageResponse));
+      const firstPage = firstPageResponse.body as {
+        activity: Array<{ id: number; actor: string; action: string }>;
+        activityPagination: { hasMore: boolean; nextOffset: number | null };
+      };
+      assert.deepEqual(firstPage.activity.map((entry) => entry.id), [fixtureIds[2]]);
+      assert.equal(firstPage.activityPagination.hasMore, true);
+      assert.equal(firstPage.activityPagination.nextOffset, 1);
+
+      const secondPageResponse = await apiRequest(adminSession, `${query}&activityOffset=1`);
+      assert.equal(secondPageResponse.status, 200, JSON.stringify(secondPageResponse));
+      const secondPage = secondPageResponse.body as {
+        activity: Array<{ id: number; actor: string; action: string }>;
+        activityPagination: { hasMore: boolean; nextOffset: number | null };
+      };
+      assert.deepEqual(secondPage.activity.map((entry) => entry.id), [fixtureIds[1]]);
+      assert.equal(secondPage.activityPagination.hasMore, false);
+      assert.equal(secondPage.activityPagination.nextOffset, null);
+      assert.ok([...firstPage.activity, ...secondPage.activity].every(
+        (entry) => entry.actor === `${marker} Alpha` && entry.action === `${marker}_change`,
+      ));
+
+      for (const invalidPath of [
+        "/admin/overview?activityStartDate=2026-02-30",
+        "/admin/overview?activityStartDate=2026-04-03&activityEndDate=2026-04-01",
+        "/admin/overview?activityStartDate=2026-04-01&activityStartDate=2026-04-02",
+      ]) {
+        const invalidResponse = await apiRequest(adminSession, invalidPath);
+        assert.equal(invalidResponse.status, 400, JSON.stringify(invalidResponse));
+      }
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
   test("rejects oversized and repeated activity filters", async () => {
     const tooLong = "x".repeat(201);
     for (const path of [

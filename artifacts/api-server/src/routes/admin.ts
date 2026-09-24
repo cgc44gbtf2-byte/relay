@@ -75,6 +75,18 @@ function parseActivityFilter(value: unknown): string | null {
   if (!isValidQuery(value)) return null;
   return value.trim();
 }
+
+function parseActivityDate(value: unknown): string | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  if (year === undefined || month === undefined || day === undefined || year < 1) return null;
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.toISOString().slice(0, 10) === value ? value : null;
+}
+
 function parseActivityCursor(value: unknown): ActivityCursor | null | false {
   if (value === undefined) return null;
   if (
@@ -210,8 +222,18 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   const effectiveActivityOffset = activityCursor || activityAfterCursor ? 0 : activityOffset;
   const activityActor = parseActivityFilter(req.query.activityActor);
   const activityAction = parseActivityFilter(req.query.activityAction);
+  const activityStartDate = parseActivityDate(req.query.activityStartDate);
+  const activityEndDate = parseActivityDate(req.query.activityEndDate);
   if (activityActor === null || activityAction === null) {
     res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
+    return;
+  }
+  if (activityStartDate === null || activityEndDate === null) {
+    res.status(400).json({ error: "Activity dates must be valid YYYY-MM-DD calendar dates." });
+    return;
+  }
+  if (activityStartDate && activityEndDate && activityStartDate > activityEndDate) {
+    res.status(400).json({ error: "Activity start date must be on or before the end date." });
     return;
   }
   const [
@@ -308,6 +330,12 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
           : undefined,
         activityAction
           ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(activityAction)}%`)
+          : undefined,
+        activityStartDate
+          ? sql`${adminAuditLogsTable.createdAt} >= (${activityStartDate}::date::timestamp AT TIME ZONE 'UTC')`
+          : undefined,
+        activityEndDate
+          ? sql`${adminAuditLogsTable.createdAt} < ((${activityEndDate}::date + 1)::timestamp AT TIME ZONE 'UTC')`
           : undefined,
         activityCursor
           ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${activityCursor.createdAt}::timestamptz, ${activityCursor.id})`

@@ -1278,3 +1278,57 @@ describe("admin channel and category deletion permissions", () => {
     })).toBe(true);
   });
 });
+
+describe("admin activity date filters", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, "", "/");
+  });
+
+  it("requests activity with date, actor, and action filters and clears all filters", async () => {
+    const overviewRequests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/admin/status") {
+        return jsonResponse({
+          isAdmin: true,
+          bootstrapAvailable: false,
+          profile: { id: "user-1", username: "alpha", displayName: "Alpha" },
+        });
+      }
+      if (url.startsWith("/api/admin/overview")) {
+        overviewRequests.push(url);
+        return jsonResponse({
+          stats: { users: 1, channels: 0, messages: 0, online: 1, admins: 1 },
+          users: [],
+          channels: [],
+          categories: [],
+          recentMessages: [],
+          activity: [],
+          activityPagination: { limit: 20, offset: 0, hasMore: false, nextOffset: null, nextCursor: null },
+        });
+      }
+      if (url === "/api/admin/health") {
+        return jsonResponse({ api: "ok", database: "ok", checkedAt: "2026-09-21T12:00:00.000Z" });
+      }
+      return jsonResponse({ error: "Unexpected request" }, 404);
+    }));
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+
+    fireEvent.click(await screen.findByTestId("button-admin-nav-activity"));
+    fireEvent.change(await screen.findByTestId("input-activity-actor"), { target: { value: "Alpha" } });
+    fireEvent.change(screen.getByTestId("input-activity-action"), { target: { value: "change" } });
+    fireEvent.change(screen.getByTestId("input-activity-start-date"), { target: { value: "2026-04-01" } });
+    fireEvent.change(screen.getByTestId("input-activity-end-date"), { target: { value: "2026-04-03" } });
+
+    const filteredPath = "/api/admin/overview?activityActor=Alpha&activityAction=change&activityStartDate=2026-04-01&activityEndDate=2026-04-03";
+    await waitFor(() => expect(overviewRequests).toContain(filteredPath));
+
+    fireEvent.click(screen.getByTestId("button-clear-activity-filters"));
+    await waitFor(() => expect(overviewRequests).toContain("/api/admin/overview"));
+    expect((screen.getByTestId("input-activity-start-date") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
+  });
+});

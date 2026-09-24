@@ -1953,7 +1953,9 @@ function AdminConsole() {
   const [accountStatusFilter, setAccountStatusFilter] = useState("all");
   const [activityActorFilter, setActivityActorFilter] = useState("");
   const [activityActionFilter, setActivityActionFilter] = useState("");
-  const [loadedActivityFilters, setLoadedActivityFilters] = useState({ actor: "", action: "" });
+  const [activityStartDateFilter, setActivityStartDateFilter] = useState("");
+  const [activityEndDateFilter, setActivityEndDateFilter] = useState("");
+  const [loadedActivityFilters, setLoadedActivityFilters] = useState({ actor: "", action: "", startDate: "", endDate: "" });
   const overviewLoadRef = useRef(0);
   const [pendingRole, setPendingRole] = useState<{ id: string; label: string; role: "admin" | "moderator" | "community_admin" | "member" } | null>(null);
   const [pendingAccountStatus, setPendingAccountStatus] = useState<{ id: string; label: string; accountStatus: "active" | "suspended" } | null>(null);
@@ -1978,6 +1980,8 @@ function AdminConsole() {
     const requestedActivityFilters = {
       actor: activityActorFilter.trim(),
       action: activityActionFilter.trim(),
+      startDate: activityStartDateFilter,
+      endDate: activityEndDateFilter,
     };
     setError("");
     try {
@@ -1986,6 +1990,8 @@ function AdminConsole() {
       if (activityAfterCursor) activityParams.set("activityAfterCursor", activityAfterCursor);
       if (requestedActivityFilters.actor) activityParams.set("activityActor", requestedActivityFilters.actor);
       if (requestedActivityFilters.action) activityParams.set("activityAction", requestedActivityFilters.action);
+      if (requestedActivityFilters.startDate) activityParams.set("activityStartDate", requestedActivityFilters.startDate);
+      if (requestedActivityFilters.endDate) activityParams.set("activityEndDate", requestedActivityFilters.endDate);
       const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
       const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
       if (requestId !== overviewLoadRef.current) return;
@@ -2070,7 +2076,7 @@ function AdminConsole() {
   useEffect(() => {
     if (!status?.isAdmin || section !== "activity") return;
     void load();
-  }, [status?.isAdmin, section, activityActorFilter, activityActionFilter]);
+  }, [status?.isAdmin, section, activityActorFilter, activityActionFilter, activityStartDateFilter, activityEndDateFilter]);
   const claim = async () => { setWorking(true); try { await api("/admin/claim", { method: "POST", body: "{}" }); setStatus((value) => value ? { ...value, isAdmin: true, bootstrapAvailable: false } : value); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not claim admin access"); } finally { setWorking(false); } };
   const updateRole = async () => { if (!pendingRole) return; setWorking(true); try { await api(`/admin/users/${pendingRole.id}/role`, { method: "PATCH", body: JSON.stringify({ role: pendingRole.role }) }); setNotice(`Role updated for ${pendingRole.label}.`); setPendingRole(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update role"); } finally { setWorking(false); } };
   const updateAccountStatus = async () => { if (!pendingAccountStatus) return; setWorking(true); try { await api(`/admin/users/${pendingAccountStatus.id}/account-status`, { method: "PATCH", body: JSON.stringify({ accountStatus: pendingAccountStatus.accountStatus }) }); setNotice(`${pendingAccountStatus.label} is now ${pendingAccountStatus.accountStatus}.`); setPendingAccountStatus(null); setDirectoryLoaded(false); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update account status"); } finally { setWorking(false); } };
@@ -2187,7 +2193,9 @@ function AdminConsole() {
   const title = nav.find(([key]) => key === section)?.[1] ?? "overview";
   const actor = (value: ConsoleOverview["activity"][number]["actor"]) => typeof value === "string" ? value : value?.displayName ?? value?.username ?? "system";
   const activityFiltersCurrent = loadedActivityFilters.actor === activityActorFilter.trim()
-    && loadedActivityFilters.action === activityActionFilter.trim();
+    && loadedActivityFilters.action === activityActionFilter.trim()
+    && loadedActivityFilters.startDate === activityStartDateFilter
+    && loadedActivityFilters.endDate === activityEndDateFilter;
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading admin console…</div>;
   if (error && !status) return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
   if (!status?.isAdmin) return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10"><div className="mx-auto max-w-2xl"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><div className="mt-16 rounded-2xl border border-border bg-card p-8"><Shield className="h-8 w-8 text-primary" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">platform access</p><h1 className="mt-2 font-mono text-3xl font-bold">Admin access is managed by the platform</h1><p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground">Your account is a member. A platform operator must explicitly provision administrative access before you can enter this control room.</p></div></div></div>;
@@ -2238,7 +2246,7 @@ function AdminConsole() {
                        <Activity className="h-4 w-4 text-primary" />
                      </div>
                   </div>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_auto] xl:items-end">
                     <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
                       actor contains
                       <input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} maxLength={200} placeholder="name or display name" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-actor" />
@@ -2247,7 +2255,15 @@ function AdminConsole() {
                       action contains
                       <input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} maxLength={200} placeholder="action type" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-action" />
                     </label>
-                    <button type="button" onClick={() => { setActivityActorFilter(""); setActivityActionFilter(""); }} disabled={!activityActorFilter && !activityActionFilter} className="h-9 rounded-md border border-border px-3 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" data-testid="button-clear-activity-filters">clear filters</button>
+                    <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                      from date
+                      <input type="date" value={activityStartDateFilter} max={activityEndDateFilter || undefined} onChange={(event) => setActivityStartDateFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-start-date" />
+                    </label>
+                    <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                      through date
+                      <input type="date" value={activityEndDateFilter} min={activityStartDateFilter || undefined} onChange={(event) => setActivityEndDateFilter(event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-end-date" />
+                    </label>
+                    <button type="button" onClick={() => { setActivityActorFilter(""); setActivityActionFilter(""); setActivityStartDateFilter(""); setActivityEndDateFilter(""); }} disabled={!activityActorFilter && !activityActionFilter && !activityStartDateFilter && !activityEndDateFilter} className="h-9 rounded-md border border-border px-3 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" data-testid="button-clear-activity-filters">clear filters</button>
                   </div>
                 </div>
                 <div className="divide-y divide-border">

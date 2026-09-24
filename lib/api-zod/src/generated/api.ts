@@ -38,8 +38,6 @@ export const createAdminCustomRoleBodyLabelMax = 60;
 export const createAdminCustomRoleBodyDescriptionMax = 240;
 
 
-
-
 export const CreateAdminCustomRoleBody = zod.object({
   "label": zod.string().min(1).max(createAdminCustomRoleBodyLabelMax),
   "description": zod.string().max(createAdminCustomRoleBodyDescriptionMax),
@@ -70,8 +68,6 @@ export const UpdateAdminCustomRoleParams = zod.object({
 export const updateAdminCustomRoleBodyLabelMax = 60;
 
 export const updateAdminCustomRoleBodyDescriptionMax = 240;
-
-
 
 
 export const UpdateAdminCustomRoleBody = zod.object({
@@ -121,7 +117,6 @@ export const HealthCheckResponse = zod.object({
  */
 
 
-
 export const GetIrcStateQueryParams = zod.object({
   "channel": zod.coerce.string().min(1)
 })
@@ -150,7 +145,6 @@ export const GetIrcStateResponse = zod.object({
  */
 
 export const joinIrcChannelBodyNickMax = 24;
-
 
 
 export const JoinIrcChannelBody = zod.object({
@@ -186,7 +180,6 @@ export const sendIrcMessageBodyNickMax = 24;
 export const sendIrcMessageBodyTextMax = 500;
 
 
-
 export const SendIrcMessageBody = zod.object({
   "channel": zod.string().min(1),
   "nick": zod.string().min(1).max(sendIrcMessageBodyNickMax),
@@ -207,7 +200,6 @@ export const SendIrcMessageResponse = zod.object({
  * Opens a server-sent events stream for messages and presence changes in a channel.
  * @summary Stream IRC room events
  */
-
 
 
 export const StreamIrcEventsQueryParams = zod.object({
@@ -371,7 +363,6 @@ export const getCommunityWorkspaceQueryPoliciesOffsetDefault = 0;
 export const getCommunityWorkspaceQueryPoliciesOffsetMin = 0;
 
 
-
 export const GetCommunityWorkspaceQueryParams = zod.object({
   "employeesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryEmployeesLimitMax).default(getCommunityWorkspaceQueryEmployeesLimitDefault),
   "employeesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryEmployeesOffsetMin).default(getCommunityWorkspaceQueryEmployeesOffsetDefault),
@@ -398,7 +389,6 @@ export const GetCommunityWorkspaceQueryParams = zod.object({
 export const getCommunityWorkspaceResponsePaginationLimitMax = 100;
 
 export const getCommunityWorkspaceResponsePaginationOffsetMin = 0;
-
 
 
 export const GetCommunityWorkspaceResponse = zod.object({
@@ -460,7 +450,6 @@ export const listModerationLogsQueryOffsetDefault = 0;
 export const listModerationLogsQueryOffsetMin = 0;
 
 
-
 export const ListModerationLogsQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listModerationLogsQueryLimitMax).default(listModerationLogsQueryLimitDefault).describe('Maximum number of records to return. Values above 100 are capped.'),
   "offset": zod.coerce.number().int().min(listModerationLogsQueryOffsetMin).default(listModerationLogsQueryOffsetDefault).describe('Number of records to skip.')
@@ -495,7 +484,6 @@ export const listCommunityActivityQueryAuditOffsetMin = 0;
 export const listCommunityActivityQueryResourceMax = 120;
 
 
-
 export const ListCommunityActivityQueryParams = zod.object({
   "auditLimit": zod.coerce.number().int().min(1).max(listCommunityActivityQueryAuditLimitMax).default(listCommunityActivityQueryAuditLimitDefault),
   "auditOffset": zod.coerce.number().int().min(listCommunityActivityQueryAuditOffsetMin).default(listCommunityActivityQueryAuditOffsetDefault),
@@ -511,7 +499,6 @@ export const ListCommunityActivityQueryParams = zod.object({
 export const listCommunityActivityResponsePaginationLimitMax = 100;
 
 export const listCommunityActivityResponsePaginationOffsetMin = 0;
-
 
 
 export const ListCommunityActivityResponse = zod.object({
@@ -557,7 +544,6 @@ export const listCommunityDocumentsQueryFoldersOffsetDefault = 0;
 export const listCommunityDocumentsQueryFoldersOffsetMin = 0;
 
 
-
 export const ListCommunityDocumentsQueryParams = zod.object({
   "q": zod.coerce.string().optional(),
   "folderId": zod.coerce.number().int().optional(),
@@ -575,7 +561,6 @@ export const listCommunityDocumentsResponsePaginationOffsetMin = 0;
 export const listCommunityDocumentsResponseFoldersPaginationLimitMax = 100;
 
 export const listCommunityDocumentsResponseFoldersPaginationOffsetMin = 0;
-
 
 
 export const ListCommunityDocumentsResponse = zod.object({
@@ -617,15 +602,16 @@ export const getAdminOverviewQueryActivityActorMax = 200;
 
 export const getAdminOverviewQueryActivityActionMax = 200;
 
-
-
+export const getAdminOverviewQueryActivityStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
 export const GetAdminOverviewQueryParams = zod.object({
   "activityLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryActivityLimitMax).default(getAdminOverviewQueryActivityLimitDefault),
   "activityOffset": zod.coerce.number().int().min(getAdminOverviewQueryActivityOffsetMin).max(getAdminOverviewQueryActivityOffsetMax).default(getAdminOverviewQueryActivityOffsetDefault),
   "activityCursor": zod.coerce.string().max(getAdminOverviewQueryActivityCursorMax).optional(),
   "activityAfterCursor": zod.coerce.string().max(getAdminOverviewQueryActivityAfterCursorMax).optional().describe('Return events newer than this activity cursor.'),
   "activityActor": zod.coerce.string().max(getAdminOverviewQueryActivityActorMax).optional(),
-  "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional()
+  "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional(),
+  "activityStartDate": zod.coerce.string().regex(getAdminOverviewQueryActivityStartDateRegExp).optional().describe('Inclusive UTC calendar date for the earliest activity to return; must be YYYY-MM-DD.'),
+  "activityEndDate": zod.coerce.string().regex(getAdminOverviewQueryActivityEndDateRegExp).optional().describe('Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.')
 })
 
 export const getAdminOverviewResponseActivityPaginationLimitMax = 50;
@@ -633,7 +619,6 @@ export const getAdminOverviewResponseActivityPaginationLimitMax = 50;
 export const getAdminOverviewResponseActivityPaginationOffsetMin = 0;
 
 export const getAdminOverviewResponseActivityPaginationNextOffsetMin = 0;
-
 
 
 export const GetAdminOverviewResponse = zod.object({
@@ -667,3 +652,4 @@ export const GetAdminOverviewResponse = zod.object({
 })
 
 
+export const getAdminOverviewQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
