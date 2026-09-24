@@ -1454,7 +1454,7 @@ describe("admin access controls", () => {
     }
   });
 
-  test("keeps community upgrade pending until an admin approves and limits creation to one slot", async () => {
+  test("requires a verified active subscription, owns multiple public communities, and pauses them on downgrade", async () => {
     const post = (session: TestSession, path: string, body: object) => apiRequest(session, path, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1466,7 +1466,8 @@ describe("admin access controls", () => {
       [memberSession.userId],
     );
     const requestId = seeded.rows[0].id;
-    let communityId: number | null = null;
+    let renewalId: number | null = null;
+    const communityIds: number[] = [];
     try {
       const status = await apiRequest(memberSession, "/community-upgrades/status");
       assert.equal(status.status, 200);
@@ -1475,8 +1476,12 @@ describe("admin access controls", () => {
       assert.equal((await post(memberSession, "/public-communities", { name: "Too early" })).status, 403);
       assert.equal((await post(memberSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "paid-1234" })).status, 403);
       assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "" })).status, 400);
+      assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
+        paymentReference: "paid-1234", paidThrough: new Date(Date.now() - 1000).toISOString(),
+      })).status, 400);
+      const paidThrough = new Date(Date.now() + 30 * 86400_000).toISOString();
       const approved = await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
-        paymentReference: `test-${randomUUID()}`,
+        paymentReference: `test-${randomUUID()}`, paidThrough,
       });
       assert.equal(approved.status, 200, JSON.stringify(approved));
       assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
@@ -1486,13 +1491,46 @@ describe("admin access controls", () => {
         post(memberSession, "/public-communities", { name: "Extra community A" }),
         post(memberSession, "/public-communities", { name: "Extra community B" }),
       ]);
-      assert.deepEqual(attempts.map((response) => response.status).sort(), [201, 403]);
-      communityId = (attempts.find((response) => response.status === 201)?.body as { id: number }).id;
+      assert.deepEqual(attempts.map((response) => response.status).sort(), [201, 201]);
+      communityIds.push(...attempts.map((response) => (response.body as { id: number }).id));
+      assert.equal((attempts[0].body as { ownerId: string; plan: string }).ownerId, memberSession.userId);
+      assert.equal((attempts[0].body as { plan: string }).plan, "subscriber_community");
       const after = await apiRequest(memberSession, "/community-upgrades/status");
-      assert.equal((after.body as { approvedSlots: number; usedSlots: number }).approvedSlots, 1);
-      assert.equal((after.body as { approvedSlots: number; usedSlots: number }).usedSlots, 1);
+      assert.equal((after.body as { approvedSlots: number; usedSlots: number }).approvedSlots, 0);
+      assert.ok((after.body as { subscriptionEndsAt: string }).subscriptionEndsAt);
+      const ownChannel = await pool.query<{ id: number }>("SELECT id FROM irc_channels WHERE community_id = $1 LIMIT 1", [communityIds[0]]);
+      const destinations = await apiRequest(memberSession, `/channels/${ownChannel.rows[0].id}/public-spaces`);
+      assert.equal(destinations.status, 200);
+      assert.ok((destinations.body as Array<{ id: number }>).some((item) => item.id === communityIds[1]));
+      assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/end`, {})).status, 200);
+      assert.equal((await post(memberSession, "/public-communities", { name: "After downgrade" })).status, 403);
+      assert.equal((await apiRequest(memberSession, `/channels/${ownChannel.rows[0].id}/public-spaces`)).status, 400);
+      assert.equal((await apiRequest(memberSession, `/communities/${communityIds[0]}`)).status, 403);
+      assert.equal((await apiRequest(memberSession, `/channels/${ownChannel.rows[0].id}/messages`)).status, 403);
+      assert.equal((await apiRequest(memberSession, `/channels/${ownChannel.rows[0].id}/public-space`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ communityId: communityIds[1] }),
+      })).status, 403);
+      const saved = await pool.query("SELECT id FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+      assert.equal(saved.rows.length, 2);
+      const renewal = await pool.query<{ id: number }>(
+        `INSERT INTO irc_community_upgrade_requests (user_id, email, display_name, status)
+         VALUES ($1, 'test@example.invalid', 'Test requester', 'pending') RETURNING id`,
+        [memberSession.userId],
+      );
+      renewalId = renewal.rows[0].id;
+      assert.equal((await post(memberSession, `/admin/community-upgrades/${renewalId}/approve`, {
+        paymentReference: `test-${randomUUID()}`, paidThrough: new Date(Date.now() + 60 * 86400_000).toISOString(),
+      })).status, 403);
+      assert.equal((await post(adminSession, `/admin/community-upgrades/${renewalId}/approve`, {
+        paymentReference: `test-${randomUUID()}`, paidThrough: new Date(Date.now() + 60 * 86400_000).toISOString(),
+      })).status, 200);
+      assert.equal((await apiRequest(memberSession, `/channels/${ownChannel.rows[0].id}/public-spaces`)).status, 200);
+      await pool.query("UPDATE irc_community_upgrade_requests SET expires_at = now() - interval '1 second' WHERE id = $1", [renewalId]);
+      assert.equal((await post(memberSession, "/public-communities", { name: "Expired" })).status, 403);
+      assert.equal((await apiRequest(memberSession, `/communities/${communityIds[0]}`)).status, 403);
     } finally {
-      if (communityId !== null) {
+      for (const communityId of communityIds) {
         await pool.query("DELETE FROM irc_channel_members WHERE channel_id IN (SELECT id FROM irc_channels WHERE community_id = $1)", [communityId]);
         await pool.query("DELETE FROM irc_channels WHERE community_id = $1", [communityId]);
         await pool.query("DELETE FROM irc_categories WHERE community_id = $1", [communityId]);
@@ -1502,6 +1540,12 @@ describe("admin access controls", () => {
       }
       await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(requestId)]);
       await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'approved_community_upgrade'", [String(requestId)]);
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'ended_community_subscription'", [String(requestId)]);
+      if (renewalId !== null) {
+        await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(renewalId)]);
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'approved_community_upgrade'", [String(renewalId)]);
+        await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [renewalId]);
+      }
       await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
     }
   });

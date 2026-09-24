@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { randomUUID } from "node:crypto";
-import { and, count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNull } from "drizzle-orm";
 import {
   adminAuditLogsTable,
   categoriesTable,
@@ -16,11 +16,10 @@ import {
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, verifiedEmailAddressesForUser, type AuthenticatedRequest } from "../lib/auth";
+import { subscriberPaidThrough } from "../lib/community-subscription";
 import { wsHub } from "../lib/ws";
 
 const router: IRouter = Router();
-const PRICE_CENTS = 1999;
-const CURRENCY = "USD";
 
 const publicRequest = (request: typeof communityUpgradeRequestsTable.$inferSelect) => ({
   id: request.id,
@@ -42,13 +41,12 @@ router.get("/community-upgrades/status", requireAuth, async (req: AuthenticatedR
   ]);
   const pending = requests.find((item) => item.status === "pending");
   res.json({
-    priceCents: PRICE_CENTS,
-    currency: CURRENCY,
-    approvedSlots: requests.filter((item) => item.status === "approved").length,
+    approvedSlots: requests.filter((item) => item.status === "approved" && item.expiresAt === null).length,
     usedSlots: communities.filter((item) => item.plan === "purchased_community").length,
+    subscriptionEndsAt: await subscriberPaidThrough(userId),
     pendingRequest: pending ? publicRequest(pending) : null,
     ownedCommunities: communities.filter((item) =>
-      item.plan === "free_community" || item.plan === "purchased_community"),
+      ["free_community", "purchased_community", "subscriber_community"].includes(item.plan)),
   });
 });
 
@@ -72,9 +70,11 @@ router.post("/community-upgrades/request", requireAuth, async (req: Authenticate
     if (!admin) return { request: null, created: false } as const;
     const [request] = await tx.insert(communityUpgradeRequestsTable).values({
       userId, email: emails[0], displayName: profile.displayName,
-      priceCents: PRICE_CENTS, currency: CURRENCY,
+      // Subscription pricing is settled externally; zero means not recorded,
+      // not a free purchase. Historical requests retain their original amount.
+      priceCents: 0,
     }).returning();
-    const body = `Public community upgrade #${request.id} pending. User: ${profile.displayName} (${userId}). Verified email: ${emails[0]}. One permanent extra community: $19.99 USD. Confirm payment externally before approving in the admin console.`;
+    const body = `Public community subscription #${request.id} pending. User: ${profile.displayName} (${userId}). Verified email: ${emails[0]}. Confirm recurring payment externally and enter a paid-through date before approving.`;
     await tx.insert(messagesTable).values({
       senderId: userId,
       recipientId: admin.id,
@@ -85,7 +85,7 @@ router.post("/community-upgrades/request", requireAuth, async (req: Authenticate
       userId: admin.id,
       type: "direct_message",
       category: "direct_message",
-      body: `New $19.99 community upgrade request from ${profile.displayName} (${emails[0]}).`,
+       body: `New public community subscription request from ${profile.displayName} (${emails[0]}).`,
       entityType: "community_upgrade_request",
       entityId: String(request.id),
       actionUrl: "/admin?section=upgrades",
@@ -120,8 +120,11 @@ async function reviewRequest(req: AuthenticatedRequest, res: import("express").R
   const rawId = req.params.id;
   const id = Number(Array.isArray(rawId) ? rawId[0] : rawId);
   const paymentReference = typeof req.body?.paymentReference === "string" ? req.body.paymentReference.trim() : "";
-  if (!Number.isSafeInteger(id) || id < 1 || (decision === "approved" && (paymentReference.length < 4 || paymentReference.length > 120))) {
-    res.status(400).json({ error: "A valid request and a verified payment reference are required." });
+  const paidThrough = typeof req.body?.paidThrough === "string" ? new Date(req.body.paidThrough) : new Date(NaN);
+  if (!Number.isSafeInteger(id) || id < 1 || (decision === "approved"
+    && (paymentReference.length < 4 || paymentReference.length > 120
+      || !Number.isFinite(paidThrough.getTime()) || paidThrough <= new Date()))) {
+    res.status(400).json({ error: "A verified payment reference and a future paid-through date are required." });
     return;
   }
   let result: { outcome: string; request?: typeof communityUpgradeRequestsTable.$inferSelect;
@@ -134,10 +137,23 @@ async function reviewRequest(req: AuthenticatedRequest, res: import("express").R
       const [request] = await tx.select().from(communityUpgradeRequestsTable)
         .where(eq(communityUpgradeRequestsTable.id, id)).for("update");
       if (!request || request.status !== "pending") return { outcome: "conflict" };
+      // Serialize approval, cancellation and creation for the same subscriber.
+      await tx.select({ id: usersTable.clerkId }).from(usersTable)
+        .where(eq(usersTable.clerkId, request.userId)).for("update");
+      const [latest] = await tx.select({ expiresAt: communityUpgradeRequestsTable.expiresAt })
+        .from(communityUpgradeRequestsTable).where(and(
+          eq(communityUpgradeRequestsTable.userId, request.userId),
+          eq(communityUpgradeRequestsTable.status, "approved"),
+          gt(communityUpgradeRequestsTable.expiresAt, new Date()),
+        )).orderBy(desc(communityUpgradeRequestsTable.expiresAt)).limit(1);
+      if (decision === "approved" && latest?.expiresAt && paidThrough <= latest.expiresAt) {
+        return { outcome: "invalid_term" };
+      }
       const [updated] = await tx.update(communityUpgradeRequestsTable)
         .set({
           status: decision,
           paymentReference: decision === "approved" ? paymentReference : null,
+          expiresAt: decision === "approved" ? paidThrough : null,
           reviewedBy: adminId,
           reviewedAt: new Date(),
         }).where(eq(communityUpgradeRequestsTable.id, id)).returning();
@@ -146,7 +162,7 @@ async function reviewRequest(req: AuthenticatedRequest, res: import("express").R
         type: "administrative_action",
         category: "administrative_action",
         body: decision === "approved"
-          ? "Your community upgrade is approved. You can now create one additional public community."
+          ? `Your public community subscription is active until ${paidThrough.toISOString()}.`
           : "Your community upgrade request was declined.",
         entityType: "community_upgrade_request",
         entityId: String(request.id),
@@ -158,7 +174,7 @@ async function reviewRequest(req: AuthenticatedRequest, res: import("express").R
         action: decision === "approved" ? "approved_community_upgrade" : "declined_community_upgrade",
         targetId: String(request.id),
         targetLabel: request.displayName,
-        details: `One $19.99 USD permanent public-community slot ${decision}.`,
+        details: decision === "approved" ? `Public community subscription paid through ${paidThrough.toISOString()}.` : "Public community subscription declined.",
       });
       return { outcome: "ok", request: updated, notification };
     });
@@ -172,6 +188,10 @@ async function reviewRequest(req: AuthenticatedRequest, res: import("express").R
   }
   if (result.outcome === "forbidden") {
     res.status(403).json({ error: "Platform admin access required." });
+    return;
+  }
+  if (result.outcome === "invalid_term") {
+    res.status(400).json({ error: "The new paid-through date must extend the current subscription." });
     return;
   }
   if (result.outcome !== "ok" || !result.request || !result.notification) {
@@ -191,6 +211,50 @@ router.post("/admin/community-upgrades/:id/decline", requireAuth, async (req: Au
   await reviewRequest(req, res, "declined");
 });
 
+router.post("/admin/community-upgrades/:id/end", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const adminId = getUserId(req);
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ error: "Invalid subscription request." });
+    return;
+  }
+  const result = await db.transaction(async (tx) => {
+    const [admin] = await tx.select({ role: usersTable.role, displayName: usersTable.displayName })
+      .from(usersTable).where(eq(usersTable.clerkId, adminId)).for("share");
+    if (admin?.role !== "admin") return "forbidden";
+    const [request] = await tx.select().from(communityUpgradeRequestsTable)
+      .where(eq(communityUpgradeRequestsTable.id, id));
+    if (!request || request.expiresAt === null) return "not_found";
+    await tx.select({ id: usersTable.clerkId }).from(usersTable)
+      .where(eq(usersTable.clerkId, request.userId)).for("update");
+    const active = await tx.update(communityUpgradeRequestsTable).set({ status: "ended" })
+      .where(and(eq(communityUpgradeRequestsTable.userId, request.userId),
+        eq(communityUpgradeRequestsTable.status, "approved"),
+        gt(communityUpgradeRequestsTable.expiresAt, new Date()))).returning({ id: communityUpgradeRequestsTable.id });
+    if (!active.length) return "not_found";
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: adminId, actorDisplayName: admin.displayName,
+      action: "ended_community_subscription", targetId: String(id),
+      targetLabel: request.displayName,
+      details: `Ended ${active.length} active subscription term(s); communities retained for renewal.`,
+    });
+    await tx.insert(notificationsTable).values({
+      userId: request.userId, type: "administrative_action", category: "administrative_action",
+      body: "Your public community subscription has ended. Subscriber communities are paused until renewal.",
+      entityType: "community_upgrade_request", entityId: String(id), actionUrl: "/community-upgrades",
+    });
+    return "ok";
+  });
+  if (result === "forbidden") res.status(403).json({ error: "Platform admin access required." });
+  else if (result === "not_found") res.status(409).json({ error: "No active subscription to end." });
+  else {
+    const [request] = await db.select({ userId: communityUpgradeRequestsTable.userId })
+      .from(communityUpgradeRequestsTable).where(eq(communityUpgradeRequestsTable.id, id));
+    if (request) await wsHub.revokeExpiredCommunitySubscriptions(request.userId);
+    res.json({ ok: true });
+  }
+});
+
 router.post("/public-communities", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
@@ -202,14 +266,20 @@ router.post("/public-communities", requireAuth, async (req: AuthenticatedRequest
   const result = await db.transaction(async (tx) => {
     await tx.select({ id: usersTable.clerkId }).from(usersTable)
       .where(eq(usersTable.clerkId, userId)).for("update");
+    const [active] = await tx.select({ id: communityUpgradeRequestsTable.id })
+      .from(communityUpgradeRequestsTable)
+      .where(and(eq(communityUpgradeRequestsTable.userId, userId),
+        eq(communityUpgradeRequestsTable.status, "approved"),
+        gt(communityUpgradeRequestsTable.expiresAt, new Date()))).limit(1);
     const [approved] = await tx.select({ value: count() }).from(communityUpgradeRequestsTable)
-      .where(and(eq(communityUpgradeRequestsTable.userId, userId), eq(communityUpgradeRequestsTable.status, "approved")));
+      .where(and(eq(communityUpgradeRequestsTable.userId, userId), eq(communityUpgradeRequestsTable.status, "approved"),
+        isNull(communityUpgradeRequestsTable.expiresAt)));
     const [used] = await tx.select({ value: count() }).from(communitiesTable)
       .where(and(eq(communitiesTable.ownerId, userId), eq(communitiesTable.plan, "purchased_community")));
-    if (used.value >= approved.value) return null;
+    if (!active && used.value >= approved.value) return null;
     const [community] = await tx.insert(communitiesTable).values({
       name, slug: `relay-public-${randomUUID()}`, ownerId: userId,
-      plan: "purchased_community", businessType: "community",
+      plan: active ? "subscriber_community" : "purchased_community", businessType: "community",
       isPrivate: false, onboardingStep: 9,
     }).returning();
     await tx.insert(communityMembersTable).values({ communityId: community.id, userId, status: "owner" });
@@ -231,7 +301,7 @@ router.post("/public-communities", requireAuth, async (req: AuthenticatedRequest
     return community;
   });
   if (!result) {
-    res.status(403).json({ error: "No paid community slot is available. Request another upgrade." });
+    res.status(403).json({ error: "No active subscription or permanent community slot is available. Request or renew an upgrade." });
     return;
   }
   res.status(201).json(result);

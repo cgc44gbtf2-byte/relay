@@ -8,6 +8,7 @@ import {
   db,
 } from "@workspace/db";
 import { hasPermission } from "./permissions";
+import { isPublicCommunityAvailable } from "./community-subscription";
 
 export type ReadableChannel = {
   id: number;
@@ -32,10 +33,11 @@ export async function canReadChannel(
   const communityId = channel.communityId ?? null;
   if (communityId !== null) {
     const [community] = await db
-      .select({ isPrivate: communitiesTable.isPrivate })
+      .select({ isPrivate: communitiesTable.isPrivate, plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
       .from(communitiesTable)
       .where(eq(communitiesTable.id, communityId))
       .limit(1);
+    if (!community || !(await isPublicCommunityAvailable(community))) return false;
     const [member] = await db
       .select({ userId: communityMembersTable.userId })
       .from(communityMembersTable)

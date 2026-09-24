@@ -1,10 +1,11 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import { eq } from "drizzle-orm";
-import { db, usersTable } from "@workspace/db";
+import { eq, inArray } from "drizzle-orm";
+import { channelsTable, communitiesTable, db, usersTable } from "@workspace/db";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { clerkClient } from "@clerk/express";
 import { canReadChannel, channelForRead } from "./channel-access";
+import { subscriberPaidThrough } from "./community-subscription";
 
 type Client = {
   socket: WebSocket;
@@ -32,6 +33,7 @@ export class Hub {
   private tickets = new Map<string, Ticket>();
   private presenceWrites = new Map<string, Promise<void>>();
   private readonly ticketCleanupTimer: ReturnType<typeof setInterval>;
+  private readonly subscriptionCheckTimer: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly readChannel: ChannelReader = channelForRead,
@@ -43,6 +45,10 @@ export class Hub {
     );
     // The singleton hub should not keep a process (or a unit test) alive.
     this.ticketCleanupTimer.unref();
+    this.subscriptionCheckTimer = setInterval(() => {
+      void this.revokeExpiredCommunitySubscriptions().catch(() => undefined);
+    }, 60_000);
+    this.subscriptionCheckTimer.unref();
   }
 
   issueTicket(userId: string, sessionId: string): string {
@@ -91,6 +97,7 @@ export class Hub {
    */
   dispose(): void {
     clearInterval(this.ticketCleanupTimer);
+    clearInterval(this.subscriptionCheckTimer);
     for (const client of this.clients) clearInterval(client.sessionCheck);
   }
 
@@ -151,6 +158,30 @@ export class Hub {
   revokeUserChannelAccess(channelIds: readonly number[], userId: string): void {
     for (const channelId of channelIds) this.revokeChannelAccess(channelId, userId);
     this.broadcastUser(userId, { type: "workspace_membership_removed", channelIds: [...channelIds] });
+  }
+
+  async revokeExpiredCommunitySubscriptions(ownerId?: string): Promise<void> {
+    const subscribedIds = [...this.channelClients.keys()];
+    if (!subscribedIds.length) return;
+    const rows = await db.select({
+      channelId: channelsTable.id,
+      ownerId: communitiesTable.ownerId,
+      plan: communitiesTable.plan,
+    }).from(channelsTable)
+      .innerJoin(communitiesTable, eq(channelsTable.communityId, communitiesTable.id))
+      .where(inArray(channelsTable.id, subscribedIds));
+    const owners = [...new Set(rows.filter((row) => row.plan === "subscriber_community"
+      && (!ownerId || row.ownerId === ownerId)).map((row) => row.ownerId))];
+    const activeOwners = new Set((await Promise.all(owners.map(async (id) =>
+      await subscriberPaidThrough(id) ? id : null))).filter((id): id is string => id !== null));
+    for (const row of rows) {
+      if (row.plan !== "subscriber_community" || (ownerId && row.ownerId !== ownerId)
+        || activeOwners.has(row.ownerId)) continue;
+      for (const client of [...this.channelClients.get(row.channelId) ?? []]) {
+        this.removeChannelSubscription(client, row.channelId);
+        this.send(client.socket, { type: "workspace_membership_removed", channelIds: [row.channelId] });
+      }
+    }
   }
 
   disconnectUser(userId: string, reason = "Access revoked."): void {

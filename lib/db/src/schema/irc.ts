@@ -67,6 +67,8 @@ export const communitiesTable = pgTable(
     uniqueIndex("irc_communities_slug_idx").on(table.slug),
     uniqueIndex("irc_communities_free_owner_idx")
       .on(table.ownerId)
+      // Only the auto-provisioned free community is unique per owner.
+      // Subscriber communities use a separate plan and require a live entitlement.
       .where(sql`${table.plan} = 'free_community'`),
   ],
 );
@@ -80,6 +82,7 @@ export const communityUpgradeRequestsTable = pgTable("irc_community_upgrade_requ
   priceCents: integer("price_cents").notNull().default(1999),
   currency: text("currency").notNull().default("USD"),
   paymentReference: text("payment_reference"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
   reviewedBy: text("reviewed_by").references(() => usersTable.clerkId, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
@@ -89,6 +92,8 @@ export const communityUpgradeRequestsTable = pgTable("irc_community_upgrade_requ
   uniqueIndex("irc_community_upgrade_payment_reference_idx").on(table.paymentReference)
     .where(sql`${table.paymentReference} IS NOT NULL`),
   index("irc_community_upgrade_user_status_idx").on(table.userId, table.status),
+  index("irc_community_upgrade_active_idx").on(table.userId, table.expiresAt)
+    .where(sql`${table.status} = 'approved' AND ${table.expiresAt} IS NOT NULL`),
 ]);
 
 export const permissionDefinitionsTable = pgTable(

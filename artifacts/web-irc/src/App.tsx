@@ -1878,6 +1878,7 @@ function AdminCommunityUpgradesPanel() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [references, setReferences] = useState<Record<number, string>>({});
+  const [paidThroughDates, setPaidThroughDates] = useState<Record<number, string>>({});
   const load = async () => {
     setError("");
     try { setRequests(await api<CommunityUpgradeRequest[]>("/admin/community-upgrades")); }
@@ -1887,21 +1888,35 @@ function AdminCommunityUpgradesPanel() {
   useEffect(() => { void load(); }, []);
   const decide = async (request: CommunityUpgradeRequest, action: "approve" | "decline") => {
     const paymentReference = references[request.id]?.trim() ?? "";
-    if (action === "approve" && !paymentReference) { setError("Enter the external payment reference before approving."); return; }
+    const paidThrough = new Date(`${paidThroughDates[request.id] ?? ""}T23:59:59Z`);
+    if (action === "approve" && (!paymentReference || !Number.isFinite(paidThrough.getTime()) || paidThrough <= new Date())) {
+      setError("Enter the verified external payment reference and a future paid-through date before approving."); return;
+    }
     setWorking(request.id);
     setError("");
     try {
-      await api(`/admin/community-upgrades/${request.id}/${action}`, { method: "POST", ...(action === "approve" ? { body: JSON.stringify({ paymentReference }) } : { body: "{}" }) });
+      await api(`/admin/community-upgrades/${request.id}/${action}`, { method: "POST", ...(action === "approve" ? { body: JSON.stringify({ paymentReference, paidThrough: paidThrough.toISOString() }) } : { body: "{}" }) });
       setNotice(`Request ${request.id} ${action}d.`);
       await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : `Could not ${action} request`); }
     finally { setWorking(null); }
   };
+  const endSubscription = async (request: CommunityUpgradeRequest) => {
+    if (!window.confirm(`End ${request.displayName}'s subscription now? Their subscriber communities will be paused, not deleted.`)) return;
+    setWorking(request.id);
+    setError("");
+    try {
+      await api(`/admin/community-upgrades/${request.id}/end`, { method: "POST", body: "{}" });
+      setNotice("Subscription ended. Communities are retained for renewal.");
+      await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not end subscription"); }
+    finally { setWorking(null); }
+  };
   return <section className="rounded-lg border border-border bg-card" data-testid="section-admin-community-upgrades">
-    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">public community upgrades</h2><p className="mt-1 max-w-xl font-mono text-[10px] leading-5 text-muted-foreground">Verify external payment manually before approving a request. Relay does not process payment.</p></div><button type="button" disabled={loading || working !== null} onClick={() => void load()} className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50" data-testid="button-refresh-community-upgrades"><RefreshCw className="h-3 w-3" />refresh</button></div>
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">public community subscriptions</h2><p className="mt-1 max-w-xl font-mono text-[10px] leading-5 text-muted-foreground">Verify external payment before approving or renewing. Enter the date access is paid through. Relay does not process payment.</p></div><button type="button" disabled={loading || working !== null} onClick={() => void load()} className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-50" data-testid="button-refresh-community-upgrades"><RefreshCw className="h-3 w-3" />refresh</button></div>
     {error && <p className="m-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive" role="alert" data-testid="status-admin-community-upgrades-error">{error}</p>}
     {notice && <p className="m-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4" data-testid="status-admin-community-upgrades-notice">{notice}</p>}
-    {loading ? <p className="p-5 font-mono text-xs text-muted-foreground">loading upgrade requests…</p> : requests.length === 0 ? <p className="p-5 font-mono text-xs text-muted-foreground">No upgrade requests.</p> : <div className="divide-y divide-border">{requests.map((request) => <div key={request.id} className="space-y-3 px-5 py-4" data-testid={`row-community-upgrade-${request.id}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold">{request.displayName} <span className="font-normal text-muted-foreground">({request.email})</span></p><p className="mt-1 font-mono text-[10px] text-muted-foreground">request #{request.id} · {activityDateTimeFormatter.format(new Date(request.createdAt))}</p></div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{request.status}</span></div>{request.status === "pending" ? <div className="flex flex-col gap-2 sm:flex-row"><input value={references[request.id] ?? ""} onChange={(event) => setReferences((current) => ({ ...current, [request.id]: event.target.value }))} placeholder="external payment reference" className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-[11px]" data-testid={`input-payment-reference-${request.id}`} /><button type="button" disabled={working === request.id} onClick={() => void decide(request, "approve")} className="rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50" data-testid={`button-approve-upgrade-${request.id}`}>{working === request.id ? "working…" : "approve"}</button><button type="button" disabled={working === request.id} onClick={() => void decide(request, "decline")} className="rounded-md border border-destructive/40 px-3 py-2 font-mono text-[10px] text-destructive disabled:opacity-50" data-testid={`button-decline-upgrade-${request.id}`}>decline</button></div> : request.paymentReference ? <p className="font-mono text-[10px] text-muted-foreground">payment reference: {request.paymentReference}</p> : null}</div>)}</div>}
+    {loading ? <p className="p-5 font-mono text-xs text-muted-foreground">loading upgrade requests…</p> : requests.length === 0 ? <p className="p-5 font-mono text-xs text-muted-foreground">No upgrade requests.</p> : <div className="divide-y divide-border">{requests.map((request) => <div key={request.id} className="space-y-3 px-5 py-4" data-testid={`row-community-upgrade-${request.id}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold">{request.displayName} <span className="font-normal text-muted-foreground">({request.email})</span></p><p className="mt-1 font-mono text-[10px] text-muted-foreground">request #{request.id} · {activityDateTimeFormatter.format(new Date(request.createdAt))}</p></div><span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{request.status}</span></div>{request.status === "pending" ? <div className="flex flex-col flex-wrap gap-2 sm:flex-row"><input value={references[request.id] ?? ""} onChange={(event) => setReferences((current) => ({ ...current, [request.id]: event.target.value }))} placeholder="external payment reference" className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-[11px]" data-testid={`input-payment-reference-${request.id}`} /><label className="font-mono text-[10px] text-muted-foreground">paid through <input type="date" value={paidThroughDates[request.id] ?? ""} onChange={(event) => setPaidThroughDates((current) => ({ ...current, [request.id]: event.target.value }))} className="block h-9 rounded border border-input bg-background px-2 text-foreground" data-testid={`input-paid-through-${request.id}`} /></label><button type="button" disabled={working === request.id} onClick={() => void decide(request, "approve")} className="rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50" data-testid={`button-approve-upgrade-${request.id}`}>{working === request.id ? "working…" : "approve"}</button><button type="button" disabled={working === request.id} onClick={() => void decide(request, "decline")} className="rounded-md border border-destructive/40 px-3 py-2 font-mono text-[10px] text-destructive disabled:opacity-50" data-testid={`button-decline-upgrade-${request.id}`}>decline</button></div> : <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] text-muted-foreground">{request.paymentReference && <span>payment reference: {request.paymentReference}</span>}{request.expiresAt ? <span>paid through {activityDateTimeFormatter.format(new Date(request.expiresAt))}</span> : request.status === "approved" ? <span>legacy permanent slot</span> : null}{request.status === "approved" && request.expiresAt && new Date(request.expiresAt) > new Date() && <button type="button" disabled={working !== null} onClick={() => void endSubscription(request)} className="rounded border border-destructive/40 px-2 py-1 text-destructive" data-testid={`button-end-subscription-${request.id}`}>end subscription</button>}</div>}</div>)}</div>}
   </section>;
 }
 
@@ -2229,10 +2244,9 @@ type OnboardingState = {
   communities: OnboardingCommunity[];
 };
 type CommunityUpgradeStatus = {
-  priceCents: number;
-  currency: string;
   approvedSlots: number;
   usedSlots: number;
+  subscriptionEndsAt: string | null;
   pendingRequest: { id: number; status: string; createdAt: string } | null;
   ownedCommunities: Array<{ id: number; name: string; plan: string }>;
 };
@@ -2244,6 +2258,7 @@ type CommunityUpgradeRequest = {
   status: string;
   createdAt: string;
   paymentReference?: string | null;
+  expiresAt?: string | null;
 };
 type CommunityDetail = {
   community: CommunitySummary;
@@ -3479,7 +3494,7 @@ function CommunityUpgradePanel() {
     setError("");
     try {
       await api("/community-upgrades/request", { method: "POST", body: "{}" });
-      setNotice("Request submitted. An administrator will review your external payment before approving a public community.");
+      setNotice("Request submitted. An administrator will verify your external payment and paid-through date before activating access.");
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not submit upgrade request");
@@ -3503,19 +3518,19 @@ function CommunityUpgradePanel() {
       setWorking(false);
     }
   };
-  const price = status ? new Intl.NumberFormat(undefined, { style: "currency", currency: status.currency || "USD" }).format(status.priceCents / 100) : "$19.99";
   return <section className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8" data-testid="section-community-upgrade">
     <div className="flex flex-wrap items-start justify-between gap-4">
-      <div><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">public community</p><h2 className="mt-2 font-mono text-xl font-bold">Upgrade your Relay presence.</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">Request one permanent extra public community slot for a one-time {price} USD. Payment is handled externally and must be manually verified by an administrator; submitting this request does not complete payment automatically.</p></div>
-      <div className="rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-right"><p className="font-mono text-2xl font-bold text-primary">{price}</p><p className="font-mono text-[9px] uppercase text-muted-foreground">one community slot</p></div>
+      <div><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">public communities</p><h2 className="mt-2 font-mono text-xl font-bold">Subscribe for more communities.</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">Your first public community is free. Additional public communities require an externally paid recurring subscription, verified and renewed by a platform administrator. Submitting a request does not process a payment. If your subscription expires, subscriber communities pause without deleting their content until you renew. Business workspaces are separate.</p></div>
     </div>
     {loading && <p className="mt-5 font-mono text-xs text-muted-foreground" data-testid="status-community-upgrade-loading">checking upgrade status…</p>}
     {error && <p className="mt-5 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive" role="alert" data-testid="status-community-upgrade-error">{error}</p>}
     {notice && <p className="mt-5 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4" data-testid="status-community-upgrade-notice">{notice}</p>}
     {!loading && status && <div className="mt-6 space-y-5">
+      {status.subscriptionEndsAt && <p className="font-mono text-xs text-chart-4" data-testid="status-subscription-active">Subscription active through {activityDateTimeFormatter.format(new Date(status.subscriptionEndsAt))}.</p>}
+      {!status.subscriptionEndsAt && status.ownedCommunities.some((item) => item.plan === "subscriber_community") && <p className="font-mono text-xs text-destructive" data-testid="status-subscription-paused">Your subscriber communities are paused. Request renewal to restore access; no content has been deleted.</p>}
       {status.pendingRequest && <div className="rounded-lg border border-primary/25 bg-primary/5 p-4" data-testid="status-community-upgrade-pending"><p className="font-mono text-xs font-bold">Request pending review</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Submitted {activityDateTimeFormatter.format(new Date(status.pendingRequest.createdAt))}. Wait for an administrator to verify the external payment; no payment was processed by Relay.</p><span className="mt-2 inline-flex rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{status.pendingRequest.status}</span></div>}
-      {!status.pendingRequest && <button type="button" disabled={working} onClick={() => void requestUpgrade()} className="rounded-md bg-primary px-4 py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50" data-testid="button-request-community-upgrade">{working ? "submitting…" : "request public community"}</button>}
-      {status.approvedSlots > status.usedSlots && <form onSubmit={createPublicCommunity} className="rounded-lg border border-chart-4/30 bg-chart-4/5 p-4" data-testid="form-create-public-community"><p className="font-mono text-xs font-bold text-chart-4">Approved slot available</p><p className="mt-1 text-xs text-muted-foreground">Choose a name for your public community.</p><div className="mt-3 flex flex-col gap-2 sm:flex-row"><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="community name" className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-xs" data-testid="input-public-community-name" /><button disabled={working} className="rounded-md bg-primary px-4 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50" data-testid="button-create-public-community">{working ? "creating…" : "create community"}</button></div></form>}
+      {!status.pendingRequest && <button type="button" disabled={working} onClick={() => void requestUpgrade()} className="rounded-md bg-primary px-4 py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50" data-testid="button-request-community-upgrade">{working ? "submitting…" : status.subscriptionEndsAt ? "request renewal" : "request subscription"}</button>}
+      {(status.subscriptionEndsAt || status.approvedSlots > status.usedSlots) && <form onSubmit={createPublicCommunity} className="rounded-lg border border-chart-4/30 bg-chart-4/5 p-4" data-testid="form-create-public-community"><p className="font-mono text-xs font-bold text-chart-4">Additional community available</p><p className="mt-1 text-xs text-muted-foreground">Choose a name for your public community.</p><div className="mt-3 flex flex-col gap-2 sm:flex-row"><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="community name" className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-xs" data-testid="input-public-community-name" /><button disabled={working} className="rounded-md bg-primary px-4 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50" data-testid="button-create-public-community">{working ? "creating…" : "create community"}</button></div></form>}
       {status.ownedCommunities.length > 0 && <div><h3 className="font-mono text-xs font-bold">Your public communities</h3><div className="mt-2 divide-y divide-border rounded-lg border border-border">{status.ownedCommunities.map((item) => <div key={item.id} className="flex items-center justify-between gap-3 px-4 py-3" data-testid={`row-owned-community-${item.id}`}><span className="font-mono text-xs">{item.name}</span><span className="font-mono text-[9px] uppercase text-muted-foreground">{item.plan}</span></div>)}</div></div>}
     </div>}
   </section>;

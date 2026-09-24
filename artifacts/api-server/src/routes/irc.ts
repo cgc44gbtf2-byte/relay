@@ -41,6 +41,7 @@ import { AccountDeletionPendingError, assertDeletionEligibleUser } from "../lib/
 import { wsHub } from "../lib/ws";
 import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
+import { isPublicCommunityAvailable, subscriberPaidThrough } from "../lib/community-subscription";
 import { isValidUploadedObjectPath, signedObjectUrlForPath, validateUploadMetadata } from "./storage";
 import { channelAccessRequiredError, channelNotFoundError } from "./errors";
 import { hasPermission, permissionsForCommunities } from "../lib/permissions";
@@ -51,6 +52,23 @@ import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
 import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
 
 const router: IRouter = Router();
+router.use("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res, next): Promise<void> => {
+  if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
+    next();
+    return;
+  }
+  const channelId = Number(req.params.channelId);
+  if (Number.isSafeInteger(channelId) && channelId > 0) {
+    const [space] = await db.select({ plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
+      .from(channelsTable).innerJoin(communitiesTable, eq(channelsTable.communityId, communitiesTable.id))
+      .where(eq(channelsTable.id, channelId)).limit(1);
+    if (space && !(await isPublicCommunityAvailable(space))) {
+      res.status(403).json({ error: "This community is paused until its owner's subscription is renewed." });
+      return;
+    }
+  }
+  next();
+});
 const channelJoinLimiter = new FixedWindowLimiter(20, 60_000);
 const channelInviteLimiter = new FixedWindowLimiter(30, 60_000);
 const userSearchLimiter = new FixedWindowLimiter(60, 60_000);
@@ -453,6 +471,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
           name: communitiesTable.name,
           isPrivate: communitiesTable.isPrivate,
           plan: communitiesTable.plan,
+          ownerId: communitiesTable.ownerId,
         })
         .from(communitiesTable)
         .where(inArray(communitiesTable.id, communityIds)),
@@ -465,12 +484,20 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
         )),
     ])
     : [[], []];
+  const activeSubscriberOwners = new Set<string>();
+  await Promise.all([...new Set(communities.filter((community) => community.plan === "subscriber_community")
+    .map((community) => community.ownerId))].map(async (ownerId) => {
+    if (await subscriberPaidThrough(ownerId)) activeSubscriberOwners.add(ownerId);
+  }));
+  const availableCommunities = communities.filter((community) =>
+    community.plan !== "subscriber_community" || activeSubscriberOwners.has(community.ownerId));
+  const availableCommunityIds = new Set(availableCommunities.map((community) => community.id));
   const communityPrivacy = new Map(
-    communities.map((community) => [community.id, community.isPrivate]),
+    availableCommunities.map((community) => [community.id, community.isPrivate]),
   );
-  const communityNames = new Map(communities.map((community) => [community.id, community.name]));
-  const publicCommunityIds = new Set(communities
-    .filter((community) => !community.isPrivate && ["free_community", "purchased_community"].includes(community.plan))
+  const communityNames = new Map(availableCommunities.map((community) => [community.id, community.name]));
+  const publicCommunityIds = new Set(availableCommunities
+    .filter((community) => !community.isPrivate && ["free_community", "purchased_community", "subscriber_community"].includes(community.plan))
     .map((community) => community.id));
   const membershipIds = new Set(
     memberships.map((membership) => membership.communityId),
@@ -488,6 +515,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     return access;
   };
   const visibleChannels = await Promise.all(allChannels.map(async (channel) => {
+    if (channel.communityId !== null && !availableCommunityIds.has(channel.communityId)) return null;
     if (
       channel.communityId !== null
       && communityPrivacy.get(channel.communityId) !== false
@@ -513,6 +541,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   );
   const visibleCategories = await Promise.all(allCategories.map(async (category) => {
     if (category.communityId === null) return category;
+    if (!availableCommunityIds.has(category.communityId)) return null;
     return communityPrivacy.get(category.communityId) !== true
       || await hasPrivateCommunityAccess(category.communityId)
       ? category
@@ -555,8 +584,14 @@ router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): P
     communityIds,
     ["view_business", "manage_community"],
   );
+  const categoryCommunities = communityIds.length ? await db.select({
+    id: communitiesTable.id, plan: communitiesTable.plan, ownerId: communitiesTable.ownerId,
+  }).from(communitiesTable).where(inArray(communitiesTable.id, communityIds)) : [];
+  const availableCategoryCommunities = new Set((await Promise.all(categoryCommunities.map(async (community) =>
+    await isPublicCommunityAvailable(community) ? community.id : null))).filter((id): id is number => id !== null));
   const categories = allCategories.filter((category) => {
     if (category.communityId === null) return true;
+    if (!availableCategoryCommunities.has(category.communityId)) return false;
     const communityPermissions = permissions.get(category.communityId);
     return communityPermissions?.has("view_business")
       || communityPermissions?.has("manage_community");
@@ -610,6 +645,12 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     }
   }
   if (communityId !== null) {
+    const [targetCommunity] = await db.select({ plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
+      .from(communitiesTable).where(eq(communitiesTable.id, communityId));
+    if (targetCommunity && !(await isPublicCommunityAvailable(targetCommunity))) {
+      res.status(403).json({ error: "This community is paused until its owner's subscription is renewed." });
+      return;
+    }
     if (!Number.isInteger(communityId) || !(await hasPermission(userId, "create_channel", {
       communityId,
       categoryId: categoryId ?? undefined,
@@ -641,7 +682,7 @@ router.post("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pr
     ...channel, passwordHash: undefined, joined: true, accessStatus: "member", memberCount: 1,
     communityName: sourceCommunity?.name ?? "Public network",
     canMovePublicSpace: !isPrivate && (communityId === null
-      || (sourceCommunity?.isPrivate === false && ["free_community", "purchased_community"].includes(sourceCommunity.plan))),
+      || (sourceCommunity?.isPrivate === false && ["free_community", "purchased_community", "subscriber_community"].includes(sourceCommunity.plan))),
   });
 });
 
@@ -1225,15 +1266,17 @@ router.get("/channels/:channelId/public-spaces", requireAuth, async (req: Authen
   }
   const source = channel.communityId === null ? null : (await db.select().from(communitiesTable)
     .where(eq(communitiesTable.id, channel.communityId)))[0];
-  if (channel.isPrivate || (source && (source.isPrivate || !["free_community", "purchased_community"].includes(source.plan)))) {
+  if (channel.isPrivate || (source && (source.isPrivate || !["free_community", "purchased_community", "subscriber_community"].includes(source.plan)
+    || !(await isPublicCommunityAvailable(source))))) {
     res.status(400).json({ error: "Only channels in public communities or the public network can move between public spaces." });
     return;
   }
-  const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name })
+  const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name, plan: communitiesTable.plan })
     .from(communitiesTable)
-    .where(and(eq(communitiesTable.ownerId, userId), inArray(communitiesTable.plan, ["free_community", "purchased_community"]),
+    .where(and(eq(communitiesTable.ownerId, userId), inArray(communitiesTable.plan, ["free_community", "purchased_community", "subscriber_community"]),
       eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active")));
-  res.json(owned.filter((community) => community.id !== channel.communityId));
+  const active = Boolean(await subscriberPaidThrough(userId));
+  res.json(owned.filter((community) => community.id !== channel.communityId && (community.plan !== "subscriber_community" || active)));
 });
 
 router.patch("/channels/:channelId/public-space", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1262,12 +1305,14 @@ router.patch("/channels/:channelId/public-space", requireAuth, async (req: Authe
         .orderBy(asc(communitiesTable.id)).for("share")
       : [];
     const source = communities.find((item) => item.id === channel.communityId);
-    if (channel.communityId !== null && (!source || source.isPrivate || !["free_community", "purchased_community"].includes(source.plan))) {
+    if (channel.communityId !== null && (!source || source.isPrivate || !["free_community", "purchased_community", "subscriber_community"].includes(source.plan)
+      || !(await isPublicCommunityAvailable(source)))) {
       return { outcome: "not_public" } as const;
     }
     const destination = communities.find((item) => item.id === destinationId);
     if (!destination || destination.ownerId !== userId
-      || destination.isPrivate || !["free_community", "purchased_community"].includes(destination.plan) || destination.status !== "active") {
+      || destination.isPrivate || !["free_community", "purchased_community", "subscriber_community"].includes(destination.plan)
+      || !(await isPublicCommunityAvailable(destination)) || destination.status !== "active") {
       return { outcome: "invalid_destination" } as const;
     }
     const [updated] = await tx.update(channelsTable)

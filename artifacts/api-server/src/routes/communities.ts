@@ -62,6 +62,7 @@ import {
 import { categoryForNotification, createNotification, createNotifications } from "../lib/notifications";
 import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
+import { isPublicCommunityAvailable } from "../lib/community-subscription";
 import { validateUploadMetadata } from "./storage";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
 import { AccountDeletionPendingError, assertDeletionEligibleUser, finalizePendingAccountDeletion } from "../lib/account-deletion";
@@ -75,6 +76,20 @@ import {
 } from "../lib/destructive-policy";
 
 const router: IRouter = Router();
+// Subscriber communities are retained on downgrade but are unavailable to all
+// members until the externally verified subscription is renewed.
+router.use("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res, next): Promise<void> => {
+  const id = Number(req.params.communityId);
+  if (Number.isSafeInteger(id) && id > 0) {
+    const [community] = await db.select({ plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
+      .from(communitiesTable).where(eq(communitiesTable.id, id));
+    if (community && !(await isPublicCommunityAvailable(community))) {
+      res.status(403).json({ error: "This community is paused until its owner's subscription is renewed." });
+      return;
+    }
+  }
+  next();
+});
 const scopedCommunityPermissions = ["manage_community", "manage_community_members", "create_channel", "create_announcement"] as const;
 const invitationRoles = ["member", "employee", "contractor"] as const;
 
