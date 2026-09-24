@@ -6,6 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './customRole';
+export * from './customRoleCatalog';
+export * from './customRoleCatalogPermissionsItem';
+export * from './customRoleInput';
+export * from './customRoleInputScopeType';
+export * from './customRoleScopeType';
 export * from './errorResponse';
 export * from './getIrcStateParams';
 export * from './healthStatus';
@@ -24,4 +30,5 @@ export * from './onboardingProgressInputStep';
 export * from './onboardingProgressNextStep';
 export * from './onboardingState';
 export * from './onboardingStateNextStep';
+export * from './retireAdminCustomRole200';
 export * from './streamIrcEventsParams';

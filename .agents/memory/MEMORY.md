@@ -16,6 +16,7 @@
 - [Dependency audit platform entries](dependency-audit-platform-entries.md) — pnpm’s graph can include optional packages absent from node_modules on the current platform.
 - [Community product separation](community-product-separation.md) — signup auto-provisions one free community; paid workspaces use a separate path.
 - [Authorization locking](authorization-locking.md) — privileged writes must lock authority-granting rows; serializable isolation alone does not stop stale revocation races.
+- [Department role scopes](department-role-scopes.md) — business departments and channel categories are different resources; never substitute one for the other in scoped grants.
 - [Realtime history reconciliation](realtime-history-reconciliation.md) — merge only post-refresh changes and scope history/pagination state to a stable room key.
 - [Chat reconnect test timing](chat-reconnect-test-timing.md) — allow initial room bootstrap to settle before counting socket tickets in reconnect tests.
 - [Migration baseline safety](migration-baseline-safety.md) — establish Relay’s first migration baseline from verified production schema, never an assumed development schema.

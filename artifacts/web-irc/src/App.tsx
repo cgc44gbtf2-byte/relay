@@ -1413,6 +1413,8 @@ type AdminAssignment = {
   communityName: string | null;
   categoryId: number | null;
   categoryName: string | null;
+  departmentId: number | null;
+  departmentName: string | null;
   channelId: number | null;
   channelName: string | null;
   createdAt: string;
@@ -1420,18 +1422,20 @@ type AdminAssignment = {
 type AdminScopeOptions = {
   communities: Array<{ id: number; name: string }>;
   categories: Array<{ id: number; name: string; communityId: number | null }>;
+  departments: Array<{ id: number; name: string; communityId: number }>;
   channels: Array<{ id: number; name: string; communityId: number | null; categoryId: number | null }>;
 };
 type CustomRole = {
   key: string;
   label: string;
   description: string;
-  scopeType: "community" | "category" | "channel";
+  scopeType: "community" | "category" | "department" | "channel";
   permissions: string[];
+  isActive: boolean;
 };
 type CustomRoleCatalog = {
   roles: CustomRole[];
-  permissions: Array<{ key: string }>;
+  permissions: Array<{ key: string; description: string }>;
 };
 
 function EmptyAdminState({ label }: { label: string }) {
@@ -1631,25 +1635,47 @@ function AdminRoleAssignmentsPanel({
   customRoles,
   permissions,
   onCreateCustomRole,
+  onEditCustomRole,
+  onRetireCustomRole,
 }: {
   assignments: AdminAssignment[];
   users: ConsoleOverview["users"];
   options: AdminScopeOptions;
   working: boolean;
-  onGrant: (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => void;
+  onGrant: (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; departmentId: number | null; channelId: number | null }) => void;
   onRevoke: (assignment: AdminAssignment) => void;
   customRoles: CustomRole[];
-  permissions: Array<{ key: string }>;
-  onCreateCustomRole: (value: { label: string; description: string; scopeType: string; permissions: string[] }) => void;
+  permissions: Array<{ key: string; description: string }>;
+  onCreateCustomRole: (value: { label: string; description: string; scopeType: string; permissions: string[] }) => Promise<void>;
+  onEditCustomRole: (key: string, value: { label: string; description: string; scopeType: string; permissions: string[] }) => Promise<void>;
+  onRetireCustomRole: (key: string) => Promise<void>;
 }) {
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState("platform_moderator");
   const [scopeType, setScopeType] = useState("platform");
   const [scopeId, setScopeId] = useState("");
+
+  const [editingRoleKey, setEditingRoleKey] = useState<string | null>(null);
   const [customLabel, setCustomLabel] = useState("");
   const [customDescription, setCustomDescription] = useState("");
   const [customScope, setCustomScope] = useState("community");
   const [customPermissions, setCustomPermissions] = useState<string[]>([]);
+
+  const resetForm = () => {
+    setEditingRoleKey(null);
+    setCustomLabel("");
+    setCustomDescription("");
+    setCustomScope("community");
+    setCustomPermissions([]);
+  };
+
+  const startEditing = (role: CustomRole) => {
+    setEditingRoleKey(role.key);
+    setCustomLabel(role.label);
+    setCustomDescription(role.description);
+    setCustomScope(role.scopeType);
+    setCustomPermissions(role.permissions);
+  };
   useEffect(() => {
     if (!userId && users[0]) setUserId(users[0].id);
   }, [userId, users]);
@@ -1658,6 +1684,8 @@ function AdminRoleAssignmentsPanel({
   }, [scopeType]);
   const scopeOptions = scopeType === "community"
     ? options.communities
+    : scopeType === "department"
+      ? options.departments
     : scopeType === "category"
       ? options.categories
       : scopeType === "channel"
@@ -1671,8 +1699,9 @@ function AdminRoleAssignmentsPanel({
       userId,
       role,
       scopeType,
-      communityId: scopeType === "community" ? selectedId : null,
+      communityId: scopeType === "community" ? selectedId : scopeType === "department" ? options.departments.find((item) => item.id === selectedId)?.communityId ?? null : null,
       categoryId: scopeType === "category" ? selectedId : null,
+      departmentId: scopeType === "department" ? selectedId : null,
       channelId: scopeType === "channel" ? selectedId : null,
     });
   };
@@ -1682,6 +1711,8 @@ function AdminRoleAssignmentsPanel({
       ? `community · ${assignment.communityName ?? assignment.communityId}`
       : assignment.scopeType === "category"
         ? `category · ${assignment.categoryName ?? assignment.categoryId}`
+        : assignment.scopeType === "department"
+          ? `department · ${assignment.departmentName ?? assignment.departmentId}`
         : `channel · ${assignment.channelName ?? assignment.channelId}`;
   return (
     <div className="space-y-5">
@@ -1698,21 +1729,22 @@ function AdminRoleAssignmentsPanel({
             </select>
           </label>
           <label className="font-mono text-[10px] text-muted-foreground">role
-            <select value={role} onChange={(event) => { const nextRole = event.target.value; setRole(nextRole); if (nextRole === "business_owner") setScopeType("community"); }} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
+            <select value={role} onChange={(event) => { const nextRole = event.target.value; setRole(nextRole); const selected = customRoles.find((item) => item.key === nextRole); if (selected) setScopeType(selected.scopeType); else if (nextRole === "platform_moderator") setScopeType("platform"); else if (["workspace_owner", "workspace_admin"].includes(nextRole)) setScopeType("community"); }} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
               <option value="platform_moderator">platform moderator</option>
               <option value="workspace_owner">workspace owner</option>
               <option value="workspace_admin">workspace admin</option>
               <option value="department_admin">community / department admin</option>
               <option value="manager">manager</option>
               <option value="moderator">moderator</option>
-              {customRoles.map((customRole) => <option key={customRole.key} value={customRole.key}>{customRole.label} (custom)</option>)}
+              {customRoles.filter((customRole) => customRole.isActive).map((customRole) => <option key={customRole.key} value={customRole.key}>{customRole.label} (custom)</option>)}
             </select>
           </label>
           <label className="font-mono text-[10px] text-muted-foreground">scope
-            <select value={scopeType} onChange={(event) => setScopeType(event.target.value)} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
+            <select value={scopeType} disabled={Boolean(customRoles.find((item) => item.key === role))} onChange={(event) => setScopeType(event.target.value)} className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2 text-[11px] text-foreground outline-none focus:border-primary">
               <option value="platform">platform</option>
               <option value="community">workspace</option>
-              <option value="category">community / department</option>
+              <option value="category">room category</option>
+              <option value="department">department</option>
               <option value="channel">channel</option>
             </select>
           </label>
@@ -1729,26 +1761,48 @@ function AdminRoleAssignmentsPanel({
       </section>
       <section className="rounded-lg border border-border bg-card">
         <div className="border-b border-border px-5 py-4">
-          <h2 className="font-mono text-sm font-bold">create custom role</h2>
-          <p className="mt-1 font-mono text-[10px] text-muted-foreground">Build a reusable role from the permissions your organization needs.</p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-mono text-sm font-bold">{editingRoleKey ? "edit custom role" : "create custom role"}</h2>
+              <p className="mt-1 font-mono text-[10px] text-muted-foreground">{editingRoleKey ? "Modify permissions for an existing role." : "Build a reusable role from the permissions your organization needs."}</p>
+            </div>
+            {editingRoleKey && <button type="button" onClick={resetForm} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted">cancel edit</button>}
+          </div>
         </div>
-        <form onSubmit={(event) => { event.preventDefault(); onCreateCustomRole({ label: customLabel, description: customDescription, scopeType: customScope, permissions: customPermissions }); setCustomLabel(""); setCustomDescription(""); setCustomPermissions([]); }} className="space-y-4 p-5">
+        <form onSubmit={async (event) => {
+          event.preventDefault();
+          try {
+            if (editingRoleKey) {
+              await onEditCustomRole(editingRoleKey, { label: customLabel, description: customDescription, scopeType: customScope, permissions: customPermissions });
+            } else {
+              await onCreateCustomRole({ label: customLabel, description: customDescription, scopeType: customScope, permissions: customPermissions });
+            }
+            resetForm();
+          } catch (err) {
+            // Form is intentionally not reset here on failure per requirement
+          }
+        }} className="space-y-4 p-5">
           <div className="grid gap-3 sm:grid-cols-3">
             <input required value={customLabel} onChange={(event) => setCustomLabel(event.target.value)} placeholder="Store Manager" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px]" />
             <input value={customDescription} onChange={(event) => setCustomDescription(event.target.value)} placeholder="Manages store operations" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px]" />
             <select value={customScope} onChange={(event) => setCustomScope(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 font-mono text-[11px]">
               <option value="community">workspace role</option>
-              <option value="category">department role</option>
+              <option value="category">room category role</option>
+              <option value="department">business department role</option>
               <option value="channel">channel role</option>
             </select>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {permissions.map((permission) => <label key={permission.key} className="flex items-center gap-2 rounded border border-border/70 px-2.5 py-2 font-mono text-[10px] text-muted-foreground">
               <input type="checkbox" checked={customPermissions.includes(permission.key)} onChange={(event) => setCustomPermissions((current) => event.target.checked ? [...current, permission.key] : current.filter((item) => item !== permission.key))} />
-              {permission.key.replaceAll("_", " ")}
+              <div className="flex flex-col">
+                <span className="font-bold">{permission.key.replaceAll("_", " ")}</span>
+                <span className="text-[9px] opacity-80">{permission.description}</span>
+              </div>
             </label>)}
           </div>
-          <button disabled={working || !customLabel || customPermissions.length === 0} className="rounded-md bg-primary px-4 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save custom role</button>
+          <button disabled={working || !customLabel || customPermissions.length === 0} className="rounded-md bg-primary px-4 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">{editingRoleKey ? "update custom role" : "save custom role"}</button>
+          {editingRoleKey && <p className="font-mono text-[10px] text-muted-foreground">Changing the scope will stop existing assignments at the old scope from granting access.</p>}
         </form>
       </section>
       <section className="rounded-lg border border-border bg-card">
@@ -1768,7 +1822,7 @@ function AdminRoleAssignmentsPanel({
       </section>
       {customRoles.length > 0 && <section className="rounded-lg border border-border bg-card">
         <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">custom role catalog</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{customRoles.length} reusable roles</p></div>
-        <div className="divide-y divide-border">{customRoles.map((customRole) => <div key={customRole.key} className="px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold">{customRole.label}</p><p className="mt-1 text-xs text-muted-foreground">{customRole.description || "No description."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{customRole.scopeType}</span></div><div className="mt-3 flex flex-wrap gap-1.5">{customRole.permissions.map((permission) => <span key={permission} className="rounded bg-muted px-2 py-1 font-mono text-[9px] text-muted-foreground">{permission.replaceAll("_", " ")}</span>)}</div></div>)}</div>
+        <div className="divide-y divide-border">{customRoles.map((customRole) => <div key={customRole.key} className={`px-5 py-4 ${!customRole.isActive ? "opacity-60" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold flex items-center gap-2">{customRole.label} {!customRole.isActive && <span className="rounded bg-muted px-1.5 py-0.5 text-[8px] uppercase tracking-wider text-muted-foreground">retired</span>}</p><p className="mt-1 text-xs text-muted-foreground">{customRole.description || "No description."}</p></div><div className="flex items-center gap-2"><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{customRole.scopeType}</span>{customRole.isActive && <div className="flex items-center gap-1"><button disabled={working} onClick={() => startEditing(customRole)} className="rounded border border-border px-2.5 py-1.5 font-mono text-[9px] text-muted-foreground hover:bg-muted disabled:opacity-40">edit</button><button disabled={working} onClick={() => { if (window.confirm(`Retire ${customRole.label}? Existing assignments will immediately stop granting its permissions.`)) void onRetireCustomRole(customRole.key); }} className="rounded border border-destructive/30 px-2.5 py-1.5 font-mono text-[9px] text-destructive hover:bg-destructive/10 disabled:opacity-40">retire</button></div>}</div></div><div className="mt-3 flex flex-wrap gap-1.5">{customRole.permissions.map((permission) => <span key={permission} className="rounded bg-muted px-2 py-1 font-mono text-[9px] text-muted-foreground">{permission.replaceAll("_", " ")}</span>)}</div></div>)}</div>
       </section>}
     </div>
   );
@@ -1818,9 +1872,9 @@ function AdminConsole() {
   const [directory, setDirectory] = useState<ConsoleOverview["users"]>([]);
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
   const [roleAssignments, setRoleAssignments] = useState<AdminAssignment[]>([]);
-  const [scopeOptions, setScopeOptions] = useState<AdminScopeOptions>({ communities: [], categories: [], channels: [] });
+  const [scopeOptions, setScopeOptions] = useState<AdminScopeOptions>({ communities: [], categories: [], departments: [], channels: [] });
   const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
-  const [customRolePermissions, setCustomRolePermissions] = useState<Array<{ key: string }>>([]);
+  const [customRolePermissions, setCustomRolePermissions] = useState<Array<{ key: string; description: string }>>([]);
   const [health, setHealth] = useState<ConsoleHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
@@ -1921,8 +1975,46 @@ function AdminConsole() {
   const claim = async () => { setWorking(true); try { await api("/admin/claim", { method: "POST", body: "{}" }); setStatus((value) => value ? { ...value, isAdmin: true, bootstrapAvailable: false } : value); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not claim admin access"); } finally { setWorking(false); } };
   const updateRole = async () => { if (!pendingRole) return; setWorking(true); try { await api(`/admin/users/${pendingRole.id}/role`, { method: "PATCH", body: JSON.stringify({ role: pendingRole.role }) }); setNotice(`Role updated for ${pendingRole.label}.`); setPendingRole(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update role"); } finally { setWorking(false); } };
   const updateAccountStatus = async () => { if (!pendingAccountStatus) return; setWorking(true); try { await api(`/admin/users/${pendingAccountStatus.id}/account-status`, { method: "PATCH", body: JSON.stringify({ accountStatus: pendingAccountStatus.accountStatus }) }); setNotice(`${pendingAccountStatus.label} is now ${pendingAccountStatus.accountStatus}.`); setPendingAccountStatus(null); setDirectoryLoaded(false); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update account status"); } finally { setWorking(false); } };
-  const grantRole = async (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; channelId: number | null }) => { setWorking(true); try { await api("/admin/role-assignments", { method: "POST", body: JSON.stringify(value) }); setNotice("Scoped role granted."); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not grant scoped role"); } finally { setWorking(false); } };
-  const createCustomRole = async (value: { label: string; description: string; scopeType: string; permissions: string[] }) => { setWorking(true); try { await api("/admin/custom-roles", { method: "POST", body: JSON.stringify(value) }); setNotice(`${value.label} custom role created.`); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create custom role"); } finally { setWorking(false); } };
+  const grantRole = async (value: { userId: string; role: string; scopeType: string; communityId: number | null; categoryId: number | null; departmentId: number | null; channelId: number | null }) => { setWorking(true); try { await api("/admin/role-assignments", { method: "POST", body: JSON.stringify(value) }); setNotice("Scoped role granted."); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not grant scoped role"); } finally { setWorking(false); } };
+  const onCreateCustomRole = async (value: { label: string; description: string; scopeType: string; permissions: string[] }) => {
+    setWorking(true);
+    try {
+      await api("/admin/custom-roles", { method: "POST", body: JSON.stringify(value) });
+      setNotice(`${value.label} custom role created.`);
+      await loadRoleData();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create custom role");
+      throw reason;
+    } finally {
+      setWorking(false);
+    }
+  };
+  const onEditCustomRole = async (key: string, value: { label: string; description: string; scopeType: string; permissions: string[] }) => {
+    setWorking(true);
+    try {
+      await api(`/admin/custom-roles/${key}`, { method: "PATCH", body: JSON.stringify(value) });
+      setNotice(`${value.label} custom role updated.`);
+      await loadRoleData();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update custom role");
+      throw reason;
+    } finally {
+      setWorking(false);
+    }
+  };
+  const onRetireCustomRole = async (key: string) => {
+    setWorking(true);
+    try {
+      await api(`/admin/custom-roles/${key}`, { method: "DELETE" });
+      setNotice("Custom role retired.");
+      await loadRoleData();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not retire custom role");
+      throw reason;
+    } finally {
+      setWorking(false);
+    }
+  };
   const revokeRole = async () => { if (!pendingRevoke) return; setWorking(true); try { await api(`/admin/role-assignments/${pendingRevoke.id}`, { method: "DELETE" }); setNotice(`Revoked ${pendingRevoke.role} from ${pendingRevoke.displayName}.`); setPendingRevoke(null); await loadRoleData(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke scoped role"); } finally { setWorking(false); } };
   const sendAnnouncement = async (event: FormEvent) => { event.preventDefault(); const body = announcementDraft.trim(); if (!body) return; setWorking(true); try { await api("/admin/announcements", { method: "POST", body: JSON.stringify({ body }) }); setAnnouncementDraft(""); setAnnouncementOpen(false); setNotice("Announcement sent to all users."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send announcement"); } finally { setWorking(false); } };
   const saveTopic = async (id: number) => { setWorking(true); try { await api(`/admin/channels/${id}`, { method: "PATCH", body: JSON.stringify({ topic: topicDraft }) }); setEditingChannel(null); setNotice("Channel topic saved."); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save channel topic"); } finally { setWorking(false); } };
@@ -2011,7 +2103,7 @@ function AdminConsole() {
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{stats.map(([label, value, Icon]) => <div key={label} className="rounded-lg border border-border bg-card p-4"><div className="flex items-center justify-between"><Icon className="h-4 w-4 text-primary" /><span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">live</span></div><p className="mt-5 font-mono text-3xl font-bold">{value}</p><p className="mt-1 font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">{label}</p></div>)}</div>
               <div className="grid gap-5 xl:grid-cols-[1.12fr_.88fr]"><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">recent activity</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">The last operational changes</p></div><button onClick={() => setSection("activity")} className="font-mono text-[10px] text-primary hover:underline">view all</button></div><div className="divide-y divide-border">{overview.activity.slice(0, 6).map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} />)}{overview.activity.length === 0 && <EmptyAdminState label="No activity recorded yet." />}</div></section><div className="space-y-5"><AdminHealthCard health={health} onOpen={() => setSection("system")} /><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">recent messages</h2></div><div className="divide-y divide-border">{overview.recentMessages.slice(0, 5).map((message) => <div key={message.id} className="px-5 py-3"><div className="flex justify-between gap-3 font-mono text-[10px]"><span className="truncate text-secondary-foreground">{message.sender}</span><span className="shrink-0 text-muted-foreground">{timeLabel(message.createdAt)}</span></div><p className="mt-1 truncate text-xs">{message.body}</p></div>)}{overview.recentMessages.length === 0 && <EmptyAdminState label="No messages have been sent yet." />}</div></section></div></div>
             </div>
-            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} categories={overview.categories} currentId={status.profile.id} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} onDeleteChannel={(channel) => setPendingResourceDelete({ kind: "channel", item: channel })} onDeleteCategory={(category) => setPendingResourceDelete({ kind: "category", item: category })} onDeleteCategoryWithChannels={(category) => setPendingResourceDelete({ kind: "category-with-channels", item: category })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} customRoles={customRoles} permissions={customRolePermissions} onCreateCustomRole={createCustomRole} /> : section === "activity" ? (
+            ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} categories={overview.categories} currentId={status.profile.id} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} onDeleteChannel={(channel) => setPendingResourceDelete({ kind: "channel", item: channel })} onDeleteCategory={(category) => setPendingResourceDelete({ kind: "category", item: category })} onDeleteCategoryWithChannels={(category) => setPendingResourceDelete({ kind: "category-with-channels", item: category })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} customRoles={customRoles} permissions={customRolePermissions} onCreateCustomRole={onCreateCustomRole} onEditCustomRole={onEditCustomRole} onRetireCustomRole={onRetireCustomRole} /> : section === "activity" ? (
               <section className="rounded-lg border border-border bg-card">
                 <div className="border-b border-border px-5 py-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">

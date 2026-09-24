@@ -20,6 +20,9 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  CustomRole,
+  CustomRoleCatalog,
+  CustomRoleInput,
   ErrorResponse,
   GetIrcStateParams,
   HealthStatus,
@@ -30,6 +33,7 @@ import type {
   OnboardingProgress,
   OnboardingProgressInput,
   OnboardingState,
+  RetireAdminCustomRole200,
   StreamIrcEventsParams
 } from './api.schemas';
 
@@ -59,6 +63,334 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export const getListAdminCustomRolesUrl = () => {
+
+
+
+
+  return `/api/admin/custom-roles`
+}
+
+/**
+ * @summary List custom role definitions and grantable permissions
+ */
+export const listAdminCustomRoles = async ( options?: Parameters<typeof customFetch>[1]): Promise<CustomRoleCatalog> => {
+
+  return customFetch<CustomRoleCatalog>(getListAdminCustomRolesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListAdminCustomRolesQueryKey = () => {
+    return [
+    `/api/admin/custom-roles`
+    ] as const;
+    }
+
+
+export const getListAdminCustomRolesQueryOptions = <TData = Awaited<ReturnType<typeof listAdminCustomRoles>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListAdminCustomRolesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminCustomRoles>>> = ({ signal }) => listAdminCustomRoles({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListAdminCustomRolesQueryResult = NonNullable<Awaited<ReturnType<typeof listAdminCustomRoles>>>
+export type ListAdminCustomRolesQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List custom role definitions and grantable permissions
+ */
+
+export function useListAdminCustomRoles<TData = Awaited<ReturnType<typeof listAdminCustomRoles>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListAdminCustomRolesQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getCreateAdminCustomRoleUrl = () => {
+
+
+
+
+  return `/api/admin/custom-roles`
+}
+
+/**
+ * @summary Create a reusable scoped role
+ */
+export const createAdminCustomRole = async (customRoleInput: CustomRoleInput, options?: Parameters<typeof customFetch>[1]): Promise<CustomRole> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<CustomRole>(getCreateAdminCustomRoleUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(customRoleInput)
+  }
+);}
+
+
+
+
+
+export const getCreateAdminCustomRoleMutationKey = () => ['createAdminCustomRole'] as const;
+
+export const getCreateAdminCustomRoleMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAdminCustomRole>>, TError,CreateAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createAdminCustomRole>>, TError,CreateAdminCustomRoleMutationVariables, TContext> => {
+
+const mutationKey = getCreateAdminCustomRoleMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createAdminCustomRole>>, CreateAdminCustomRoleMutationVariables> = (props) => {
+          const {data} = props ?? {};
+
+          return  createAdminCustomRole(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateAdminCustomRoleMutationResult = NonNullable<Awaited<ReturnType<typeof createAdminCustomRole>>>
+    export type CreateAdminCustomRoleMutationBody = BodyType<CustomRoleInput>
+    export type CreateAdminCustomRoleMutationError = ErrorType<unknown>
+    export type CreateAdminCustomRoleMutationVariables = {data: BodyType<CustomRoleInput>}
+
+    /**
+ * @summary Create a reusable scoped role
+ */
+export const useCreateAdminCustomRole = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAdminCustomRole>>, TError,CreateAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createAdminCustomRole>>,
+        TError,
+        CreateAdminCustomRoleMutationVariables,
+        TContext
+      > => {
+      return useMutation(getCreateAdminCustomRoleMutationOptions(options));
+    }
+
+export const getUpdateAdminCustomRoleUrl = (key: string,) => {
+
+
+
+
+  return `/api/admin/custom-roles/${key}`
+}
+
+/**
+ * @summary Edit a custom role and its permissions
+ */
+export const updateAdminCustomRole = async (key: string,
+    customRoleInput: CustomRoleInput, options?: Parameters<typeof customFetch>[1]): Promise<CustomRole> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<CustomRole>(getUpdateAdminCustomRoleUrl(key),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(customRoleInput)
+  }
+);}
+
+
+
+
+
+export const getUpdateAdminCustomRoleMutationKey = () => ['updateAdminCustomRole'] as const;
+
+export const getUpdateAdminCustomRoleMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAdminCustomRole>>, TError,UpdateAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateAdminCustomRole>>, TError,UpdateAdminCustomRoleMutationVariables, TContext> => {
+
+const mutationKey = getUpdateAdminCustomRoleMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateAdminCustomRole>>, UpdateAdminCustomRoleMutationVariables> = (props) => {
+          const {key,data} = props ?? {};
+
+          return  updateAdminCustomRole(key,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateAdminCustomRoleMutationResult = NonNullable<Awaited<ReturnType<typeof updateAdminCustomRole>>>
+    export type UpdateAdminCustomRoleMutationBody = BodyType<CustomRoleInput>
+    export type UpdateAdminCustomRoleMutationError = ErrorType<unknown>
+    export type UpdateAdminCustomRoleMutationVariables = {key: string;data: BodyType<CustomRoleInput>}
+
+    /**
+ * @summary Edit a custom role and its permissions
+ */
+export const useUpdateAdminCustomRole = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAdminCustomRole>>, TError,UpdateAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateAdminCustomRole>>,
+        TError,
+        UpdateAdminCustomRoleMutationVariables,
+        TContext
+      > => {
+      return useMutation(getUpdateAdminCustomRoleMutationOptions(options));
+    }
+
+export const getRetireAdminCustomRoleUrl = (key: string,) => {
+
+
+
+
+  return `/api/admin/custom-roles/${key}`
+}
+
+/**
+ * @summary Retire a custom role without deleting its history
+ */
+export const retireAdminCustomRole = async (key: string, options?: Parameters<typeof customFetch>[1]): Promise<RetireAdminCustomRole200> => {
+
+  return customFetch<RetireAdminCustomRole200>(getRetireAdminCustomRoleUrl(key),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getRetireAdminCustomRoleMutationKey = () => ['retireAdminCustomRole'] as const;
+
+export const getRetireAdminCustomRoleMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retireAdminCustomRole>>, TError,RetireAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof retireAdminCustomRole>>, TError,RetireAdminCustomRoleMutationVariables, TContext> => {
+
+const mutationKey = getRetireAdminCustomRoleMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof retireAdminCustomRole>>, RetireAdminCustomRoleMutationVariables> = (props) => {
+          const {key} = props ?? {};
+
+          return  retireAdminCustomRole(key,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RetireAdminCustomRoleMutationResult = NonNullable<Awaited<ReturnType<typeof retireAdminCustomRole>>>
+
+    export type RetireAdminCustomRoleMutationError = ErrorType<unknown>
+    export type RetireAdminCustomRoleMutationVariables = {key: string}
+
+    /**
+ * @summary Retire a custom role without deleting its history
+ */
+export const useRetireAdminCustomRole = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof retireAdminCustomRole>>, TError,RetireAdminCustomRoleMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof retireAdminCustomRole>>,
+        TError,
+        RetireAdminCustomRoleMutationVariables,
+        TContext
+      > => {
+      return useMutation(getRetireAdminCustomRoleMutationOptions(options));
+    }
 
 export const getHealthCheckUrl = () => {
 

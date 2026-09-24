@@ -133,12 +133,16 @@ export const userRolesTable = pgTable(
     scopeType: text("scope_type").notNull().default("platform"),
     communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
     categoryId: integer("category_id"),
+    departmentId: integer("department_id").references(() => departmentsTable.id, { onDelete: "cascade" }),
     channelId: integer("channel_id").references(() => channelsTable.id, { onDelete: "cascade" }),
     grantedBy: text("granted_by").notNull().references(() => usersTable.clerkId),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("irc_user_roles_scope_idx").on(table.userId, table.role, table.scopeType, table.communityId, table.categoryId, table.channelId),
+    index("irc_user_roles_department_idx").on(table.departmentId),
+    uniqueIndex("irc_user_roles_department_unique_idx").on(table.userId, table.role, table.departmentId)
+      .where(sql`${table.scopeType} = 'department' AND ${table.departmentId} IS NOT NULL`),
     index("irc_user_roles_community_role_idx").on(table.communityId, table.role, table.userId),
   ],
 );

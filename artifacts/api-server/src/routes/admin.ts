@@ -8,6 +8,7 @@ import {
   communitiesTable,
   customRolesTable,
   db,
+  departmentsTable,
   messagesTable,
   permissionDefinitionsTable,
   rolePermissionsTable,
@@ -18,9 +19,15 @@ import {
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { createNotifications } from "../lib/notifications";
 import { channelNotFoundError } from "./errors";
-import { ensurePermissionCatalog, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
+import { CUSTOM_ROLE_PERMISSIONS, ensurePermissionCatalog, PERMISSION_DESCRIPTIONS, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
 import { isPositiveSafeInteger, isValidQuery } from "../lib/validation";
 import { wsHub } from "../lib/ws";
+import {
+  CreateAdminCustomRoleBody,
+  CreateAdminCustomRoleResponse,
+  ListAdminCustomRolesResponse,
+  UpdateAdminCustomRoleResponse,
+} from "@workspace/api-zod";
 
 const router: IRouter = Router();
 const startedAt = Date.now();
@@ -518,6 +525,8 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
       communityName: communitiesTable.name,
       categoryId: userRolesTable.categoryId,
       categoryName: categoriesTable.name,
+      departmentId: userRolesTable.departmentId,
+      departmentName: departmentsTable.name,
       channelId: userRolesTable.channelId,
       channelName: channelsTable.name,
       createdAt: userRolesTable.createdAt,
@@ -526,6 +535,7 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
     .innerJoin(usersTable, eq(usersTable.clerkId, userRolesTable.userId))
     .leftJoin(communitiesTable, eq(communitiesTable.id, userRolesTable.communityId))
     .leftJoin(categoriesTable, eq(categoriesTable.id, userRolesTable.categoryId))
+    .leftJoin(departmentsTable, eq(departmentsTable.id, userRolesTable.departmentId))
     .leftJoin(channelsTable, eq(channelsTable.id, userRolesTable.channelId))
     .orderBy(desc(userRolesTable.createdAt));
   res.json(assignments);
@@ -536,12 +546,13 @@ router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest
     res.status(403).json({ error: "Admin access required." });
     return;
   }
-  const [communities, categories, channels] = await Promise.all([
+  const [communities, categories, channels, departments] = await Promise.all([
     db.select({ id: communitiesTable.id, name: communitiesTable.name }).from(communitiesTable).orderBy(asc(communitiesTable.name)),
     db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId }).from(categoriesTable).orderBy(asc(categoriesTable.name)),
     db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).orderBy(asc(channelsTable.name)),
+    db.select({ id: departmentsTable.id, name: departmentsTable.name, communityId: departmentsTable.communityId }).from(departmentsTable).orderBy(asc(departmentsTable.name)),
   ]);
-  res.json({ communities, categories, channels });
+  res.json({ communities, categories, channels, departments });
 });
 
 router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -551,16 +562,40 @@ router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest,
   }
   await ensurePermissionCatalog();
   const [roles, links] = await Promise.all([
-    db.select().from(customRolesTable).where(eq(customRolesTable.isActive, true)).orderBy(asc(customRolesTable.label)),
+    db.select().from(customRolesTable).orderBy(asc(customRolesTable.label)),
     db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
       .from(rolePermissionsTable)
       .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId)),
   ]);
-  res.json({
+  res.json(ListAdminCustomRolesResponse.parse({
     roles: roles.map((role) => ({ ...role, permissions: links.filter((link) => link.role === role.key).map((link) => link.permission) })),
-    permissions: PERMISSIONS.map((key) => ({ key })),
-  });
+    permissions: CUSTOM_ROLE_PERMISSIONS.map((key) => ({
+      key,
+      description: PERMISSION_DESCRIPTIONS[key],
+    })),
+  }));
 });
+
+function parseCustomRoleBody(body: unknown) {
+  const parsed = CreateAdminCustomRoleBody.safeParse(body);
+  if (!parsed.success) return null;
+  const input = parsed.data;
+  if (!input.label.trim() || input.permissions.some((key) =>
+    !CUSTOM_ROLE_PERMISSIONS.includes(key as typeof PERMISSIONS[number]))) return null;
+  return {
+    label: input.label.trim(),
+    description: input.description.trim(),
+    scopeType: input.scopeType,
+    permissions: [...new Set(input.permissions)],
+  };
+}
+
+async function permissionLinks(keys: string[]) {
+  const definitions = await db.select({ id: permissionDefinitionsTable.id, key: permissionDefinitionsTable.key })
+    .from(permissionDefinitionsTable);
+  const ids = new Map(definitions.map((definition) => [definition.key, definition.id]));
+  return keys.map((key) => ids.get(key)).filter((id): id is number => id !== undefined);
+}
 
 router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const actor = await adminProfile(req);
@@ -569,25 +604,94 @@ router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest
     return;
   }
   await ensurePermissionCatalog();
-  const label = typeof req.body?.label === "string" ? req.body.label.trim().slice(0, 60) : "";
-  const description = typeof req.body?.description === "string" ? req.body.description.trim().slice(0, 240) : "";
-  const scopeType = req.body?.scopeType;
-  const requested = Array.isArray(req.body?.permissions) ? req.body.permissions.filter((value: unknown): value is string => typeof value === "string") : [];
-  const permissions = [...new Set(requested)].filter((value): value is typeof PERMISSIONS[number] => PERMISSIONS.includes(value as typeof PERMISSIONS[number]));
-  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
+  const input = parseCustomRoleBody(req.body);
+  const slug = input?.label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
   const key = `custom_${slug}`;
-  if (!label || !slug || !["community", "category", "channel"].includes(scopeType) || permissions.length === 0) {
+  if (!input || !slug) {
     res.status(400).json({ error: "Name, scope, and at least one valid permission are required." });
     return;
   }
+  const ids = await permissionLinks(input.permissions);
   try {
-  const role = req.body?.role;
-    await writeAudit(actor.clerkId, actor.displayName, "created_custom_role", key, label, permissions.join(", "));
-    res.status(201).json({ ...role, permissions });
+    const role = await db.transaction(async (tx) => {
+      const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
+        .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+      if (currentActor?.role !== "admin") return null;
+      const [created] = await tx.insert(customRolesTable).values({
+        key, label: input.label, description: input.description,
+        scopeType: input.scopeType, createdBy: actor.clerkId,
+      }).returning();
+      await tx.insert(rolePermissionsTable).values(ids.map((permissionId) => ({ role: key, permissionId })));
+      await tx.insert(adminAuditLogsTable).values({
+        actorId: actor.clerkId, actorDisplayName: actor.displayName, action: "created_custom_role",
+        targetId: key, targetLabel: input.label, details: JSON.stringify(input),
+      });
+      return created;
+    });
+    if (!role) { res.status(403).json({ error: "Admin access required." }); return; }
+    res.status(201).json(CreateAdminCustomRoleResponse.parse({ ...role, permissions: input.permissions }));
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     res.status(409).json({ error: "A custom role with that name already exists." });
   }
+});
+
+router.patch("/admin/custom-roles/:key", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) { res.status(403).json({ error: "Admin access required." }); return; }
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const input = parseCustomRoleBody(req.body);
+  if (!input || !key.startsWith("custom_")) {
+    res.status(400).json({ error: "A valid role name, scope and permissions are required." }); return;
+  }
+  await ensurePermissionCatalog();
+  const ids = await permissionLinks(input.permissions);
+  const outcome = await db.transaction(async (tx) => {
+    const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
+      .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return { status: "forbidden" } as const;
+    const [role] = await tx.select().from(customRolesTable).where(eq(customRolesTable.key, key)).for("update");
+    if (!role) return { status: "missing" } as const;
+    if (!role.isActive) return { status: "retired" } as const;
+    const [updated] = await tx.update(customRolesTable).set({
+      label: input.label, description: input.description, scopeType: input.scopeType, updatedAt: new Date(),
+    }).where(eq(customRolesTable.key, key)).returning();
+    await tx.delete(rolePermissionsTable).where(eq(rolePermissionsTable.role, key));
+    await tx.insert(rolePermissionsTable).values(ids.map((permissionId) => ({ role: key, permissionId })));
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId, actorDisplayName: actor.displayName, action: "updated_custom_role",
+      targetId: key, targetLabel: input.label,
+      details: JSON.stringify({ before: { label: role.label, description: role.description, scopeType: role.scopeType }, after: input }),
+    });
+    return { status: "updated", updated } as const;
+  });
+  if (outcome.status !== "updated") {
+    res.status(outcome.status === "forbidden" ? 403 : outcome.status === "missing" ? 404 : 409).json({ error: `Role ${outcome.status}.` }); return;
+  }
+  res.json(UpdateAdminCustomRoleResponse.parse({ ...outcome.updated, permissions: input.permissions }));
+});
+
+router.delete("/admin/custom-roles/:key", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const actor = await adminProfile(req);
+  if (!actor) { res.status(403).json({ error: "Admin access required." }); return; }
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const outcome = await db.transaction(async (tx) => {
+    const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
+      .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return "forbidden";
+    const [role] = await tx.select().from(customRolesTable).where(eq(customRolesTable.key, key)).for("update");
+    if (!role) return "missing";
+    if (!role.isActive) return "retired";
+    await tx.update(customRolesTable).set({ isActive: false, updatedAt: new Date() }).where(eq(customRolesTable.key, key));
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId, actorDisplayName: actor.displayName, action: "retired_custom_role",
+      targetId: key, targetLabel: role.label, details: `Retired ${role.scopeType} role; existing assignments no longer confer permissions.`,
+    });
+    return "retired_now";
+  });
+  if (outcome === "missing") { res.status(404).json({ error: "Role not found." }); return; }
+  if (outcome === "forbidden") { res.status(403).json({ error: "Admin access required." }); return; }
+  res.json({ ok: true });
 });
 
 router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -599,18 +703,15 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
   const userId = typeof req.body?.userId === "string" ? req.body.userId : "";
   const role = req.body?.role;
   const scopeType = req.body?.scopeType;
-  const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
-  const categoryId = req.body.categoryId === null
-    ? null
-    : isPositiveSafeInteger(req.body.categoryId)
-      ? req.body.categoryId
-      : undefined;
-  const channelId = Number(rawId);
+  const communityId = req.body?.communityId ?? null;
+  const categoryId = req.body?.categoryId ?? null;
+  const departmentId = req.body?.departmentId ?? null;
+  const channelId = req.body?.channelId ?? null;
   const [customRole] = typeof role === "string"
     ? await db.select().from(customRolesTable).where(and(eq(customRolesTable.key, role), eq(customRolesTable.isActive, true))).limit(1)
     : [];
   const builtInRole = ["platform_moderator", "workspace_owner", "workspace_admin", "department_admin", "manager", "moderator"].includes(role);
-  if (!userId || (!builtInRole && !customRole) || !["platform", "community", "category", "channel"].includes(scopeType)) {
+  if (!userId || (!builtInRole && !customRole) || !["platform", "community", "category", "department", "channel"].includes(scopeType)) {
     res.status(400).json({ error: "A valid scoped role assignment is required." });
     return;
   }
@@ -626,21 +727,27 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     res.status(400).json({ error: "Workspace owners and admins must have a workspace scope." });
     return;
   }
-  if (role === "department_admin" && !["community", "category"].includes(scopeType)) {
+  if (role === "department_admin" && !["community", "category", "department"].includes(scopeType)) {
     res.status(400).json({ error: "Department admins must have a workspace or department scope." });
     return;
   }
-  const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "channel" ? channelId : null;
+  const scopedId = scopeType === "community" ? communityId : scopeType === "category" ? categoryId : scopeType === "department" ? departmentId : scopeType === "channel" ? channelId : null;
   if (
     (scopeType !== "platform" && !isPositiveSafeInteger(scopedId))
-    || [communityId, categoryId, channelId].some((id) => id !== null && !isPositiveSafeInteger(id))
+    || [communityId, categoryId, departmentId, channelId].some((id) => id !== null && !isPositiveSafeInteger(id))
   ) {
     res.status(400).json({ error: "The selected scope is required." });
     return;
   }
-  if (scopeType === "platform" && (communityId !== null || categoryId !== null || channelId !== null)) {
+  if (scopeType === "platform" && (communityId !== null || categoryId !== null || departmentId !== null || channelId !== null)) {
     res.status(400).json({ error: "Platform assignments cannot include a community, category, or channel." });
     return;
+  }
+  if ((scopeType === "community" && (categoryId !== null || departmentId !== null || channelId !== null))
+    || (scopeType === "category" && (departmentId !== null || channelId !== null))
+    || (scopeType === "department" && (categoryId !== null || channelId !== null))
+    || (scopeType === "channel" && departmentId !== null)) {
+    res.status(400).json({ error: "The selected scope includes unrelated targets." }); return;
   }
   if (scopeType === "community") {
     const [community] = await db.select({ id: communitiesTable.id }).from(communitiesTable).where(eq(communitiesTable.id, communityId!));
@@ -656,16 +763,20 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
       return;
     }
   }
+  if (scopeType === "department") {
+    const [department] = await db.select({ communityId: departmentsTable.communityId })
+      .from(departmentsTable).where(eq(departmentsTable.id, departmentId!));
+    if (!department || (communityId !== null && department.communityId !== communityId)) {
+      res.status(400).json({ error: "Department does not match the selected workspace." }); return;
+    }
+    if (communityId === null) {
+      res.status(400).json({ error: "Choose a workspace for this department." }); return;
+    }
+  }
   if (scopeType === "channel") {
-  const [channel] = await db
-    .select({ id: channelsTable.id, name: channelsTable.name })
-    .from(channelsTable)
-    .where(eq(channelsTable.id, channelId));
-
-  const deleted = await db
-    .delete(messagesTable)
-    .where(eq(messagesTable.channelId, channelId))
-    .returning({ id: messagesTable.id });
+    const [channel] = await db.select({
+      id: channelsTable.id, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId,
+    }).from(channelsTable).where(eq(channelsTable.id, channelId));
     if (!channel || (communityId !== null && channel.communityId !== communityId) || (categoryId !== null && channel.categoryId !== categoryId)) {
       res.status(400).json({ error: "Channel does not match the selected scope." });
       return;
@@ -676,16 +787,31 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     res.status(404).json({ error: "User not found." });
     return;
   }
-  const [assignment] = await db.insert(userRolesTable).values({
-    userId,
-    role,
-    scopeType,
-    communityId,
-    categoryId,
-    channelId,
-    grantedBy: actor.clerkId,
-  }).returning();
-  await writeAudit(actor.clerkId, actor.displayName, "granted_scoped_role", userId, target.displayName, `${role} on ${scopeType}`);
+  let assignment;
+  try {
+    assignment = await db.transaction(async (tx) => {
+      const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
+        .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+      if (currentActor?.role !== "admin") return null;
+      if (customRole) {
+        const [currentRole] = await tx.select().from(customRolesTable)
+          .where(eq(customRolesTable.key, role)).for("share");
+        if (!currentRole?.isActive || currentRole.scopeType !== scopeType) return null;
+      }
+      const [granted] = await tx.insert(userRolesTable).values({
+        userId, role, scopeType, communityId, categoryId, departmentId, channelId, grantedBy: actor.clerkId,
+      }).returning();
+      await tx.insert(adminAuditLogsTable).values({
+        actorId: actor.clerkId, actorDisplayName: actor.displayName, action: "granted_scoped_role",
+        targetId: userId, targetLabel: target.displayName, details: `${role} on ${scopeType}`,
+      });
+      return granted;
+    });
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    res.status(409).json({ error: "This role is already assigned at that scope." }); return;
+  }
+  if (!assignment) { res.status(409).json({ error: "Role or administrator access changed. Reload and try again." }); return; }
   res.status(201).json(assignment);
 });
 
@@ -700,12 +826,26 @@ router.delete("/admin/role-assignments/:assignmentId", requireAuth, async (req: 
     res.status(400).json({ error: "Invalid role assignment." });
     return;
   }
-  const [removed] = await db.delete(userRolesTable).where(eq(userRolesTable.id, assignmentId)).returning();
+  const removed = await db.transaction(async (tx) => {
+    const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
+      .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return "forbidden" as const;
+    const [assignment] = await tx.delete(userRolesTable)
+      .where(eq(userRolesTable.id, assignmentId)).returning();
+    if (!assignment) return null;
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId, actorDisplayName: actor.displayName, action: "revoked_scoped_role",
+      targetId: assignment.userId, targetLabel: assignment.role, details: `Assignment ${assignmentId}`,
+    });
+    return assignment;
+  });
+  if (removed === "forbidden") {
+    res.status(403).json({ error: "Admin access required." }); return;
+  }
   if (!removed) {
     res.status(404).json({ error: "Role assignment not found." });
     return;
   }
-  await writeAudit(actor.clerkId, actor.displayName, "revoked_scoped_role", removed.userId, removed.role, `Assignment ${assignmentId}`);
   res.json({ ok: true });
 });
 
@@ -800,41 +940,31 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
   }
   const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
   const channelId = Number(rawId);
+  if (!isPositiveSafeInteger(channelId)) {
+    res.status(400).json({ error: "Invalid channel." }); return;
+  }
   const result = await db.transaction(async (tx) => {
     const [currentActor] = await tx.select({ role: usersTable.role })
       .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
-    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
-    const [channel] = await tx.select().from(channelsTable)
+    if (currentActor?.role !== "admin") return "forbidden";
+    const [channel] = await tx.select({ id: channelsTable.id }).from(channelsTable)
       .where(eq(channelsTable.id, channelId)).for("update");
-    if (!channel) return { outcome: "not_found" } as const;
-    if (categoryId !== null && categoryId !== undefined) {
-      const [category] = await tx
-        .select({ communityId: categoriesTable.communityId })
-        .from(categoriesTable)
-        .where(eq(categoriesTable.id, categoryId))
-        .for("share");
-      if (!category || category.communityId !== channel.communityId) {
-        return { outcome: "wrong_workspace" } as const;
-      }
-    }
-    const [updated] = await tx
-      .update(channelsTable)
-      .set({
-        ...(topic === undefined ? {} : { topic }),
-        ...(hasCategoryId ? { categoryId } : {}),
-      })
-      .where(eq(channelsTable.id, channelId))
-      .returning();
-    return { outcome: "updated", updated } as const;
+    if (!channel) return "not_found";
+    await tx.delete(messagesTable).where(eq(messagesTable.channelId, channelId));
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId, actorDisplayName: actor.displayName,
+      action: "cleared_channel_history", targetId: String(channelId), details: "Channel message history cleared",
+    });
+    return "cleared";
   });
+  if (result !== "cleared") {
+    res.status(result === "forbidden" ? 403 : 404).json({ error: result === "forbidden" ? "Admin access required." : "Channel not found." }); return;
+  }
+  res.json({ ok: true });
+});
+
 export default router;
 type ActivityCursor = { createdAt: string; id: number };
-  const visibleActivity = activity
-    .slice(0, activityLimit)
-    .map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
-  const nextActivityCursor = hasMoreActivity && lastActivity
-    ? encodeActivityCursor({ createdAt: lastActivity.cursorCreatedAt, id: lastActivity.id })
-    : null;
 function encodeActivityCursor(cursor: ActivityCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }

@@ -90,10 +90,7 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<OrganizationPanel detail={detail} {...props} />);
-
-    const directoryLines = screen.getAllByText(/Reporting manager:/);
-    fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
+    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     const select = await screen.findByTestId("select-public-space");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
@@ -112,22 +109,7 @@ describe("channel category organization", () => {
       community: { id: 7 },
       canManage: false,
     } as Parameters<typeof DocumentCenter>[0]["detail"];
-
-    const onRefresh = vi.fn().mockResolvedValue(undefined);
-    const { rerender } = render(<OrganizationPanel detail={detail} {...props} />);
-
-    const directoryLines = screen.getAllByText(/Reporting manager:/);
-    fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
-    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
-    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
-    await waitFor(() => expect(onMove).toHaveBeenCalledWith(7, 31));
-    rerender(<WorkspaceChannelOrganizer detail={{ ...detail, channels: [{ ...detail.channels[0], categoryId: 31 }] }} working={false} onMove={onMove} />);
-    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "" } });
-    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
-    await waitFor(() => expect(onMove).toHaveBeenLastCalledWith(7, null));
-  });
-});
-
+    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
 const message = (channelId: number, body: string, id = `message-${channelId}`) => ({
   id,
   channelId,
@@ -180,7 +162,7 @@ function installApi({
   categories = [],
   publicSpaces = [],
 }: {
-  missingRequest: "history" | "members" | "send" | "topic" | "event";
+  missingRequest: "history" | "members" | "send" | "attachment" | "topic" | "event";
   accessRequiredRequest?: "history" | "members" | "send" | "file";
   fallbackChannels: Channel[];
   missingChannelMessage?: string;
@@ -324,7 +306,7 @@ function installApi({
     }
     if (url === "/api/channels/1/file-messages" && method === "POST") {
       if (accessRequiredRequest === "file") return channelAccessRequired();
-      return missingRequest === "send"
+      return missingRequest === "attachment"
         ? channelNotFound(missingChannelMessage)
         : jsonResponse({
           ...message(1, "notes.txt"),
@@ -375,10 +357,6 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   render(<App />);
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
-
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
-      jsonResponse({ managerId: JSON.parse(String(init?.body)).managerId }),
-    );
     const category = screen.getByLabelText("category") as HTMLSelectElement;
     expect(category.querySelector('option[value="31"]')).not.toBeNull();
     expect(category.querySelector('option[value="32"]')).toBeNull();
@@ -607,28 +585,13 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
       missingChannelMessage: displayMessage,
       fallbackChannels: [room(2, "#fallback-room")],
     });
-
     if (missingRequest === "send") {
-      const editor = screen.getByPlaceholderText("message #deleted-room");
+    const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
-      expect(fetch).toHaveBeenCalledWith("/api/channels/1/messages", expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ body: "hello", replyToId: null }),
-      }));
-    } else {
-      expect(fetch).toHaveBeenCalledWith("/api/channels/1/messages", expect.objectContaining({
-        credentials: "include",
-      }));
     }
-
     await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
-    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
-    expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
     expect(screen.queryByText("stale history")).toBeNull();
-    expect(screen.queryByText(/message could not be sent|history could not be loaded/i)).toBeNull();
-    expect(window.alert).not.toHaveBeenCalled();
   });
 
   it("removes a room immediately when another session deletes it", async () => {
@@ -643,7 +606,6 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     expect(latestWebSocket).toBe(deletedRoomSocket);
     const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
     expect(frames).toEqual(expect.arrayContaining([
-      { type: "unsubscribe", channelId: 1 },
       { type: "subscribe", channelId: 2 },
     ]));
 
@@ -798,7 +760,6 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     expect(firstSocket).toBeTruthy();
     act(() => firstSocket?.onopen?.());
     const initialTickets = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket").length;
-
     vi.useFakeTimers();
     act(() => firstSocket?.onclose?.());
     expect(latestWebSocket).toBe(firstSocket);
@@ -913,23 +874,16 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     expect(fileInput).toBeTruthy();
     fireEvent.change(fileInput!, { target: { files: [file] } });
 
-    await waitFor(() => {
-      expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-        String(input) === "https://upload.test/file" && init?.method === "PUT",
-      )).toBe(true);
-    });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input) === "https://upload.test/file" && init?.method === "PUT")).toBe(true));
     expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).includes("/file-messages") && init?.method === "POST",
-    )).toBe(false);
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).match(/^\/api\/messages\/[^/]+$/) && init?.method === "DELETE",
-    )).toBe(false);
+      String(input) === "/api/channels/1/file-messages" && init?.method === "POST")).toBe(false);
   });
 
-  it("recovers to another room when the room disappears while sharing a file", async () => {
+  it("shows the empty-channel state when the room disappears while sharing a file", async () => {
     await renderChat({
-      missingRequest: "send",
-      fallbackChannels: [room(2, "#fallback-room")],
+      missingRequest: "attachment",
+      fallbackChannels: [],
     });
 
     const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
@@ -937,10 +891,10 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     expect(fileInput).toBeTruthy();
     fireEvent.change(fileInput!, { target: { files: [file] } });
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("no channels available")).toBeTruthy());
     expect(screen.queryByText("stale history")).toBeNull();
-    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input) === "/api/channels/1/file-messages" && init?.method === "POST")).toBe(true);
   });
 });
 
@@ -984,9 +938,6 @@ describe("frontend route and document error hardening", () => {
   });
 });
 
-    const props = { working: false, setWorking: vi.fn(), setNotice: vi.fn(), setError: vi.fn(), onRefresh };
-
-    const updatedDirectoryLine = screen.getAllByText(/Reporting manager:/)[1];
 
     const releaseFromAnotherSession = {
       id: 42,

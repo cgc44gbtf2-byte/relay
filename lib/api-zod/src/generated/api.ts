@@ -9,6 +9,104 @@ import * as zod from 'zod';
 
 
 /**
+ * @summary List custom role definitions and grantable permissions
+ */
+export const ListAdminCustomRolesResponse = zod.object({
+  "roles": zod.array(zod.object({
+  "key": zod.string(),
+  "label": zod.string(),
+  "description": zod.string(),
+  "scopeType": zod.enum(['community', 'category', 'department', 'channel']),
+  "isActive": zod.boolean(),
+  "permissions": zod.array(zod.string()),
+  "createdBy": zod.string(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})),
+  "permissions": zod.array(zod.object({
+  "key": zod.string(),
+  "description": zod.string()
+}))
+})
+
+
+/**
+ * @summary Create a reusable scoped role
+ */
+export const createAdminCustomRoleBodyLabelMax = 60;
+
+export const createAdminCustomRoleBodyDescriptionMax = 240;
+
+
+
+
+export const CreateAdminCustomRoleBody = zod.object({
+  "label": zod.string().min(1).max(createAdminCustomRoleBodyLabelMax),
+  "description": zod.string().max(createAdminCustomRoleBodyDescriptionMax),
+  "scopeType": zod.enum(['community', 'category', 'department', 'channel']),
+  "permissions": zod.array(zod.string()).min(1)
+})
+
+export const CreateAdminCustomRoleResponse = zod.object({
+  "key": zod.string(),
+  "label": zod.string(),
+  "description": zod.string(),
+  "scopeType": zod.enum(['community', 'category', 'department', 'channel']),
+  "isActive": zod.boolean(),
+  "permissions": zod.array(zod.string()),
+  "createdBy": zod.string(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Edit a custom role and its permissions
+ */
+export const UpdateAdminCustomRoleParams = zod.object({
+  "key": zod.coerce.string()
+})
+
+export const updateAdminCustomRoleBodyLabelMax = 60;
+
+export const updateAdminCustomRoleBodyDescriptionMax = 240;
+
+
+
+
+export const UpdateAdminCustomRoleBody = zod.object({
+  "label": zod.string().min(1).max(updateAdminCustomRoleBodyLabelMax),
+  "description": zod.string().max(updateAdminCustomRoleBodyDescriptionMax),
+  "scopeType": zod.enum(['community', 'category', 'department', 'channel']),
+  "permissions": zod.array(zod.string()).min(1)
+})
+
+export const UpdateAdminCustomRoleResponse = zod.object({
+  "key": zod.string(),
+  "label": zod.string(),
+  "description": zod.string(),
+  "scopeType": zod.enum(['community', 'category', 'department', 'channel']),
+  "isActive": zod.boolean(),
+  "permissions": zod.array(zod.string()),
+  "createdBy": zod.string(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Retire a custom role without deleting its history
+ */
+export const RetireAdminCustomRoleParams = zod.object({
+  "key": zod.coerce.string()
+})
+
+export const RetireAdminCustomRoleResponse = zod.object({
+  "ok": zod.boolean()
+})
+
+
+/**
  * Returns server health status
  * @summary Health check
  */

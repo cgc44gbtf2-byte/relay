@@ -5,6 +5,61 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+export type CustomRoleInputScopeType = typeof CustomRoleInputScopeType[keyof typeof CustomRoleInputScopeType];
+
+
+export const CustomRoleInputScopeType = {
+  community: 'community',
+  category: 'category',
+  department: 'department',
+  channel: 'channel',
+} as const;
+
+export interface CustomRoleInput {
+  /**
+     * @minLength 1
+     * @maxLength 60
+     */
+  label: string;
+  /** @maxLength 240 */
+  description: string;
+  scopeType: CustomRoleInputScopeType;
+  /** @minItems 1 */
+  permissions: string[];
+}
+
+export type CustomRoleScopeType = typeof CustomRoleScopeType[keyof typeof CustomRoleScopeType];
+
+
+export const CustomRoleScopeType = {
+  community: 'community',
+  category: 'category',
+  department: 'department',
+  channel: 'channel',
+} as const;
+
+export interface CustomRole {
+  key: string;
+  label: string;
+  description: string;
+  scopeType: CustomRoleScopeType;
+  isActive: boolean;
+  permissions: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CustomRoleCatalogPermissionsItem = {
+  key: string;
+  description: string;
+};
+
+export interface CustomRoleCatalog {
+  roles: CustomRole[];
+  permissions: CustomRoleCatalogPermissionsItem[];
+}
+
 export interface HealthStatus {
   status: string;
 }
@@ -136,6 +191,10 @@ export interface OnboardingProgress {
   community: OnboardingCommunity;
   nextStep: OnboardingProgressNextStep;
 }
+
+export type RetireAdminCustomRole200 = {
+  ok: boolean;
+};
 
 export type GetIrcStateParams = {
 /**

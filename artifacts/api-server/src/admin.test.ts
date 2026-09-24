@@ -3993,6 +3993,98 @@ describe("admin access controls", () => {
     }
   });
 
+  test("creates, edits, assigns, and retires custom roles with scoped authority and audit history", async () => {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const communityIds: number[] = [];
+    const roleKeys: string[] = [];
+    const request = (path: string, method: string, body?: object) => apiRequest(adminSession, path, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    try {
+      const communities = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id)
+         VALUES ($1, $2, $5), ($3, $4, $5) RETURNING id`,
+        [`Role A ${suffix}`, `role-a-${suffix}`, `Role B ${suffix}`, `role-b-${suffix}`, adminSession.userId],
+      );
+      communityIds.push(...communities.rows.map(({ id }) => id));
+      const departments = await pool.query<{ id: number; community_id: number }>(
+        `INSERT INTO irc_departments (name, community_id)
+         VALUES ($1, $3), ($2, $4) RETURNING id, community_id`,
+        [`Department A ${suffix}`, `Department B ${suffix}`, ...communityIds],
+      );
+      const departmentA = departments.rows.find(({ community_id }) => community_id === communityIds[0])!.id;
+      const departmentB = departments.rows.find(({ community_id }) => community_id === communityIds[1])!.id;
+      const channel = await pool.query<{ id: number }>(
+        `INSERT INTO irc_channels (name, owner_id, community_id)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [`role-channel-${suffix}`, adminSession.userId, communityIds[0]],
+      );
+      const roleBody = (scopeType: string, permissions: string[]) => ({
+        label: `Role ${scopeType} ${suffix}`, description: "Scoped test role", scopeType, permissions,
+      });
+      const invalid = await request("/admin/custom-roles", "POST", roleBody("department", ["manage_roles"]));
+      assert.equal(invalid.status, 400, JSON.stringify(invalid));
+      const invalidAudit = await pool.query(
+        `SELECT id FROM irc_admin_audit_logs WHERE action = 'created_custom_role'
+         AND target_label = $1`, [`Role department ${suffix}`],
+      );
+      assert.equal(invalidAudit.rowCount, 0);
+
+      for (const [scopeType, scopeId, permission] of [
+        ["community", communityIds[0], "view_business"],
+        ["department", departmentA, "create_announcement"],
+        ["channel", channel.rows[0].id, "create_channel"],
+      ] as const) {
+        const created = await request("/admin/custom-roles", "POST", roleBody(scopeType, [permission]));
+        assert.equal(created.status, 201, JSON.stringify(created));
+        const key = (created.body as { key: string }).key;
+        roleKeys.push(key);
+        const assignment = {
+          userId: memberSession.userId, role: key, scopeType,
+          communityId: communityIds[0],
+          ...(scopeType === "department" ? { departmentId: scopeId } : {}),
+          ...(scopeType === "channel" ? { channelId: scopeId } : {}),
+        };
+        if (scopeType === "department") {
+          const mismatch = await request("/admin/role-assignments", "POST", { ...assignment, departmentId: departmentB });
+          assert.equal(mismatch.status, 400, JSON.stringify(mismatch));
+        }
+        const granted = await request("/admin/role-assignments", "POST", assignment);
+        assert.equal(granted.status, 201, JSON.stringify(granted));
+        const targetScope = scopeType === "community" ? { communityId: communityIds[0] }
+          : scopeType === "department" ? { communityId: communityIds[0], departmentId: departmentA }
+            : { communityId: communityIds[0], channelId: channel.rows[0].id };
+        assert.equal(await hasPermission(memberSession.userId, permission, targetScope), true);
+        assert.equal(await hasPermission(memberSession.userId, permission, { communityId: communityIds[1], departmentId: departmentB }), false);
+        const edited = await request(`/admin/custom-roles/${key}`, "PATCH", roleBody(scopeType, ["view_business"]));
+        assert.equal(edited.status, 200, JSON.stringify(edited));
+        if (permission !== "view_business") assert.equal(await hasPermission(memberSession.userId, permission, targetScope), false);
+        const retired = await request(`/admin/custom-roles/${key}`, "DELETE");
+        assert.equal(retired.status, 200, JSON.stringify(retired));
+        assert.equal(await hasPermission(memberSession.userId, "view_business", targetScope), false);
+        assert.equal((await request("/admin/role-assignments", "POST", assignment)).status, 400);
+        const audit = await pool.query<{ action: string }>(
+          `SELECT action FROM irc_admin_audit_logs
+           WHERE target_id = $1 AND action IN ('created_custom_role', 'updated_custom_role', 'retired_custom_role')
+           ORDER BY id`, [key],
+        );
+        assert.deepEqual(audit.rows.map(({ action }) => action), [
+          "created_custom_role", "updated_custom_role", "retired_custom_role",
+        ]);
+      }
+    } finally {
+      if (roleKeys.length) {
+        await pool.query("DELETE FROM irc_user_roles WHERE role = ANY($1::text[])", [roleKeys]);
+        await pool.query("DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])", [roleKeys]);
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = ANY($1::text[])", [roleKeys]);
+        await pool.query("DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])", [roleKeys]);
+      }
+      if (communityIds.length) await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+    }
+  });
+
   test("enforces every built-in workspace role boundary on community role changes", async () => {
     const ownerSession = await createTestSession("role_matrix_owner");
     const actorSession = await createTestSession("role_matrix_actor");

@@ -3251,7 +3251,13 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
 router.post("/communities/:communityId/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
-  if (!Number.isInteger(communityId) || !(await communityPermission(userId, communityId, "create_announcement"))) {
+  const requestedDepartmentId = req.body?.audienceType === "department"
+    && Number.isSafeInteger(Number(req.body?.departmentId)) && Number(req.body?.departmentId) > 0
+    ? Number(req.body.departmentId) : undefined;
+  if (!Number.isInteger(communityId) || !(await communityPermission(userId, communityId, "create_announcement"))
+    && !(requestedDepartmentId !== undefined && await hasPermission(userId, "create_announcement", {
+      communityId, departmentId: requestedDepartmentId,
+    }))) {
     res.status(403).json({ error: "You cannot announce in this community." });
     return;
   }

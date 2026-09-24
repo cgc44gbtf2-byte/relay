@@ -3,6 +3,8 @@ import {
   channelsTable,
   categoriesTable,
   communitiesTable,
+  customRolesTable,
+  departmentsTable,
   db,
   permissionDefinitionsTable,
   rolePermissionsTable,
@@ -57,6 +59,12 @@ export const PERMISSIONS = [
   "communicate",
 ] as const;
 export type PermissionKey = typeof PERMISSIONS[number];
+
+// Platform-wide administration is never grantable through a scoped role.
+export const CUSTOM_ROLE_PERMISSIONS = PERMISSIONS.filter((key) =>
+  !["manage_users", "manage_roles", "manage_platform_settings", "manage_any_community",
+    "view_system_logs", "push_application_updates", "create_community"].includes(key),
+);
 
 const ROLE_PERMISSIONS: Record<AuthorizationRole, readonly PermissionKey[]> = {
   admin: PERMISSIONS,
@@ -210,7 +218,7 @@ const ROLE_PERMISSIONS: Record<AuthorizationRole, readonly PermissionKey[]> = {
   ],
 };
 
-const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
+export const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
   manage_users: "Manage platform user accounts.",
   manage_roles: "Grant and revoke platform role assignments.",
   manage_platform_settings: "Change platform configuration.",
@@ -267,6 +275,7 @@ export async function ensurePermissionCatalog(): Promise<void> {
 export type PermissionScope = {
   communityId?: number;
   categoryId?: number;
+  departmentId?: number;
   channelId?: number;
 };
 
@@ -288,6 +297,11 @@ async function scopeFor(scope: PermissionScope, database: PermissionDatabase): P
       .where(eq(categoriesTable.id, scope.categoryId));
     if (category) return { ...scope, communityId: category.communityId ?? undefined };
   }
+  if (scope.departmentId !== undefined && scope.communityId === undefined) {
+    const [department] = await database.select({ communityId: departmentsTable.communityId })
+      .from(departmentsTable).where(eq(departmentsTable.id, scope.departmentId));
+    if (department) return { ...scope, communityId: department.communityId };
+  }
   return scope;
 }
 
@@ -295,6 +309,8 @@ function assignmentMatches(assignment: Assignment, scope: PermissionScope): bool
   if (assignment.scopeType === "platform") return true;
   if (assignment.scopeType === "community") return assignment.communityId !== null && assignment.communityId === scope.communityId;
   if (assignment.scopeType === "category") return assignment.categoryId !== null && assignment.categoryId === scope.categoryId;
+  if (assignment.scopeType === "department") return assignment.departmentId !== null && assignment.departmentId === scope.departmentId
+    && assignment.communityId === scope.communityId;
   if (assignment.scopeType === "channel") return assignment.channelId !== null && assignment.channelId === scope.channelId;
   return false;
 }
@@ -351,6 +367,16 @@ export async function hasPermission(
     ),
   ];
   if (!customRoleNames.length) return false;
+  const activeRolesQuery = database.select({ key: customRolesTable.key, scopeType: customRolesTable.scopeType })
+    .from(customRolesTable)
+    .where(and(inArray(customRolesTable.key, customRoleNames), eq(customRolesTable.isActive, true)));
+  // A role definition is the authority-granting row: lock it before checking its
+  // links so a concurrent retirement/edit cannot commit between check and write.
+  const activeRoles = lockAuthorizationRows ? await activeRolesQuery.for("share") : await activeRolesQuery;
+  const activeNames = activeRoles.filter((role) =>
+    matchingAssignments.some((assignment) => assignment.role === role.key && assignment.scopeType === role.scopeType),
+  ).map((role) => role.key);
+  if (!activeNames.length) return false;
   const customRoleMatchesQuery = database
     .select({ role: rolePermissionsTable.role })
     .from(rolePermissionsTable)
@@ -359,7 +385,7 @@ export async function hasPermission(
       eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId),
     )
     .where(and(
-      inArray(rolePermissionsTable.role, customRoleNames),
+      inArray(rolePermissionsTable.role, activeNames),
       eq(permissionDefinitionsTable.key, permission),
     ));
   const customRoleMatches = lockAuthorizationRows
@@ -407,9 +433,11 @@ export async function permissionsForCommunities(
   const customPermissionRows = customRoleNames.length
     ? await db.select({
       role: rolePermissionsTable.role,
+      scopeType: customRolesTable.scopeType,
       key: permissionDefinitionsTable.key,
     }).from(rolePermissionsTable)
       .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+      .innerJoin(customRolesTable, and(eq(customRolesTable.key, rolePermissionsTable.role), eq(customRolesTable.isActive, true)))
       .where(inArray(rolePermissionsTable.role, customRoleNames))
     : [];
   const customPermissionsByRole = new Map<string, Set<PermissionKey>>();
@@ -438,7 +466,9 @@ export async function permissionsForCommunities(
     for (const assignment of assignments) {
       if (!assignmentMatches(assignment, { communityId })) continue;
       addRolePermissions(permissions, assignment.role);
-      for (const permission of customPermissionsByRole.get(assignment.role) ?? []) permissions.add(permission);
+      if (customPermissionRows.some((row) => row.role === assignment.role && row.scopeType === assignment.scopeType)) {
+        for (const permission of customPermissionsByRole.get(assignment.role) ?? []) permissions.add(permission);
+      }
     }
   }
 
@@ -463,12 +493,14 @@ export async function permissionsForUser(userId: string): Promise<{
   }
   const customRoleNames = assignments.map((assignment) => assignment.role).filter((role) => !(role in ROLE_PERMISSIONS));
   if (customRoleNames.length) {
-    const customPermissions = await db.select({ key: permissionDefinitionsTable.key })
+    const customPermissions = await db.select({ key: permissionDefinitionsTable.key, role: rolePermissionsTable.role, scopeType: customRolesTable.scopeType })
       .from(rolePermissionsTable)
       .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+      .innerJoin(customRolesTable, and(eq(customRolesTable.key, rolePermissionsTable.role), eq(customRolesTable.isActive, true)))
       .where(inArray(rolePermissionsTable.role, customRoleNames));
     for (const item of customPermissions) {
-      if (PERMISSIONS.includes(item.key as PermissionKey)) permissionSet.add(item.key as PermissionKey);
+      if (assignments.some((assignment) => assignment.role === item.role && assignment.scopeType === item.scopeType)
+        && PERMISSIONS.includes(item.key as PermissionKey)) permissionSet.add(item.key as PermissionKey);
     }
   }
   const effectiveRole = [user?.role ?? "member", ...assignments.map((assignment) => assignment.role)]
