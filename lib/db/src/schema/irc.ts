@@ -720,13 +720,17 @@ export const workspaceObjectDeletionJobsTable = pgTable("irc_workspace_object_de
   id: serial("id").primaryKey(),
   objectPath: text("object_path").notNull().unique(),
   status: text("status").notNull().default("pending"),
+  claimToken: text("claim_token"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   attempts: integer("attempts").notNull().default(0),
   lastError: text("last_error"),
   context: text("context").notNull().default("workspace"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   processedAt: timestamp("processed_at", { withTimezone: true }),
-});
+}, (table) => [
+  index("irc_object_deletion_claim_idx").on(table.status, table.leaseExpiresAt, table.createdAt),
+]);
 
 export const developerReleasesTable = pgTable("irc_developer_releases", {
   id: serial("id").primaryKey(),

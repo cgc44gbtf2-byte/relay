@@ -668,4 +668,89 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     await db.delete(workspaceObjectDeletionJobsTable)
       .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
   });
+
+  test("simultaneous cleanup passes issue only one DELETE per claimed job", async () => {
+    const objectPath = `/objects/integration/${suffix}-concurrent`;
+    await db.insert(workspaceObjectDeletionJobsTable).values({ objectPath, context: "integration" });
+    let started!: () => void;
+    let finish!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { started = resolve; });
+    const releaseDelete = new Promise<void>((resolve) => { finish = resolve; });
+    let calls = 0;
+    const dependencies = {
+      signObjectUrl: async () => "https://storage.test/object",
+      fetchImpl: async () => {
+        calls++;
+        started();
+        await releaseDelete;
+        return new Response(null, { status: 204 });
+      },
+    };
+    try {
+      const firstPass = processObjectDeletionJobs(1, dependencies);
+      await deleteStarted;
+      const [claimed] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+      assert.equal(claimed.status, "processing");
+      assert.ok(claimed.claimToken);
+      assert.ok(claimed.leaseExpiresAt);
+      assert.deepEqual(await processObjectDeletionJobs(1, dependencies), { processed: 0, failed: 0 });
+      assert.equal(calls, 1);
+      finish();
+      assert.deepEqual(await firstPass, { processed: 1, failed: 0 });
+      assert.deepEqual(await processObjectDeletionJobs(1, dependencies), { processed: 0, failed: 0 });
+      const [completed] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.claimToken, null);
+      assert.equal(completed.leaseExpiresAt, null);
+      assert.equal(calls, 1);
+    } finally {
+      finish();
+      await db.delete(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+    }
+  });
+
+  test("an expired claim is recoverable and its stale failure cannot reverse completion", async () => {
+    const objectPath = `/objects/integration/${suffix}-recovery`;
+    await db.insert(workspaceObjectDeletionJobsTable).values({ objectPath, context: "integration" });
+    let started!: () => void;
+    let failOldAttempt!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { started = resolve; });
+    const releaseOldAttempt = new Promise<void>((resolve) => { failOldAttempt = resolve; });
+    try {
+      const stalePass = processObjectDeletionJobs(1, {
+        signObjectUrl: async () => "https://storage.test/object",
+        fetchImpl: async () => {
+          started();
+          await releaseOldAttempt;
+          return new Response("", { status: 503 });
+        },
+      });
+      await deleteStarted;
+      const [claimed] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+      // Simulate a worker lost past its lease; another worker can reclaim it.
+      await db.update(workspaceObjectDeletionJobsTable).set({
+        leaseExpiresAt: new Date(Date.now() - 1_000),
+      }).where(eq(workspaceObjectDeletionJobsTable.id, claimed.id));
+      assert.deepEqual(await processObjectDeletionJobs(1, {
+        signObjectUrl: async () => "https://storage.test/object",
+        fetchImpl: async () => new Response(null, { status: 404 }),
+      }), { processed: 1, failed: 0 });
+      failOldAttempt();
+      assert.deepEqual(await stalePass, { processed: 0, failed: 0 });
+      const [completed] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.attempts, 0);
+      assert.equal(completed.lastError, null);
+      assert.ok(completed.processedAt);
+    } finally {
+      failOldAttempt();
+      await db.delete(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+    }
+  });
 });
