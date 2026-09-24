@@ -197,12 +197,17 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     return;
   }
   const activityCursor = parseActivityCursor(req.query.activityCursor);
-  if (activityCursor === false) {
+  const activityAfterCursor = parseActivityCursor(req.query.activityAfterCursor);
+  if (activityCursor === false || activityAfterCursor === false) {
     res.status(400).json({ error: "Invalid activity cursor." });
     return;
   }
+  if (activityCursor && activityAfterCursor) {
+    res.status(400).json({ error: "Only one activity cursor may be used at a time." });
+    return;
+  }
 
-  const effectiveActivityOffset = activityCursor ? 0 : activityOffset;
+  const effectiveActivityOffset = activityCursor || activityAfterCursor ? 0 : activityOffset;
   const activityActor = parseActivityFilter(req.query.activityActor);
   const activityAction = parseActivityFilter(req.query.activityAction);
   if (activityActor === null || activityAction === null) {
@@ -307,18 +312,31 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         activityCursor
           ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${activityCursor.createdAt}::timestamptz, ${activityCursor.id})`
           : undefined,
+        activityAfterCursor
+          ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) > (${activityAfterCursor.createdAt}::timestamptz, ${activityAfterCursor.id})`
+          : undefined,
       ))
-      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+      .orderBy(
+        activityAfterCursor ? asc(adminAuditLogsTable.createdAt) : desc(adminAuditLogsTable.createdAt),
+        activityAfterCursor ? asc(adminAuditLogsTable.id) : desc(adminAuditLogsTable.id),
+      )
       .limit(activityLimit + 1)
       .offset(effectiveActivityOffset),
   ]);
   const hasMoreActivity = activity.length > activityLimit;
-  const visibleActivity = activity
-    .slice(0, activityLimit)
+  const visibleActivity = (activityAfterCursor
+    ? activity.slice(0, activityLimit).reverse()
+    : activity.slice(0, activityLimit))
     .map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
   const lastActivity = activity[Math.min(activity.length, activityLimit) - 1];
-  const nextActivityCursor = hasMoreActivity && lastActivity
+  const newestActivity = activityAfterCursor
+    ? activity[Math.min(activity.length, activityLimit) - 1]
+    : activity[0];
+  const nextActivityCursor = !activityAfterCursor && hasMoreActivity && lastActivity
     ? encodeActivityCursor({ createdAt: lastActivity.cursorCreatedAt, id: lastActivity.id })
+    : null;
+  const newestActivityCursor = newestActivity
+    ? encodeActivityCursor({ createdAt: newestActivity.cursorCreatedAt, id: newestActivity.id })
     : null;
 
   res.json({
@@ -337,9 +355,11 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     activityPagination: {
       limit: activityLimit,
       offset: effectiveActivityOffset,
-      hasMore: hasMoreActivity,
-      nextOffset: hasMoreActivity && !activityCursor ? activityOffset + activityLimit : null,
+      hasMore: !activityAfterCursor && hasMoreActivity,
+      nextOffset: hasMoreActivity && !activityCursor && !activityAfterCursor ? activityOffset + activityLimit : null,
       nextCursor: nextActivityCursor,
+      newestCursor: newestActivityCursor,
+      newerHasMore: Boolean(activityAfterCursor && hasMoreActivity),
     },
   });
 });

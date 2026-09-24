@@ -460,6 +460,10 @@ paths:
         - name: activityCursor
           in: query
           schema: { type: string, maxLength: 256 }
+        - name: activityAfterCursor
+          in: query
+          description: Return events newer than this activity cursor.
+          schema: { type: string, maxLength: 256 }
         - name: activityActor
           in: query
           schema: { type: string, maxLength: 200 }
@@ -559,7 +563,18 @@ components:
         categories: { type: array, items: { type: object } }
         recentMessages: { type: array, items: { type: object } }
         activity: { type: array, items: { type: object } }
-        activityPagination: { $ref: "#/components/schemas/PageInfo" }
+        activityPagination: { $ref: "#/components/schemas/AdminActivityPagination" }
+    AdminActivityPagination:
+      type: object
+      required: [limit, offset, hasMore, nextOffset, nextCursor, newestCursor, newerHasMore]
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 50 }
+        offset: { type: integer, minimum: 0 }
+        hasMore: { type: boolean, description: Whether older events are available. }
+        nextOffset: { type: ["integer", "null"], minimum: 0 }
+        nextCursor: { type: ["string", "null"] }
+        newestCursor: { type: ["string", "null"], description: Cursor for the newest returned event. }
+        newerHasMore: { type: boolean, description: Whether more newer events remain after an activityAfterCursor request. }
     AuditEntry:
       type: object
       required: [id, action, createdAt]

@@ -22,6 +22,11 @@ activityOffset?: number;
  */
 activityCursor?: string;
 /**
+ * Return events newer than this activity cursor.
+ * @maxLength 256
+ */
+activityAfterCursor?: string;
+/**
  * @maxLength 200
  */
 activityActor?: string;

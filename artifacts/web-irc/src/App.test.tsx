@@ -1185,4 +1185,96 @@ describe("admin channel and category deletion permissions", () => {
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/api/communities/7/channels/12")).toBe(false);
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith("/with-channels"))).toBe(false);
   });
+
+  it("adds newer activity without losing older pages or duplicating an existing event", async () => {
+    const activityItem = (id: string, details: string) => ({
+      id,
+      actorId: "user-1",
+      actor: "Manager",
+      action: "changed_role",
+      targetId: `target-${id}`,
+      targetLabel: `Account ${id}`,
+      details,
+      createdAt: "2026-09-21T12:00:00.000Z",
+    });
+    const overview = (
+      activity: ReturnType<typeof activityItem>[],
+      pagination: {
+        hasMore: boolean;
+        nextCursor: string | null;
+        newestCursor: string | null;
+        newerHasMore: boolean;
+      },
+    ) => ({
+      stats: { users: 1, channels: 1, messages: 0, online: 1, admins: 1 },
+      users: [],
+      channels: [channel],
+      categories: [{ ...category, communityOwnerId: "user-1" }],
+      recentMessages: [],
+      activity,
+      activityPagination: {
+        limit: 2,
+        offset: 0,
+        hasMore: pagination.hasMore,
+        nextOffset: null,
+        nextCursor: pagination.nextCursor,
+        newestCursor: pagination.newestCursor,
+        newerHasMore: pagination.newerHasMore,
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/notifications") return jsonResponse([]);
+      if (url.pathname === "/api/admin/status") {
+        return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
+      }
+      if (url.pathname === "/api/admin/overview") {
+        if (url.searchParams.has("activityAfterCursor")) {
+          expect(url.searchParams.get("activityActor")).toBe("Manager");
+          expect(url.searchParams.get("activityAction")).toBe("changed");
+          return jsonResponse(overview(
+            [activityItem("new", "newly added"), activityItem("latest", "already newest")],
+            { hasMore: false, nextCursor: null, newestCursor: "new-head", newerHasMore: true },
+          ));
+        }
+        if (url.searchParams.has("activityCursor")) {
+          return jsonResponse(overview(
+            [activityItem("oldest", "old page retained")],
+            { hasMore: false, nextCursor: null, newestCursor: "old-head", newerHasMore: false },
+          ));
+        }
+        return jsonResponse(overview(
+          [activityItem("latest", "already newest"), activityItem("middle", "middle page retained")],
+          { hasMore: true, nextCursor: "older-page", newestCursor: "head-cursor", newerHasMore: false },
+        ));
+      }
+      if (url.pathname === "/api/admin/health") {
+        return jsonResponse({ api: "operational", database: "operational", checkedAt: "2026-09-21T12:00:00.000Z" });
+      }
+      return jsonResponse({ error: "Unexpected request" }, 404);
+    }));
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+    fireEvent.click(await screen.findByTestId("button-admin-nav-activity"));
+    expect(await screen.findByText("already newest")).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("input-activity-actor"), { target: { value: "Manager" } });
+    fireEvent.change(screen.getByTestId("input-activity-action"), { target: { value: "changed" } });
+    const loadNewerButton = await screen.findByTestId("button-load-newer-activity");
+    fireEvent.click(screen.getByRole("button", { name: "load older activity" }));
+    expect(await screen.findByText("old page retained")).toBeTruthy();
+
+    fireEvent.click(loadNewerButton);
+    expect(await screen.findByText("newly added")).toBeTruthy();
+    expect(screen.getByText("middle page retained")).toBeTruthy();
+    expect(screen.getByText("old page retained")).toBeTruthy();
+    expect(screen.getAllByText("already newest")).toHaveLength(1);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => {
+      const url = new URL(String(input), window.location.origin);
+      return url.pathname === "/api/admin/overview"
+        && url.searchParams.get("activityAfterCursor") === "head-cursor"
+        && url.searchParams.get("activityActor") === "Manager"
+        && url.searchParams.get("activityAction") === "changed";
+    })).toBe(true);
+  });
 });

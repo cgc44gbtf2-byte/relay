@@ -611,6 +611,8 @@ export const getAdminOverviewQueryActivityOffsetMax = 10000;
 
 export const getAdminOverviewQueryActivityCursorMax = 256;
 
+export const getAdminOverviewQueryActivityAfterCursorMax = 256;
+
 export const getAdminOverviewQueryActivityActorMax = 200;
 
 export const getAdminOverviewQueryActivityActionMax = 200;
@@ -621,13 +623,16 @@ export const GetAdminOverviewQueryParams = zod.object({
   "activityLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryActivityLimitMax).default(getAdminOverviewQueryActivityLimitDefault),
   "activityOffset": zod.coerce.number().int().min(getAdminOverviewQueryActivityOffsetMin).max(getAdminOverviewQueryActivityOffsetMax).default(getAdminOverviewQueryActivityOffsetDefault),
   "activityCursor": zod.coerce.string().max(getAdminOverviewQueryActivityCursorMax).optional(),
+  "activityAfterCursor": zod.coerce.string().max(getAdminOverviewQueryActivityAfterCursorMax).optional().describe('Return events newer than this activity cursor.'),
   "activityActor": zod.coerce.string().max(getAdminOverviewQueryActivityActorMax).optional(),
   "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional()
 })
 
-export const getAdminOverviewResponseActivityPaginationLimitMax = 100;
+export const getAdminOverviewResponseActivityPaginationLimitMax = 50;
 
 export const getAdminOverviewResponseActivityPaginationOffsetMin = 0;
+
+export const getAdminOverviewResponseActivityPaginationNextOffsetMin = 0;
 
 
 
@@ -653,7 +658,11 @@ export const GetAdminOverviewResponse = zod.object({
   "activityPagination": zod.object({
   "limit": zod.number().int().min(1).max(getAdminOverviewResponseActivityPaginationLimitMax),
   "offset": zod.number().int().min(getAdminOverviewResponseActivityPaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean().describe('Whether older events are available.'),
+  "nextOffset": zod.number().int().min(getAdminOverviewResponseActivityPaginationNextOffsetMin).nullable(),
+  "nextCursor": zod.string().nullable(),
+  "newestCursor": zod.string().nullable().describe('Cursor for the newest returned event.'),
+  "newerHasMore": zod.boolean().describe('Whether more newer events remain after an activityAfterCursor request.')
 })
 })
 

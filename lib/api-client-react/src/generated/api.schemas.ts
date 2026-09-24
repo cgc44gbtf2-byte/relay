@@ -109,6 +109,32 @@ export type AdminOverviewRecentMessagesItem = { [key: string]: unknown };
 
 export type AdminOverviewActivityItem = { [key: string]: unknown };
 
+export interface AdminActivityPagination {
+  /**
+     * @minimum 1
+     * @maximum 50
+     */
+  limit: number;
+  /** @minimum 0 */
+  offset: number;
+  /** Whether older events are available. */
+  hasMore: boolean;
+  /**
+     * @minimum 0
+     * @nullable
+     */
+  nextOffset: number | null;
+  /** @nullable */
+  nextCursor: string | null;
+  /**
+     * Cursor for the newest returned event.
+     * @nullable
+     */
+  newestCursor: string | null;
+  /** Whether more newer events remain after an activityAfterCursor request. */
+  newerHasMore: boolean;
+}
+
 export interface AdminOverview {
   stats: AdminOverviewStats;
   users: AdminOverviewUsersItem[];
@@ -116,7 +142,7 @@ export interface AdminOverview {
   categories: AdminOverviewCategoriesItem[];
   recentMessages: AdminOverviewRecentMessagesItem[];
   activity: AdminOverviewActivityItem[];
-  activityPagination: PageInfo;
+  activityPagination: AdminActivityPagination;
 }
 
 export interface AuditEntry {
@@ -537,6 +563,11 @@ activityOffset?: number;
  * @maxLength 256
  */
 activityCursor?: string;
+/**
+ * Return events newer than this activity cursor.
+ * @maxLength 256
+ */
+activityAfterCursor?: string;
 /**
  * @maxLength 200
  */

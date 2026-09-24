@@ -1439,7 +1439,15 @@ type ConsoleOverview = {
   categories: Array<{ id: number; name: string; description: string; communityId: number | null; communityName: string | null; communityOwnerId: string | null }>;
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
-  activityPagination: { limit: number; offset: number; hasMore: boolean; nextOffset: number | null; nextCursor: string | null };
+  activityPagination: {
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+    nextOffset: number | null;
+    nextCursor: string | null;
+    newestCursor: string | null;
+    newerHasMore: boolean;
+  };
 };
 type AdminAssignment = {
   id: number;
@@ -1932,6 +1940,7 @@ function AdminConsole() {
   const [health, setHealth] = useState<ConsoleHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
+  const [loadingNewerActivity, setLoadingNewerActivity] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -1960,7 +1969,11 @@ function AdminConsole() {
   >(null);
   const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [announcementDraft, setAnnouncementDraft] = useState("");
-  const load = async (activityCursor: string | null = null, appendActivity = false) => {
+  const load = async (
+    activityCursor: string | null = null,
+    appendActivity = false,
+    activityAfterCursor: string | null = null,
+  ) => {
     const requestId = ++overviewLoadRef.current;
     const requestedActivityFilters = {
       actor: activityActorFilter.trim(),
@@ -1970,27 +1983,59 @@ function AdminConsole() {
     try {
       const activityParams = new URLSearchParams();
       if (activityCursor) activityParams.set("activityCursor", activityCursor);
+      if (activityAfterCursor) activityParams.set("activityAfterCursor", activityAfterCursor);
       if (requestedActivityFilters.actor) activityParams.set("activityActor", requestedActivityFilters.actor);
       if (requestedActivityFilters.action) activityParams.set("activityAction", requestedActivityFilters.action);
       const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
       const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
       if (requestId !== overviewLoadRef.current) return;
       setLoadedActivityFilters(requestedActivityFilters);
+      const existingIds = new Set(overview?.activity.map((item) => item.id) ?? []);
+      const addedActivityCount = nextOverview.activity.filter((item) => !existingIds.has(item.id)).length;
       if (!appendActivity) {
-        setOverview(nextOverview);
+        if (activityAfterCursor) {
+          setOverview((current) => {
+            if (!current) return nextOverview;
+            const currentIds = new Set(current.activity.map((item) => item.id));
+            return {
+              ...nextOverview,
+              activity: [
+                ...nextOverview.activity.filter((item) => !currentIds.has(item.id)),
+                ...current.activity,
+              ],
+              activityPagination: {
+                ...current.activityPagination,
+                newestCursor: nextOverview.activityPagination.newestCursor ?? current.activityPagination.newestCursor,
+                newerHasMore: nextOverview.activityPagination.newerHasMore,
+              },
+            };
+          });
+        } else {
+          setOverview(nextOverview);
+        }
       } else {
         setOverview((current) => {
           if (!current) return nextOverview;
           const existingIds = new Set(current.activity.map((item) => item.id));
           const activity = [...current.activity, ...nextOverview.activity.filter((item) => !existingIds.has(item.id))];
-          return { ...nextOverview, activity };
+          return {
+            ...nextOverview,
+            activity,
+            activityPagination: {
+              ...nextOverview.activityPagination,
+              newestCursor: current.activityPagination.newestCursor,
+              newerHasMore: current.activityPagination.newerHasMore,
+            },
+          };
         });
       }
       setHealth(nextHealth);
+      return activityAfterCursor ? addedActivityCount : undefined;
     } catch (reason) {
       if (requestId === overviewLoadRef.current) {
         setError(reason instanceof Error ? reason.message : "Could not load the operations console");
       }
+      return undefined;
     }
   };
   const loadRoleData = async () => {
@@ -2114,12 +2159,27 @@ function AdminConsole() {
   };
   const loadOlderActivity = async () => {
     const nextCursor = overview?.activityPagination.nextCursor;
-    if (!nextCursor || loadingOlderActivity) return;
+    if (!nextCursor || loadingOlderActivity || loadingNewerActivity) return;
     setLoadingOlderActivity(true);
     try {
       await load(nextCursor, true);
     } finally {
       setLoadingOlderActivity(false);
+    }
+  };
+  const loadNewerActivity = async () => {
+    const newestCursor = overview?.activityPagination.newestCursor;
+    if (!newestCursor || loadingNewerActivity || loadingOlderActivity || !activityFiltersCurrent) return;
+    setLoadingNewerActivity(true);
+    try {
+      const added = await load(null, false, newestCursor);
+      if (typeof added === "number") {
+        setNotice(added === 0
+          ? "No newer activity was found."
+          : `Added ${added} newer ${added === 1 ? "event" : "events"}.`);
+      }
+    } finally {
+      setLoadingNewerActivity(false);
     }
   };
   const accounts = (directoryLoaded ? directory : overview?.users ?? []).filter((account) => { const q = query.trim().toLowerCase(); return (!q || account.username.toLowerCase().includes(q) || account.displayName.toLowerCase().includes(q)) && (roleFilter === "all" || account.role === roleFilter) && (statusFilter === "all" || account.status === statusFilter) && (accountStatusFilter === "all" || account.accountStatus === accountStatusFilter); });
@@ -2165,7 +2225,18 @@ function AdminConsole() {
                       <h2 className="font-mono text-sm font-bold">audit stream</h2>
                       <p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p>
                     </div>
-                    <Activity className="h-4 w-4 text-primary" />
+                     <div className="flex items-center gap-2">
+                       {activityFiltersCurrent && overview.activityPagination.newestCursor && <button
+                         type="button"
+                         disabled={loadingNewerActivity || loadingOlderActivity}
+                         onClick={() => void loadNewerActivity()}
+                         className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50"
+                         data-testid="button-load-newer-activity"
+                       >
+                         {loadingNewerActivity ? "checking activity…" : overview.activityPagination.newerHasMore ? "load more new activity" : "check for new activity"}
+                       </button>}
+                       <Activity className="h-4 w-4 text-primary" />
+                     </div>
                   </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
                     <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
@@ -2187,7 +2258,7 @@ function AdminConsole() {
                       {overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}
                     </>}
                 </div>
-                {activityFiltersCurrent && overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}
+                {activityFiltersCurrent && overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity || loadingNewerActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}
               </section>
           ) : section === "upgrades" ? <AdminCommunityUpgradesPanel /> : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>

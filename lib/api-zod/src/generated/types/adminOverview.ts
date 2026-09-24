@@ -5,13 +5,13 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { AdminActivityPagination } from './adminActivityPagination';
 import type { AdminOverviewActivityItem } from './adminOverviewActivityItem';
 import type { AdminOverviewCategoriesItem } from './adminOverviewCategoriesItem';
 import type { AdminOverviewChannelsItem } from './adminOverviewChannelsItem';
 import type { AdminOverviewRecentMessagesItem } from './adminOverviewRecentMessagesItem';
 import type { AdminOverviewStats } from './adminOverviewStats';
 import type { AdminOverviewUsersItem } from './adminOverviewUsersItem';
-import type { PageInfo } from './pageInfo';
 
 export interface AdminOverview {
   stats: AdminOverviewStats;
@@ -20,5 +20,5 @@ export interface AdminOverview {
   categories: AdminOverviewCategoriesItem[];
   recentMessages: AdminOverviewRecentMessagesItem[];
   activity: AdminOverviewActivityItem[];
-  activityPagination: PageInfo;
+  activityPagination: AdminActivityPagination;
 }

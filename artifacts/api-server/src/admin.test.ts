@@ -2480,6 +2480,139 @@ describe("admin access controls", () => {
     }
   });
 
+  test("loads newer activity in filtered cursor batches while keeping older pages separate", async () => {
+    const marker = `activity_newer_${randomUUID().replaceAll("-", "")}`;
+    const actor = `${marker} Manager`;
+    const action = `${marker}_changed`;
+    const entries = [
+      ...Array.from({ length: 6 }, (_, index) => ({
+        actor,
+        action,
+        createdAt: new Date(Date.UTC(2099, 0, 1, 0, 0, index)),
+      })),
+      ...Array.from({ length: 3 }, (_, index) => ({
+        actor,
+        action,
+        createdAt: new Date(Date.UTC(2099, 0, 1, 0, 0, 10 + index)),
+      })),
+      {
+        actor: `${marker} Other`,
+        action,
+        createdAt: new Date(Date.UTC(2099, 0, 1, 0, 0, 13)),
+      },
+      {
+        actor,
+        action: `${marker}_different`,
+        createdAt: new Date(Date.UTC(2099, 0, 1, 0, 0, 14)),
+      },
+    ];
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (const [index, entry] of entries.entries()) {
+      const parameterOffset = parameters.length;
+      values.push(
+        `($${parameterOffset + 1}, $${parameterOffset + 2}, $${parameterOffset + 3}, $${parameterOffset + 4}, $${parameterOffset + 5}, $${parameterOffset + 6}, $${parameterOffset + 7})`,
+      );
+      parameters.push(
+        adminSession.userId,
+        entry.actor,
+        entry.action,
+        `${marker}_target_${index}`,
+        `${marker} label ${index}`,
+        `Event ${index}`,
+        entry.createdAt,
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+       VALUES ${values.join(", ")}`,
+      parameters,
+    );
+
+    try {
+      const filters = `activityActor=${encodeURIComponent(`${marker} Manager`)}&activityAction=${encodeURIComponent(action)}`;
+      const firstResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityLimit=3&${filters}`,
+      );
+      assert.equal(firstResponse.status, 200, JSON.stringify(firstResponse));
+      const firstPage = firstResponse.body as {
+        activity: Array<{ id: number; action: string; actor: string; createdAt: string }>;
+        activityPagination: {
+          hasMore: boolean;
+          nextCursor: string | null;
+          newestCursor: string | null;
+        };
+      };
+      assert.deepEqual(firstPage.activity.map((entry) => entry.action), [action, action, action]);
+      assert.equal(firstPage.activity[0]?.createdAt, new Date(Date.UTC(2099, 0, 1, 0, 0, 5)).toISOString());
+      assert.ok(firstPage.activityPagination.hasMore);
+      assert.ok(firstPage.activityPagination.nextCursor);
+      assert.ok(firstPage.activityPagination.newestCursor);
+
+      const olderResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityLimit=3&${filters}&activityCursor=${encodeURIComponent(firstPage.activityPagination.nextCursor)}`,
+      );
+      assert.equal(olderResponse.status, 200, JSON.stringify(olderResponse));
+      const olderPage = olderResponse.body as typeof firstPage;
+      assert.equal(olderPage.activity.length, 3);
+      assert.equal(olderPage.activityPagination.hasMore, false);
+
+      const newerResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityLimit=2&${filters}&activityAfterCursor=${encodeURIComponent(firstPage.activityPagination.newestCursor)}`,
+      );
+      assert.equal(newerResponse.status, 200, JSON.stringify(newerResponse));
+      const newerPage = newerResponse.body as typeof firstPage & {
+        activityPagination: typeof firstPage.activityPagination & { newerHasMore: boolean };
+      };
+      assert.equal(newerPage.activity.length, 2);
+      assert.deepEqual(
+        newerPage.activity.map((entry) => entry.createdAt),
+        [
+          new Date(Date.UTC(2099, 0, 1, 0, 0, 11)).toISOString(),
+          new Date(Date.UTC(2099, 0, 1, 0, 0, 10)).toISOString(),
+        ],
+      );
+      assert.ok(newerPage.activity.every((entry) => entry.actor === actor && entry.action === action));
+      assert.equal(newerPage.activityPagination.hasMore, false);
+      assert.equal(newerPage.activityPagination.newerHasMore, true);
+      assert.ok(newerPage.activityPagination.newestCursor);
+
+      const newestResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityLimit=2&${filters}&activityAfterCursor=${encodeURIComponent(newerPage.activityPagination.newestCursor!)}`,
+      );
+      assert.equal(newestResponse.status, 200, JSON.stringify(newestResponse));
+      const newestPage = newestResponse.body as typeof newerPage;
+      assert.equal(newestPage.activity.length, 1);
+      assert.equal(newestPage.activity[0]?.createdAt, new Date(Date.UTC(2099, 0, 1, 0, 0, 12)).toISOString());
+      assert.equal(newestPage.activityPagination.newerHasMore, false);
+
+      const allLoaded = [
+        ...newestPage.activity,
+        ...newerPage.activity,
+        ...firstPage.activity,
+        ...olderPage.activity,
+      ];
+      assert.equal(new Set(allLoaded.map((entry) => entry.id)).size, allLoaded.length);
+      assert.equal(allLoaded.length, 9);
+
+      const conflictingCursors = await apiRequest(
+        adminSession,
+        `/admin/overview?activityCursor=${encodeURIComponent(firstPage.activityPagination.nextCursor!)}&activityAfterCursor=${encodeURIComponent(firstPage.activityPagination.newestCursor!)}`,
+      );
+      assert.equal(conflictingCursors.status, 400, JSON.stringify(conflictingCursors));
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
   test("does not record a rejected second-admin promotion", async () => {
     const beforeAudit = await pool.query(
       "SELECT count(*)::int AS count FROM irc_admin_audit_logs WHERE action = 'promoted_user'",
