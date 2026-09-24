@@ -28,3 +28,4 @@
 - [Audit filter test fixtures](audit-filter-test-fixtures.md) — include automatic workspace audit events and keep integer/text SQL parameters separate.
 - [Deletion race tests](deletion-race-tests.md) — prove access revocation against production routes and worker entry points, not only shared guards.
 - [Orval parameter export collisions](orval-parameter-collisions.md) — path-and-query parameter validators need explicit barrel exports to disambiguate generated type names.
+- [Prettier external-file probes](prettier-external-file-probes.md) — keep temporary YAML validation fixtures inside the repository so Prettier CLI actually parses them.
