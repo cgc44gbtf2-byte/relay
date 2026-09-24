@@ -68,9 +68,15 @@ export async function createNotification(input: NotificationInput): Promise<void
 }
 
 export async function createNotifications(userIds: string[], input: Omit<NotificationInput, "userId">): Promise<void> {
+  broadcastNotifications(await insertNotifications(db, userIds, input));
+}
+
+type NotificationExecutor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function insertNotifications(executor: NotificationExecutor, userIds: string[], input: Omit<NotificationInput, "userId">): Promise<typeof notificationsTable.$inferSelect[]> {
   const uniqueUserIds = [...new Set(userIds)];
-  if (uniqueUserIds.length === 0) return;
-  const created = await db.insert(notificationsTable).values(uniqueUserIds.map((userId) => ({
+  if (uniqueUserIds.length === 0) return [];
+  return executor.insert(notificationsTable).values(uniqueUserIds.map((userId) => ({
     userId,
     type: input.type,
     category: input.category ?? categoryForNotification(input.type),
@@ -80,6 +86,9 @@ export async function createNotifications(userIds: string[], input: Omit<Notific
     entityId: input.entityId === undefined || input.entityId === null ? null : String(input.entityId),
     actionUrl: input.actionUrl ?? null,
   }))).returning();
+}
+
+export function broadcastNotifications(created: typeof notificationsTable.$inferSelect[]): void {
   for (const notification of created) {
     wsHub.broadcastUser(notification.userId, {
       type: "notification",

@@ -59,7 +59,7 @@ import {
   permissionsForUser,
   type PermissionKey,
 } from "../lib/permissions";
-import { categoryForNotification, createNotification, createNotifications } from "../lib/notifications";
+import { broadcastNotifications, categoryForNotification, createNotification, createNotifications, insertNotifications } from "../lib/notifications";
 import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
 import { isPublicCommunityAvailable } from "../lib/community-subscription";
@@ -237,11 +237,22 @@ async function notifyCommunityAudit(
   audit: CommunityAuditMetadata,
   notifyActor = true,
 ): Promise<void> {
-  const managers = await db.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
+  broadcastNotifications(await insertCommunityAuditNotifications(db, actorId, action, communityId, audit, notifyActor));
+}
+
+async function insertCommunityAuditNotifications(
+  executor: typeof db | CommunityTransaction,
+  actorId: string,
+  action: string,
+  communityId: number,
+  audit: CommunityAuditMetadata,
+  notifyActor = true,
+) {
+  const managers = await executor.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
     eq(userRolesTable.communityId, communityId),
     inArray(userRolesTable.role, ["workspace_owner", "workspace_admin", "community_admin", "department_admin"]),
   ));
-  await createNotifications(managers
+  return insertNotifications(executor, managers
     .filter((manager) => notifyActor || manager.userId !== actorId)
     .map((manager) => manager.userId), {
     type: "administrative_action",
@@ -2355,23 +2366,28 @@ router.post("/communities/:communityId/policies", requireAuth, async (req: Authe
     res.status(400).json({ error: "A policy title and body are required." });
     return;
   }
-  const [previous] = await db.select({ version: workspacePoliciesTable.version }).from(workspacePoliciesTable)
-    .where(eq(workspacePoliciesTable.communityId, communityId)).orderBy(desc(workspacePoliciesTable.version)).limit(1);
-  const [policy] = await db.insert(workspacePoliciesTable).values({
-    communityId, title, body, version: (previous?.version ?? 0) + 1, createdBy: userId,
-  }).returning();
-  const policyMembers = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
-    .where(eq(communityMembersTable.communityId, communityId));
-  await createNotifications(policyMembers.map((member) => member.userId), {
-    type: "document_acknowledgement",
-    category: "document_acknowledgement",
-    body: `New document requires your acknowledgement: ${title}.`,
-    communityId,
-    entityType: "workspace_policy",
-    entityId: policy.id,
-    actionUrl: `/communities/${communityId}`,
+  const { policy, notifications } = await db.transaction(async (tx) => {
+    const [previous] = await tx.select({ version: workspacePoliciesTable.version }).from(workspacePoliciesTable)
+      .where(eq(workspacePoliciesTable.communityId, communityId)).orderBy(desc(workspacePoliciesTable.version)).limit(1);
+    const [policy] = await tx.insert(workspacePoliciesTable).values({
+      communityId, title, body, version: (previous?.version ?? 0) + 1, createdBy: userId,
+    }).returning();
+    const policyMembers = await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .where(eq(communityMembersTable.communityId, communityId));
+    const notifications = await insertNotifications(tx, policyMembers.map((member) => member.userId), {
+      type: "document_acknowledgement",
+      category: "document_acknowledgement",
+      body: `New document requires your acknowledgement: ${title}.`,
+      communityId,
+      entityType: "workspace_policy",
+      entityId: policy.id,
+      actionUrl: `/communities/${communityId}`,
+    });
+    await insertCommunityAudit(tx, userId, "published_workspace_policy", communityId, { details: title });
+    notifications.push(...await insertCommunityAuditNotifications(tx, userId, "published_workspace_policy", communityId, { details: title }));
+    return { policy, notifications };
   });
-  await writeCommunityAudit(userId, "published_workspace_policy", communityId, title);
+  broadcastNotifications(notifications);
   res.status(201).json(policy);
 });
 

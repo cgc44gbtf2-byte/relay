@@ -7529,6 +7529,83 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back policy publication and notifications on database failures and retries cleanly", async () => {
+    const owner = await createTestSession("policy_atomic");
+    assert.equal((await apiRequest(owner, "/me")).status, 200);
+    const created = await apiRequest(owner, "/communities", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Policy atomicity", slug: `policy-${randomUUID().slice(0, 12)}` }),
+    });
+    assert.equal(created.status, 201, JSON.stringify(created));
+    const communityId = (created.body as { id: number }).id;
+    assert.ok(Number.isInteger(communityId));
+    const publish = () => apiRequest(owner, `/communities/${communityId}/policies`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Safety policy", body: "Read and acknowledge." }),
+    });
+    const snapshot = async () => (await pool.query(
+      `SELECT
+        (SELECT count(*)::int FROM irc_workspace_policies WHERE community_id = $1) AS policies,
+        (SELECT count(*)::int FROM irc_admin_audit_logs WHERE community_id = $1) AS audits,
+        (SELECT count(*)::int FROM irc_notifications WHERE community_id = $1) AS notifications`,
+      [communityId],
+    )).rows[0];
+    const before = await snapshot();
+    const broadcasts = mock.method(wsHub, "broadcastUser", () => {});
+    try {
+      for (const [table, condition] of [
+        ["irc_admin_audit_logs", "NEW.action = 'published_workspace_policy'"],
+        ["irc_notifications", "NEW.type = 'document_acknowledgement'"],
+        ["irc_notifications", "NEW.type = 'administrative_action'"],
+      ]) {
+        const trigger = `fail_policy_${randomUUID().replaceAll("-", "")}`;
+        try {
+          await pool.query(
+            `CREATE FUNCTION "${trigger}"() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+               IF NEW.community_id = ${communityId} AND ${condition} THEN
+                 RAISE EXCEPTION 'forced policy publication failure';
+               END IF;
+               RETURN NEW;
+             END; $$;
+             CREATE TRIGGER "${trigger}" BEFORE INSERT ON ${table}
+             FOR EACH ROW EXECUTE FUNCTION "${trigger}"();`,
+          );
+          broadcasts.mock.resetCalls();
+          assert.equal((await publish()).status, 500);
+          assert.deepEqual(await snapshot(), before);
+          assert.equal(broadcasts.mock.callCount(), 0, "uncommitted notifications must not be broadcast");
+        } finally {
+          await pool.query(`DROP TRIGGER IF EXISTS "${trigger}" ON ${table}; DROP FUNCTION IF EXISTS "${trigger}"();`);
+        }
+      }
+      broadcasts.mock.resetCalls();
+      const retry = await publish();
+      assert.equal(retry.status, 201, JSON.stringify(retry));
+      assert.equal((retry.body as { version: number }).version, 1);
+      const after = await snapshot();
+      assert.equal(after.policies, before.policies + 1);
+      assert.equal(after.audits, before.audits + 1);
+      const notices = (await pool.query(
+        `SELECT id, type, entity_id FROM irc_notifications WHERE community_id = $1 AND
+         (entity_type = 'workspace_policy' OR (type = 'administrative_action' AND body LIKE 'published workspace policy:%'))`,
+        [communityId],
+      )).rows;
+      assert.equal(notices.filter((n) => n.type === "document_acknowledgement").length, 1);
+      assert.equal(notices.filter((n) => n.type === "administrative_action").length, 1);
+      assert.equal(after.notifications, before.notifications + notices.length);
+      assert.equal(broadcasts.mock.callCount(), notices.length);
+      for (const call of broadcasts.mock.calls) {
+        const event = call.arguments[1] as { notification: { id: number } };
+        assert.ok(notices.some((notice) => notice.id === event.notification.id));
+      }
+    } finally {
+      broadcasts.mock.restore();
+    }
+  });
+
   test("rolls back community setup when a default record or audit insert fails", async () => {
     const owner = await createTestSession("community_setup_failure");
     assert.equal((await apiRequest(owner, "/me")).status, 200);

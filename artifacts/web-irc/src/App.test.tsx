@@ -76,23 +76,23 @@ describe("channel category organization", () => {
 
   it("offers only same-workspace categories and can assign or unassign a channel", async () => {
     const onMove = vi.fn().mockResolvedValue(true);
-  const channel = {
-    id: 12,
-    name: "#team",
-    topic: "",
-    memberCount: 2,
-    communityId: 7,
-    categoryId: 31,
-    communityName: "Team workspace",
-    createdAt: "2026-09-21T12:00:00.000Z",
-  };
+    const channel = {
+      id: 7,
+      name: "#team",
+      topic: "",
+      memberCount: 2,
+      communityId: 13,
+      communityName: "Workspace 13",
+      categoryId: null as number | null,
+      createdAt: "2026-09-21T12:00:00.000Z",
+    };
     const categories = [
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
-    const select = await screen.findByTestId("select-public-space");
+    const select = screen.getByTestId("select-organize-category") as HTMLSelectElement;
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -109,6 +109,8 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
+      channels: [{ id: 7, name: "#team", categoryId: null }],
+      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
@@ -418,14 +420,7 @@ describe("deleted room recovery", () => {
     });
     await screen.findByText("stale history");
     fireEvent.click(await screen.findByTestId("button-organize-current-channel"));
-  const category = {
-    id: 31,
-    name: "Project rooms",
-    description: "",
-    communityId: 7,
-    communityName: "Team workspace",
-    communityOwnerId: "user-1",
-  };
+    const category = screen.getByLabelText("category") as HTMLSelectElement;
     expect(category.querySelector('option[value="31"]')).not.toBeNull();
     expect(category.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(category, { target: { value: "31" } });
@@ -767,7 +762,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(2, "#fallback-room")],
     });
     if (missingRequest === "send") {
-    const editor = screen.getByPlaceholderText("message #deleted-room");
+      const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
     }
@@ -888,7 +883,7 @@ describe("deleted room recovery", () => {
 
   it("restores members after a presence change was missed while disconnected", async () => {
     let currentMembers = members();
-    const channelMembers = vi.fn(() => delay ? delayedMembers : jsonResponse(members()));
+    const channelMembers = vi.fn(() => jsonResponse(currentMembers));
     await renderChat({
       missingRequest: "event",
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
@@ -979,18 +974,22 @@ describe("deleted room recovery", () => {
     const reconnectedSocket = latestWebSocket;
     expect(reconnectedSocket).toBeTruthy();
     expect(reconnectedSocket).not.toBe(firstSocket);
-    expect(reconnectedSocket?.url).not.toBe(firstSocket?.url);
-    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket")).toHaveLength(initialTickets + 1);
-    webSocketFrames = [];
-    act(() => reconnectedSocket?.onopen?.());
-    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
-      { type: "subscribe", channelId: 1 },
-    ]));
+    await act(async () => { reconnectedSocket?.onopen?.(); });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
+      expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+    });
+    expect(screen.queryByText("reaction before reconnect")).toBeNull();
+    expect(screen.queryByText("message before deletion")).toBeNull();
+    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("bounds repeated failures and cancels retries when chat unmounts", async () => {
+  it("requests a fresh socket and resubscribes after a connection drops", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
-    vi.useFakeTimers();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const firstSocket = latestWebSocket;
     expect(firstSocket).toBeTruthy();
     act(() => firstSocket?.onopen?.());
@@ -1315,7 +1314,7 @@ describe("admin channel and category deletion permissions", () => {
       },
     });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = new URL(String(input), window.location.origin);
       if (url.pathname === "/api/notifications") return jsonResponse([]);
       if (url.pathname === "/api/admin/status") {
         return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
@@ -1362,7 +1361,7 @@ describe("admin channel and category deletion permissions", () => {
     expect(screen.getByText("old page retained")).toBeTruthy();
     expect(screen.getAllByText("already newest")).toHaveLength(1);
     expect(vi.mocked(fetch).mock.calls.some(([input]) => {
-      const url = String(input);
+      const url = new URL(String(input), window.location.origin);
       return url.pathname === "/api/admin/overview"
         && url.searchParams.get("activityAfterCursor") === "head-cursor"
         && url.searchParams.get("activityActor") === "Manager"
