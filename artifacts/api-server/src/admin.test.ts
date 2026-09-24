@@ -3221,6 +3221,102 @@ describe("admin access controls", () => {
     }
   });
 
+  test("records every committed concurrent demotion but not a rolled-back one", async () => {
+    const [firstTarget, secondTarget, failedTarget] = await Promise.all([
+      createTestSession("concurrent_demotion_first"),
+      createTestSession("concurrent_demotion_second"),
+      createTestSession("concurrent_demotion_rollback"),
+    ]);
+    const targets = [firstTarget, secondTarget, failedTarget];
+    const targetIds = targets.map(({ userId }) => userId);
+    const triggerName = `fail_demotion_audit_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+
+    try {
+      const profiles = await Promise.all(targets.map((target) => apiRequest(target, "/me")));
+      for (const profile of profiles) {
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      await pool.query(
+        "UPDATE irc_users SET role = 'moderator' WHERE clerk_id = ANY($1::text[])",
+        [targetIds],
+      );
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'demoted_user'
+              AND NEW.target_id = '${failedTarget.userId}' THEN
+             RAISE EXCEPTION 'forced concurrent demotion audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+
+      const responses = await Promise.all(targets.map((target) =>
+        apiRequest(adminSession, `/admin/users/${target.userId}/role`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "member" }),
+        }),
+      ));
+      for (const [index, target] of targets.entries()) {
+        const response = responses[index];
+        assert.ok(response);
+        assert.equal(response.status, index === 2 ? 500 : 200, JSON.stringify(response));
+        assert.deepEqual(response.body, index === 2
+          ? { error: "An unexpected error occurred while processing the admin request." }
+          : { id: target.userId, role: "member" });
+      }
+
+      const roles = await pool.query<{ clerk_id: string; role: string }>(
+        "SELECT clerk_id, role FROM irc_users WHERE clerk_id = ANY($1::text[])",
+        [[...targetIds, adminSession.userId]],
+      );
+      assert.deepEqual(
+        new Map(roles.rows.map(({ clerk_id, role }) => [clerk_id, role])),
+        new Map([
+          [firstTarget.userId, "member"],
+          [secondTarget.userId, "member"],
+          [failedTarget.userId, "moderator"],
+          [adminSession.userId, "admin"],
+        ]),
+      );
+      const audit = await pool.query(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE target_id = ANY($1::text[])
+           AND action IN ('demoted_user', 'promoted_user')
+         ORDER BY target_id, id`,
+        [targetIds],
+      );
+      assert.deepEqual(audit.rows, [firstTarget, secondTarget]
+        .sort((a, b) => a.userId.localeCompare(b.userId))
+        .map((target) => ({
+          actor_id: adminSession.userId,
+          action: "demoted_user",
+          target_id: target.userId,
+          target_label: target.userId,
+          details: "Role changed to member",
+        })));
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+         DROP FUNCTION IF EXISTS "${functionName}"();`,
+      );
+      await pool.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = ANY($1::text[])",
+        [targetIds],
+      );
+    }
+  });
+
   test("rejects unsupported role payloads without changing an account's role", async () => {
     for (const payload of [{ role: "owner" }, { role: "ADMIN" }, {}]) {
       const response = await apiRequest(
