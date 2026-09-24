@@ -3606,6 +3606,176 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps private workspace lists and management flags consistent with individual permissions", async () => {
+    const ownerSession = await createTestSession("visibility_owner");
+    const scopedAdminSession = await createTestSession("visibility_scoped_admin");
+    const memberSession = await createTestSession("visibility_member");
+    const customViewSession = await createTestSession("visibility_custom_view");
+    const customManagerSession = await createTestSession("visibility_custom_manager");
+    const roleSuffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const customViewRole = `visibility_view_${roleSuffix}`;
+    const customManageRole = `visibility_manage_${roleSuffix}`;
+    const communityIds: number[] = [];
+    const workspaceIds = new Map<string, number>();
+
+    try {
+      for (const session of [
+        ownerSession,
+        scopedAdminSession,
+        memberSession,
+        customViewSession,
+        customManagerSession,
+      ]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const catalog = await apiRequest(adminSession, "/permissions/catalog");
+      assert.equal(catalog.status, 200, JSON.stringify(catalog));
+
+      const workspaceOwners = new Map<string, string>([
+        ["owner", ownerSession.userId],
+        ["owner_foreign", adminSession.userId],
+        ["scoped_admin", adminSession.userId],
+        ["scoped_admin_foreign", adminSession.userId],
+        ["member_joined", adminSession.userId],
+        ["member_unjoined", adminSession.userId],
+        ["custom_view", adminSession.userId],
+        ["custom_manage", adminSession.userId],
+      ]);
+      for (const [key, ownerId] of workspaceOwners) {
+        const suffix = `${roleSuffix}-${key}`;
+        const created = await pool.query<{ id: number }>(
+          `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+           VALUES ($1, $2, $3, 'paid_workspace', true)
+           RETURNING id`,
+          [`Visibility ${suffix}`, `visibility-${suffix}`, ownerId],
+        );
+        const communityId = created.rows[0]?.id;
+        assert.ok(communityId);
+        communityIds.push(communityId);
+        workspaceIds.set(key, communityId);
+      }
+
+      await pool.query(
+        `INSERT INTO irc_custom_roles (key, label, scope_type, created_by)
+         VALUES
+           ($1, 'Can view a private workspace', 'community', $3),
+           ($2, 'Can manage a private workspace', 'community', $3)`,
+        [customViewRole, customManageRole, adminSession.userId],
+      );
+      for (const [role, permission] of [
+        [customViewRole, "view_business"],
+        [customManageRole, "manage_community"],
+      ] as const) {
+        const permissionResult = await pool.query(
+          `INSERT INTO irc_role_permissions (role, permission_id)
+           SELECT $1, id FROM irc_permission_definitions WHERE key = $2`,
+          [role, permission],
+        );
+        assert.equal(permissionResult.rowCount, 1, `Expected ${permission} to exist in the permission catalog.`);
+      }
+
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES
+           ($1, 'workspace_owner', 'community', $6, $7),
+           ($2, 'workspace_admin', 'community', $8, $7),
+           ($3, $4, 'community', $9, $7),
+           ($5, $10, 'community', $11, $7)`,
+        [
+          ownerSession.userId,
+          scopedAdminSession.userId,
+          customViewSession.userId,
+          customViewRole,
+          customManagerSession.userId,
+          workspaceIds.get("owner"),
+          adminSession.userId,
+          workspaceIds.get("scoped_admin"),
+          workspaceIds.get("custom_view"),
+          customManageRole,
+          workspaceIds.get("custom_manage"),
+        ],
+      );
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member')`,
+        [workspaceIds.get("member_joined"), memberSession.userId],
+      );
+
+      const assertListMatchesIndividualPermissions = async (
+        session: TestSession,
+        expectedWorkspaceKeys?: string[],
+      ): Promise<void> => {
+        const listed = await apiRequest(session, "/communities");
+        assert.equal(listed.status, 200, JSON.stringify(listed));
+        assert.ok(Array.isArray(listed.body));
+
+        const allWorkspaces = await pool.query<{ id: number; is_private: boolean }>(
+          `SELECT id, is_private FROM irc_communities
+           WHERE plan = 'paid_workspace' ORDER BY id`,
+        );
+        const memberships = await pool.query<{ community_id: number }>(
+          "SELECT community_id FROM irc_community_members WHERE user_id = $1",
+          [session.userId],
+        );
+        const joinedIds = new Set(memberships.rows.map(({ community_id }) => community_id));
+        const expected = [];
+        for (const workspace of allWorkspaces.rows) {
+          const [canView, canManage] = await Promise.all([
+            hasPermission(session.userId, "view_business", { communityId: workspace.id }),
+            hasPermission(session.userId, "manage_community", { communityId: workspace.id }),
+          ]);
+          const joined = joinedIds.has(workspace.id);
+          if (!workspace.is_private || joined || canView || canManage) {
+            expected.push({ id: workspace.id, joined, canManage });
+          }
+        }
+
+        const actual = (listed.body as Array<{
+          id: number;
+          joined: boolean;
+          canManage: boolean;
+        }>).map(({ id, joined, canManage }) => ({ id, joined, canManage }))
+          .sort((left, right) => left.id - right.id);
+        expected.sort((left, right) => left.id - right.id);
+        assert.deepEqual(actual, expected, "The batched workspace list must match individual authorization checks.");
+
+        if (expectedWorkspaceKeys) {
+          const expectedIds = expectedWorkspaceKeys
+            .map((key) => workspaceIds.get(key))
+            .sort((left, right) => (left ?? 0) - (right ?? 0));
+          assert.deepEqual(actual.map(({ id }) => id), expectedIds);
+        }
+      };
+
+      await assertListMatchesIndividualPermissions(ownerSession, ["owner"]);
+      await assertListMatchesIndividualPermissions(scopedAdminSession, ["scoped_admin"]);
+      await assertListMatchesIndividualPermissions(memberSession, ["member_joined"]);
+      await assertListMatchesIndividualPermissions(customViewSession, ["custom_view"]);
+      await assertListMatchesIndividualPermissions(customManagerSession, ["custom_manage"]);
+      await assertListMatchesIndividualPermissions(adminSession);
+    } finally {
+      await pool.query(
+        "DELETE FROM irc_user_roles WHERE role = ANY($1::text[])",
+        [[customViewRole, customManageRole]],
+      );
+      await pool.query(
+        "DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])",
+        [[customViewRole, customManageRole]],
+      );
+      await pool.query(
+        "DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])",
+        [[customViewRole, customManageRole]],
+      );
+      if (communityIds.length) {
+        await pool.query(
+          "DELETE FROM irc_communities WHERE id = ANY($1::int[])",
+          [communityIds],
+        );
+      }
+    }
+  });
+
   test("enforces every built-in workspace role boundary on community role changes", async () => {
     const ownerSession = await createTestSession("role_matrix_owner");
     const actorSession = await createTestSession("role_matrix_actor");
