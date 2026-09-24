@@ -528,6 +528,8 @@ function ChatApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const wsRef = useRef<WebSocket | null>(ws);
+  const onSocketMessageRef = useRef<(event: MessageEvent) => void>(() => undefined);
+  const refreshChannelOrganizationRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const typingStartTimerRef = useRef<number | null>(null);
   const typingIdleTimerRef = useRef<number | null>(null);
   const typingAdvertisedRef = useRef(false);
@@ -562,6 +564,7 @@ function ChatApp() {
   const refreshChannelOrganization = async (): Promise<void> => {
     await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
   };
+  refreshChannelOrganizationRef.current = refreshChannelOrganization;
 
   const recoverFromUnavailableChannel = async (channelId: number) => {
     if (currentChannelIdRef.current !== channelId) return;
@@ -640,46 +643,13 @@ function ChatApp() {
     };
   }, [bootstrapAttempt]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-    let reconnectAttempt = 0;
+  onSocketMessageRef.current = (event) => {
     const socketChannelId = currentChannelId;
     const socketDmId = activeDm?.id ?? null;
     const socketRoomIsCurrent = () =>
       currentChannelIdRef.current === socketChannelId
       && activeDmIdRef.current === socketDmId;
-    const connect = async () => {
-      try {
-        const { ticket } = await api<{ ticket: string }>("/ws-ticket");
-        if (cancelled) return;
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
-        socket = connectedSocket;
-        connectedSocket.onopen = () => {
-          const wasReconnect = reconnectAttempt > 0;
-          reconnectAttempt = 0;
-          setConnection("live");
-          setWs(connectedSocket);
-          if (wasReconnect) void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
-          if (currentChannelId && !activeDm) {
-            connectedSocket.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
-          }
-          if (currentChannelId || activeDm) void room.refreshMessages();
-        };
-        connectedSocket.onclose = () => {
-          if (cancelled) return;
-          setConnection("offline");
-          setWs((current) => current === connectedSocket ? null : current);
-          const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
-          reconnectAttempt += 1;
-          reconnectTimer = window.setTimeout(() => void connect(), delay);
-        };
-        connectedSocket.onerror = () => setConnection("offline");
-        connectedSocket.onmessage = (event) => {
         try {
-           if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; notificationIds?: number[]; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
             if (data.type === "message" && socketRoomIsCurrent() && data.message?.channelId === socketChannelId && !socketDmId) room.setMessages((items) => upsertBoundedMessage(items, data.message!, 100));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
@@ -742,6 +712,44 @@ function ChatApp() {
              }, (message) => message.id.startsWith("presence-"), 20));
           }
         } catch { /* ignore malformed frames */ }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    const connect = async () => {
+      try {
+        const { ticket } = await api<{ ticket: string }>("/ws-ticket");
+        if (cancelled) return;
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+        socket = connectedSocket;
+        connectedSocket.onopen = () => {
+          if (cancelled || socket !== connectedSocket) return;
+          const wasReconnect = reconnectAttempt > 0;
+          reconnectAttempt = 0;
+          setConnection("live");
+          wsRef.current = connectedSocket;
+          setWs(connectedSocket);
+          if (wasReconnect) void refreshChannelOrganizationRef.current().catch(() => setChannelRefreshError("Could not refresh the channel list."));
+        };
+        connectedSocket.onclose = () => {
+          if (cancelled || socket !== connectedSocket) return;
+          socket = null;
+          wsRef.current = null;
+          setConnection("offline");
+          setWs((current) => current === connectedSocket ? null : current);
+          const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
+          reconnectAttempt += 1;
+          reconnectTimer = window.setTimeout(() => void connect(), delay);
+        };
+        connectedSocket.onerror = () => {
+          if (!cancelled && socket === connectedSocket) setConnection("offline");
+        };
+        connectedSocket.onmessage = (event) => {
+          if (!cancelled && socket === connectedSocket) onSocketMessageRef.current(event);
         };
       } catch {
         if (cancelled) return;
@@ -755,17 +763,27 @@ function ChatApp() {
     return () => {
       cancelled = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      const closingSocket = socket ?? wsRef.current;
+      const closingSocket = socket;
       if (!closingSocket) return;
       if (closingSocket.readyState === WebSocket.OPEN || closingSocket.readyState === WebSocket.CONNECTING) {
-        if (closingSocket.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
-          closingSocket.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
-        }
         closingSocket.close();
         setWs((current) => current === closingSocket ? null : current);
       }
     };
-  }, [currentChannelId, activeDm, room.refreshMessages]);
+  }, []);
+
+  useEffect(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (currentChannelId !== null && !activeDm) {
+      ws.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
+    }
+    if (currentChannelId !== null || activeDm) void room.refreshMessages();
+    return () => {
+      if (ws.readyState === WebSocket.OPEN && currentChannelId !== null && !activeDm) {
+        ws.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
+      }
+    };
+  }, [ws, currentChannelId, activeDm?.id, room.refreshMessages]);
 
   useEffect(() => {
     setTypingUsers({});

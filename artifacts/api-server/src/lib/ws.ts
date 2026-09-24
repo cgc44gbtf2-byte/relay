@@ -27,6 +27,7 @@ export class Hub {
   private clients = new Set<Client>();
   private channelClients = new Map<number, Set<Client>>();
   private tickets = new Map<string, Ticket>();
+  private presenceWrites = new Map<string, Promise<void>>();
   private readonly ticketCleanupTimer: ReturnType<typeof setInterval>;
 
   constructor() {
@@ -156,6 +157,22 @@ export class Hub {
     return false;
   }
 
+  private updatePresence(userId: string): void {
+    // Serialize writes for this user: a delayed offline write must not finish
+    // after a replacement socket's online write.
+    const previous = this.presenceWrites.get(userId) ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+      await db
+        .update(usersTable)
+        .set({ status: this.hasConnectedUser(userId) ? "online" : "offline", lastSeenAt: new Date() })
+        .where(eq(usersTable.clerkId, userId));
+    });
+    this.presenceWrites.set(userId, write);
+    void write.catch(() => undefined).finally(() => {
+      if (this.presenceWrites.get(userId) === write) this.presenceWrites.delete(userId);
+    });
+  }
+
   broadcastChannelRemoved(channelId: number): void {
     const authorizedSubscribers = new Set(this.channelClients.get(channelId) ?? []);
     for (const client of authorizedSubscribers) {
@@ -221,10 +238,7 @@ export class Hub {
         ),
       } satisfies Client;
       this.clients.add(client);
-      void db
-        .update(usersTable)
-        .set({ status: "online", lastSeenAt: new Date() })
-        .where(eq(usersTable.clerkId, ticket.userId));
+      this.updatePresence(ticket.userId);
       ws.on("message", (raw) => {
         try {
           const message = JSON.parse(raw.toString()) as {
@@ -294,14 +308,9 @@ export class Hub {
         for (const channelId of client.channelIds) {
           this.removeChannelSubscription(client, channelId);
         }
-        // A user can have multiple live sockets (for example, multiple tabs).
-        // Only mark them offline after their final socket has closed.
-        if (!this.hasConnectedUser(ticket.userId)) {
-          void db
-            .update(usersTable)
-            .set({ status: "offline", lastSeenAt: new Date() })
-            .where(eq(usersTable.clerkId, ticket.userId));
-        }
+        // Recheck all sockets when the serialized write runs, including any
+        // replacement connection that arrived after this close event.
+        this.updatePresence(ticket.userId);
       });
       ws.on("error", () => {
         if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close();
