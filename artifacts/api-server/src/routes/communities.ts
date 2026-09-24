@@ -466,7 +466,7 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
     return;
   }
   try {
-    const community = await db.transaction(async (tx) => {
+    const { community, creationNotification } = await db.transaction(async (tx) => {
       const [created] = await tx.insert(communitiesTable).values({
         name,
         slug,
@@ -525,20 +525,51 @@ router.post("/communities", requireAuth, async (req: AuthenticatedRequest, res):
           role: "owner",
         })));
       }
-      return created;
+      const [actor] = await tx.select({ displayName: usersTable.displayName })
+        .from(usersTable).where(eq(usersTable.clerkId, userId)).limit(1);
+      await tx.insert(adminAuditLogsTable).values({
+        actorId: userId,
+        actorDisplayName: actor?.displayName,
+        communityId: created.id,
+        action: "created_community",
+        resourceType: "workspace",
+        resourceId: String(created.id),
+        targetId: String(created.id),
+        targetLabel: `community:${created.id}`,
+        details: `Created ${created.name}`,
+      });
+      const [creationNotification] = await tx.insert(notificationsTable).values({
+        userId,
+        type: "administrative_action",
+        category: "administrative_action",
+        body: `created community: Created ${created.name}`,
+        communityId: created.id,
+        entityType: "community",
+        entityId: String(created.id),
+        actionUrl: `/communities/${created.id}`,
+      }).returning();
+      return { community: created, creationNotification };
     });
-    await writeCommunityAudit(userId, "created_community", community.id, `Created ${community.name}`);
-    res.status(201).json({ ...community, joined: true, canManage: true, defaultChannelsCreated: 6 });
-  } catch {
-    const [existing] = await db.select().from(communitiesTable).where(and(
-      eq(communitiesTable.ownerId, userId),
-      eq(communitiesTable.slug, slug),
-    ));
-    if (existing) {
-      res.status(200).json({ ...existing, joined: true, canManage: true, defaultChannelsCreated: 0 });
-      return;
+    if (creationNotification) {
+      try {
+        wsHub.broadcastUser(userId, { type: "notification", notification: creationNotification });
+      } catch (error) {
+        req.log.warn({ err: error }, "Could not broadcast community creation notification");
+      }
     }
-    res.status(409).json({ error: "That community slug is already in use." });
+    res.status(201).json({ ...community, joined: true, canManage: true, defaultChannelsCreated: 6 });
+  } catch (error) {
+    let cause: unknown = error;
+    for (let depth = 0; depth < 3 && cause && typeof cause === "object"; depth++) {
+      if ("code" in cause && cause.code === "23505"
+        && "constraint" in cause && cause.constraint === "irc_communities_slug_idx") {
+        res.status(409).json({ error: "That community slug is already in use." });
+        return;
+      }
+      cause = "cause" in cause ? cause.cause : null;
+    }
+    req.log.error({ err: error }, "Failed to create community");
+    res.status(500).json({ error: "Unable to create the community. Please try again." });
   }
 });
 

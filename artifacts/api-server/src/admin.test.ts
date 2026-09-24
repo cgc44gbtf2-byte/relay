@@ -4674,6 +4674,74 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back community setup when a default record or audit insert fails", async () => {
+    const owner = await createTestSession("community_setup_failure");
+    assert.equal((await apiRequest(owner, "/me")).status, 200);
+    const slug = `rollback-${randomUUID().slice(0, 12)}`;
+    const body = JSON.stringify({ name: "Rollback workspace", slug });
+    const snapshot = async () => (await pool.query(
+      `SELECT
+        (SELECT count(*)::int FROM irc_communities WHERE slug = $2) AS communities,
+        (SELECT count(*)::int FROM irc_community_members WHERE user_id = $1) AS members,
+        (SELECT count(*)::int FROM irc_employee_profiles WHERE user_id = $1) AS profiles,
+        (SELECT count(*)::int FROM irc_user_roles WHERE user_id = $1) AS roles,
+        (SELECT count(*)::int FROM irc_categories WHERE owner_id = $1) AS categories,
+        (SELECT count(*)::int FROM irc_channels WHERE owner_id = $1) AS channels,
+        (SELECT count(*)::int FROM irc_channel_members WHERE user_id = $1) AS channel_members,
+        (SELECT count(*)::int FROM irc_admin_audit_logs WHERE actor_id = $1) AS audit_logs,
+        (SELECT count(*)::int FROM irc_notifications WHERE user_id = $1) AS notifications`,
+      [owner.userId, slug],
+    )).rows[0];
+    const before = await snapshot();
+
+    for (const table of [
+      "irc_user_roles",
+      "irc_categories",
+      "irc_channels",
+      "irc_channel_members",
+      "irc_admin_audit_logs",
+      "irc_notifications",
+    ]) {
+      const triggerName = `fail_setup_${randomUUID().replaceAll("-", "")}`;
+      const functionName = `${triggerName}_fn`;
+      let triggerCreated = false;
+      try {
+        await pool.query(
+          `CREATE FUNCTION "${functionName}"() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             RAISE EXCEPTION 'forced community setup failure';
+           END;
+           $$;`,
+        );
+        await pool.query(
+          `CREATE TRIGGER "${triggerName}" BEFORE INSERT ON ${table}
+           FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+        );
+        triggerCreated = true;
+        const response = await apiRequest(owner, "/communities", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        assert.equal(response.status, 500, `${table}: ${JSON.stringify(response)}`);
+        assert.deepEqual(response.body, { error: "Unable to create the community. Please try again." });
+        assert.deepEqual(await snapshot(), before, `${table} left partial community records`);
+      } finally {
+        if (triggerCreated) await pool.query(`DROP TRIGGER "${triggerName}" ON ${table}`);
+        await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
+      }
+    }
+
+    const retry = await apiRequest(owner, "/communities", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    assert.equal(retry.status, 201, JSON.stringify(retry));
+    const communityId = (retry.body as { id: number }).id;
+    await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+  });
+
   test("lets organization managers assign employees without crossing workspace boundaries", async () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");
