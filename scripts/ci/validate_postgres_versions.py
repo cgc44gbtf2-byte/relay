@@ -32,27 +32,9 @@ def one_value(body: str, pattern: str, label: str) -> str:
     return matches[0].strip()
 
 
-def validate_workflow(workflow: str) -> tuple[str, ...]:
-    expected = SUPPORTED_VERSIONS
-    if tuple(range(int(expected[0]), int(expected[-1]) + 1)) != tuple(
-        map(int, expected)
-    ):
-        raise ValueError(f"Supported PostgreSQL versions must be contiguous: {expected}")
-
-    api = job_body(workflow, "api-tests")
-    image = one_value(api, r"^        image:\s*(.+)$", "api-tests PostgreSQL image")
-    baseline_match = re.fullmatch(r"postgres:([0-9]+)", image)
-    if not baseline_match:
-        raise ValueError(
-            f"api-tests PostgreSQL image must pin a major version; found {image!r}"
-        )
-    baseline = baseline_match.group(1)
-
-    compatibility = job_body(workflow, "database-runner-compatibility")
+def matrix_versions(body: str, label: str) -> list[str]:
     raw_matrix = one_value(
-        compatibility,
-        r"^        postgres-version:\s*(.+)$",
-        "database-runner-compatibility PostgreSQL matrix",
+        body, r"^        postgres-version:\s*(.+)$", f"{label} PostgreSQL matrix"
     )
     try:
         versions = json.loads(raw_matrix)
@@ -65,20 +47,48 @@ def validate_workflow(workflow: str) -> tuple[str, ...]:
         for version in versions
     ):
         raise ValueError(f"Invalid PostgreSQL matrix versions: {versions!r}")
-    matrix_image = one_value(
-        compatibility, r"^        image:\s*(.+)$", "compatibility PostgreSQL image"
-    )
-    if matrix_image != "postgres:${{ matrix.postgres-version }}":
-        raise ValueError(
-            "Compatibility job must run every matrix PostgreSQL version; "
-            f"image uses {matrix_image!r}"
-        )
+    return versions
 
-    if baseline != expected[-1] or versions != list(expected):
+
+def validate_matrix_job(body: str, label: str) -> list[str]:
+    versions = matrix_versions(body, label)
+    image = one_value(body, r"^        image:\s*(.+)$", f"{label} PostgreSQL image")
+    if image != "postgres:${{ matrix.postgres-version }}":
+        raise ValueError(
+            f"{label} must run every matrix PostgreSQL version; image uses {image!r}"
+        )
+    version_env = one_value(
+        body,
+        r"^      CI_TEST_DATABASE_VERSION:\s*(.+)$",
+        f"{label} PostgreSQL version label",
+    )
+    if version_env != "${{ matrix.postgres-version }}":
+        raise ValueError(
+            f"{label} must label failures with its matrix PostgreSQL version"
+        )
+    return versions
+
+
+def validate_workflow(workflow: str) -> tuple[str, ...]:
+    expected = SUPPORTED_VERSIONS
+    if tuple(range(int(expected[0]), int(expected[-1]) + 1)) != tuple(
+        map(int, expected)
+    ):
+        raise ValueError(f"Supported PostgreSQL versions must be contiguous: {expected}")
+
+    api = job_body(workflow, "api-tests")
+    api_versions = validate_matrix_job(api, "api-tests")
+    max_parallel = one_value(
+        api, r"^      max-parallel:\s*(.+)$", "api-tests matrix parallelism"
+    )
+    if max_parallel != "1":
+        raise ValueError("api-tests must serialize its shared Clerk matrix jobs")
+    compatibility = job_body(workflow, "database-runner-compatibility")
+    versions = validate_matrix_job(compatibility, "database-runner-compatibility")
+    if api_versions != list(expected) or versions != list(expected):
         raise ValueError(
             "PostgreSQL CI version mismatch: policy supports "
-            f"{list(expected)} (baseline {expected[-1]}); "
-            f"api-tests uses {baseline}; "
+            f"{list(expected)}; api-tests matrix uses {api_versions}; "
             f"database-runner-compatibility matrix uses {versions}. "
             "Update the policy and both jobs together."
         )

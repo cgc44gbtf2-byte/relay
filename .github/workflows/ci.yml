@@ -76,13 +76,20 @@ jobs:
 
   api-tests:
     if: github.event_name != 'schedule'
+    name: Authenticated API tests (PostgreSQL ${{ matrix.postgres-version }})
+    strategy:
+      fail-fast: false
+      # Keep matrix jobs sequential as they mutate the same Clerk test tenant.
+      max-parallel: 1
+      matrix:
+        postgres-version: ["14", "15", "16"]
     concurrency:
       group: ${{ github.repository }}-clerk-api-test-environment
       cancel-in-progress: false
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres-version }}
         env:
           POSTGRES_DB: postgres
           POSTGRES_HOST_AUTH_METHOD: trust
@@ -96,6 +103,7 @@ jobs:
           --health-retries 5
     env:
       CI_TEST_DATABASE_ADMIN_URL: postgresql://postgres@127.0.0.1:5432/postgres
+      CI_TEST_DATABASE_VERSION: ${{ matrix.postgres-version }}
       CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
       CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
     steps:
@@ -135,7 +143,7 @@ jobs:
     if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
-      # Versions and baseline are checked against scripts/ci/validate_postgres_versions.py.
+      # Versions are checked against scripts/ci/validate_postgres_versions.py.
       matrix:
         postgres-version: ["14", "15", "16"]
     runs-on: ubuntu-latest
