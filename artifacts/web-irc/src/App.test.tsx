@@ -156,8 +156,8 @@ function jsonResponse(data: unknown, status = 200) {
     headers: { "content-type": "application/json" },
   }));
 }
-function channelNotFound() {
-  return jsonResponse({ error: "This channel is no longer available.", code: "CHANNEL_NOT_FOUND" }, 404);
+function channelNotFound(displayMessage = "This channel is no longer available.") {
+  return jsonResponse({ error: displayMessage, code: "CHANNEL_NOT_FOUND" }, 404);
 }
 
 function channelAccessRequired() {
@@ -167,6 +167,7 @@ function installApi({
   missingRequest,
   accessRequiredRequest,
   fallbackChannels,
+  missingChannelMessage = "This channel is no longer available.",
   owner = false,
   reconnectedMessages,
   dmMessages,
@@ -184,6 +185,7 @@ function installApi({
   missingRequest: "history" | "members" | "send" | "topic" | "event";
   accessRequiredRequest?: "history" | "members" | "send" | "file";
   fallbackChannels: Channel[];
+  missingChannelMessage?: string;
   owner?: boolean;
   reconnectedMessages?: unknown[];
   dmMessages?: () => unknown[];
@@ -299,12 +301,12 @@ function installApi({
       historyCalls += 1;
       if (accessRequiredRequest === "history") return channelAccessRequired();
       return missingRequest === "history"
-        ? channelNotFound()
+        ? channelNotFound(missingChannelMessage)
         : jsonResponse({ messages: historyCalls > 1 && reconnectedMessages ? reconnectedMessages : [message(1, "stale history")] });
     }
     if (url === "/api/channels/1/members" && method === "GET") {
       if (accessRequiredRequest === "members") return channelAccessRequired();
-      return missingRequest === "members" ? channelNotFound() : jsonResponse(members(owner ? "owner" : "member"));
+      return missingRequest === "members" ? channelNotFound(missingChannelMessage) : jsonResponse(members(owner ? "owner" : "member"));
     }
     if (url === "/api/channels/2/messages" && method === "GET") {
       return jsonResponse({ messages: [] });
@@ -320,12 +322,12 @@ function installApi({
     }
     if (url === "/api/channels/1/messages" && method === "POST") {
       if (accessRequiredRequest === "send") return channelAccessRequired();
-      return missingRequest === "send" ? channelNotFound() : jsonResponse(message(1, "sent"));
+      return missingRequest === "send" ? channelNotFound(missingChannelMessage) : jsonResponse(message(1, "sent"));
     }
     if (url === "/api/channels/1/file-messages" && method === "POST") {
       if (accessRequiredRequest === "file") return channelAccessRequired();
       return missingRequest === "send"
-        ? channelNotFound()
+        ? channelNotFound(missingChannelMessage)
         : jsonResponse({
           ...message(1, "notes.txt"),
           attachments: [{
@@ -338,7 +340,7 @@ function installApi({
         });
     }
     if (url === "/api/channels/1" && method === "PATCH") {
-      return missingRequest === "topic" ? channelNotFound() : jsonResponse({
+      return missingRequest === "topic" ? channelNotFound(missingChannelMessage) : jsonResponse({
         ...deleted,
         topic: "updated",
         categoryId: JSON.parse(String(init?.body)).categoryId ?? null,
@@ -592,6 +594,41 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
       expect(screen.queryByText("stale history")).toBeNull();
       expect(screen.queryByText("Orion")).toBeNull();
     });
+  });
+
+  it.each([
+    ["history", "This room was archived by its owner."],
+    ["history", "The requested destination has been removed."],
+    ["send", "This room was archived by its owner."],
+    ["send", "The requested destination has been removed."],
+  ] as const)("recovers from a missing-channel %s response with changed wording", async (missingRequest, displayMessage) => {
+    await renderChat({
+      missingRequest,
+      missingChannelMessage: displayMessage,
+      fallbackChannels: [room(2, "#fallback-room")],
+    });
+
+    if (missingRequest === "send") {
+      const editor = screen.getByPlaceholderText("message #deleted-room");
+      fireEvent.change(editor, { target: { value: "hello" } });
+      fireEvent.submit(editor.closest("form")!);
+      expect(fetch).toHaveBeenCalledWith("/api/channels/1/messages", expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ body: "hello", replyToId: null }),
+      }));
+    } else {
+      expect(fetch).toHaveBeenCalledWith("/api/channels/1/messages", expect.objectContaining({
+        credentials: "include",
+      }));
+    }
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+    expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.queryByText(/message could not be sent|history could not be loaded/i)).toBeNull();
+    expect(window.alert).not.toHaveBeenCalled();
   });
 
   it("removes a room immediately when another session deletes it", async () => {
