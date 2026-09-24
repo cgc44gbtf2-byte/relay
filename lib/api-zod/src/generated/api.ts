@@ -523,7 +523,6 @@ export const ListCommunityActivityResponse = zod.object({
 })
 })
 
-
 /**
  * @summary List workspace documents and bounded document pages
  */
@@ -611,7 +610,7 @@ export const GetAdminOverviewQueryParams = zod.object({
   "activityActor": zod.coerce.string().max(getAdminOverviewQueryActivityActorMax).optional(),
   "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional(),
   "activityStartDate": zod.coerce.string().regex(getAdminOverviewQueryActivityStartDateRegExp).optional().describe('Inclusive UTC calendar date for the earliest activity to return; must be YYYY-MM-DD.'),
-  "activityEndDate": zod.coerce.string().regex(getAdminOverviewQueryActivityEndDateRegExp).optional().describe('Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.')
+  "activityEndDate": zod.coerce.string().regex(new RegExp('^\\d{4}-\\d{2}-\\d{2}$')).optional().describe('Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.')
 })
 
 export const getAdminOverviewResponseActivityPaginationLimitMax = 50;
@@ -650,6 +649,5 @@ export const GetAdminOverviewResponse = zod.object({
   "newerHasMore": zod.boolean().describe('Whether more newer events remain after an activityAfterCursor request.')
 })
 })
-
 
 export const getAdminOverviewQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
