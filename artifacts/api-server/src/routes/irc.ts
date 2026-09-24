@@ -1891,11 +1891,17 @@ router.get("/notifications", requireAuth, async (req: AuthenticatedRequest, res)
   const userId = getUserId(req);
   await ensureTaskDeadlineNotifications(userId);
   const archived = req.query.archived === "true";
+  const page = listPage(req);
   const rows = await db.select().from(notificationsTable).where(and(
     eq(notificationsTable.userId, userId),
     isNull(notificationsTable.deletedAt),
     archived ? sql`${notificationsTable.archivedAt} IS NOT NULL` : isNull(notificationsTable.archivedAt),
-  )).orderBy(desc(notificationsTable.createdAt)).limit(100);
+  )).orderBy(desc(notificationsTable.createdAt), desc(notificationsTable.id))
+    .limit(page.limit + 1)
+    .offset(page.offset);
+  const hasMore = rows.length > page.limit;
+  if (hasMore) rows.pop();
+  setListPageHeaders(res, hasMore, page.offset + page.limit);
   res.json(rows.map((row) => ({ ...row, category: categoryForNotification(row.type, row.category) })));
 });
 

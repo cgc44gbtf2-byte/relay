@@ -5,6 +5,140 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+export interface Notification {
+  id: number;
+  userId: string;
+  type: string;
+  category: string;
+  body: string;
+  communityId?: number | null;
+  entityType?: string | null;
+  entityId?: string | null;
+  actionUrl?: string | null;
+  readAt?: string | null;
+  archivedAt?: string | null;
+  deletedAt?: string | null;
+  createdAt: string;
+}
+
+export interface ModerationAction {
+  id: number;
+  actorId: string;
+  targetUserId?: string | null;
+  communityId?: number | null;
+  channelId?: number | null;
+  action: string;
+  details?: string | null;
+  createdAt: string;
+}
+
+export type DocumentListResponseFoldersItem = { [key: string]: unknown };
+
+export type DocumentListResponseDocumentsItem = { [key: string]: unknown };
+
+export interface PageInfo {
+  /**
+     * @minimum 1
+     * @maximum 100
+     */
+  limit: number;
+  /** @minimum 0 */
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface DocumentListResponse {
+  folders: DocumentListResponseFoldersItem[];
+  documents: DocumentListResponseDocumentsItem[];
+  canManage: boolean;
+  pagination: PageInfo;
+  foldersPagination?: PageInfo;
+}
+
+export type CommunityWorkspaceResponseCommunity = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseMembersItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseChannelsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseCategoriesItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseAssignmentsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseDepartmentsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseLocationsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseTeamsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponsePoliciesItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseEmployeesItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseInvitationsItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponseTasksItem = { [key: string]: unknown };
+
+export type CommunityWorkspaceResponsePagination = {[key: string]: PageInfo};
+
+export interface CommunityWorkspaceResponse {
+  community: CommunityWorkspaceResponseCommunity;
+  members?: CommunityWorkspaceResponseMembersItem[];
+  channels?: CommunityWorkspaceResponseChannelsItem[];
+  categories?: CommunityWorkspaceResponseCategoriesItem[];
+  assignments?: CommunityWorkspaceResponseAssignmentsItem[];
+  departments?: CommunityWorkspaceResponseDepartmentsItem[];
+  locations?: CommunityWorkspaceResponseLocationsItem[];
+  teams?: CommunityWorkspaceResponseTeamsItem[];
+  policies?: CommunityWorkspaceResponsePoliciesItem[];
+  employees?: CommunityWorkspaceResponseEmployeesItem[];
+  invitations?: CommunityWorkspaceResponseInvitationsItem[];
+  tasks?: CommunityWorkspaceResponseTasksItem[];
+  pagination: CommunityWorkspaceResponsePagination;
+}
+
+export type AdminOverviewStats = { [key: string]: unknown };
+
+export type AdminOverviewUsersItem = { [key: string]: unknown };
+
+export type AdminOverviewChannelsItem = { [key: string]: unknown };
+
+export type AdminOverviewCategoriesItem = { [key: string]: unknown };
+
+export type AdminOverviewRecentMessagesItem = { [key: string]: unknown };
+
+export type AdminOverviewActivityItem = { [key: string]: unknown };
+
+export interface AdminOverview {
+  stats: AdminOverviewStats;
+  users: AdminOverviewUsersItem[];
+  channels: AdminOverviewChannelsItem[];
+  categories: AdminOverviewCategoriesItem[];
+  recentMessages: AdminOverviewRecentMessagesItem[];
+  activity: AdminOverviewActivityItem[];
+  activityPagination: PageInfo;
+}
+
+export interface AuditEntry {
+  id: number;
+  actorId?: string | null;
+  actor?: string;
+  action: string;
+  departmentId?: number | null;
+  locationId?: number | null;
+  resourceType?: string | null;
+  resourceId?: string | null;
+  targetLabel?: string | null;
+  details?: string | null;
+  createdAt: string;
+}
+
+export interface CommunityActivityResponse {
+  entries: AuditEntry[];
+  actions: string[];
+  pagination: PageInfo;
+}
+
 export type CustomRoleInputScopeType = typeof CustomRoleInputScopeType[keyof typeof CustomRoleInputScopeType];
 
 
@@ -192,6 +326,16 @@ export interface OnboardingProgress {
   nextStep: OnboardingProgressNextStep;
 }
 
+/**
+ * Maximum number of records to return. Values above 100 are capped.
+ */
+export type PageLimitParameter = number;
+
+/**
+ * Number of records to skip.
+ */
+export type PageOffsetParameter = number;
+
 export type RetireAdminCustomRole200 = {
   ok: boolean;
 };
@@ -208,5 +352,198 @@ export type StreamIrcEventsParams = {
  * @minLength 1
  */
 channel: string;
+};
+
+export type ListNotificationsParams = {
+/**
+ * Maximum number of records to return. Values above 100 are capped.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: PageLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ */
+offset?: PageOffsetParameter;
+archived?: boolean;
+};
+
+export type GetCommunityWorkspaceParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+employeesLimit?: number;
+/**
+ * @minimum 0
+ */
+employeesOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+invitationsLimit?: number;
+/**
+ * @minimum 0
+ */
+invitationsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+tasksLimit?: number;
+/**
+ * @minimum 0
+ */
+tasksOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+channelsLimit?: number;
+/**
+ * @minimum 0
+ */
+channelsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+categoriesLimit?: number;
+/**
+ * @minimum 0
+ */
+categoriesOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+assignmentsLimit?: number;
+/**
+ * @minimum 0
+ */
+assignmentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+departmentsLimit?: number;
+/**
+ * @minimum 0
+ */
+departmentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+locationsLimit?: number;
+/**
+ * @minimum 0
+ */
+locationsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+teamsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+policiesLimit?: number;
+/**
+ * @minimum 0
+ */
+policiesOffset?: number;
+};
+
+export type ListModerationLogsParams = {
+/**
+ * Maximum number of records to return. Values above 100 are capped.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: PageLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ */
+offset?: PageOffsetParameter;
+};
+
+export type ListCommunityActivityParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+auditLimit?: number;
+/**
+ * @minimum 0
+ */
+auditOffset?: number;
+userId?: string;
+departmentId?: number;
+locationId?: number;
+action?: string;
+/**
+ * @maxLength 120
+ */
+resource?: string;
+from?: string;
+to?: string;
+};
+
+export type ListCommunityDocumentsParams = {
+q?: string;
+folderId?: number;
+category?: string;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+documentsLimit?: number;
+/**
+ * @minimum 0
+ */
+documentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+foldersLimit?: number;
+/**
+ * @minimum 0
+ */
+foldersOffset?: number;
+};
+
+export type GetAdminOverviewParams = {
+/**
+ * @minimum 1
+ * @maximum 50
+ */
+activityLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 10000
+ */
+activityOffset?: number;
+/**
+ * @maxLength 256
+ */
+activityCursor?: string;
+/**
+ * @maxLength 200
+ */
+activityActor?: string;
+/**
+ * @maxLength 200
+ */
+activityAction?: string;
 };
 

@@ -9347,4 +9347,440 @@ describe("admin access controls", () => {
       if (directMessageId) await pool.query("DELETE FROM irc_messages WHERE id = $1", [directMessageId]);
     }
   });
+
+  test("caps notification pages at 100 and orders equal timestamps by newest id", async () => {
+    const session = await createTestSession("notification_pagination");
+    assert.equal((await apiRequest(session, "/me")).status, 200);
+    const createdAt = new Date("2099-01-01T00:00:00.000Z");
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO irc_notifications (user_id, type, category, body, created_at)
+       SELECT $1, 'general', 'general', 'Pagination notification ' || series, $2
+       FROM generate_series(1, 105) AS series
+       RETURNING id`,
+      [session.userId, createdAt],
+    );
+    const insertedIds = inserted.rows.map(({ id }) => id).sort((left, right) => right - left);
+    try {
+      const firstPage = await apiRequest(session, "/notifications?limit=100");
+      assert.equal(firstPage.status, 200, JSON.stringify(firstPage));
+      const firstRows = firstPage.body as Array<{ id: number; createdAt: string }>;
+      assert.equal(firstRows.length, 100);
+      assert.deepEqual(firstRows.map(({ id }) => id), insertedIds.slice(0, 100));
+      assert.ok(firstRows.every(({ createdAt: value }) => new Date(value).getTime() === createdAt.getTime()));
+
+      const secondPage = await apiRequest(session, "/notifications?limit=100&offset=100");
+      assert.equal(secondPage.status, 200, JSON.stringify(secondPage));
+      assert.deepEqual(
+        (secondPage.body as Array<{ id: number }>).map(({ id }) => id),
+        insertedIds.slice(100),
+      );
+
+      const oversizedPage = await apiRequest(session, "/notifications?limit=1000");
+      assert.equal(oversizedPage.status, 200, JSON.stringify(oversizedPage));
+      assert.equal((oversizedPage.body as Array<unknown>).length, 100);
+    } finally {
+      await pool.query("DELETE FROM irc_notifications WHERE id = ANY($1::int[])", [inserted.rows.map(({ id }) => id)]);
+    }
+  });
+
+  test("filters business documents before applying the capped page size", async () => {
+    const owner = await createTestSession("document_pagination_owner");
+    assert.equal((await apiRequest(owner, "/me")).status, 200);
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    let communityId: number | undefined;
+    try {
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', false)
+         RETURNING id`,
+        [`Document pagination ${suffix}`, `document-pagination-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0]?.id;
+      assert.ok(communityId);
+
+      // Put many non-matching rows ahead of the matching rows by updated_at. A
+      // search page must filter first, rather than consuming those rows.
+      const insertedDocuments = await pool.query<{ id: number; title: string }>(
+        `INSERT INTO irc_business_documents
+           (community_id, title, description, category, visibility, owner_id, created_at, updated_at)
+         SELECT $1, 'Noise document ' || series, '', 'company', 'company', $2,
+                now() - interval '1 minute', now() - interval '1 minute'
+         FROM generate_series(1, 150) AS series
+         UNION ALL
+         SELECT $1, 'Needle document ' || series, '', 'company', 'company', $2,
+                now() - interval '2 hours', now() - interval '2 hours'
+         FROM generate_series(1, 101) AS series
+         RETURNING id, title`,
+        [communityId, owner.userId],
+      );
+      const expectedIds = insertedDocuments.rows.filter((row) => row.title.startsWith("Needle document"))
+        .map((row) => row.id).sort((left, right) => right - left);
+
+      const firstPage = await apiRequest(
+        owner,
+        `/communities/${communityId}/documents?q=needle&documentsLimit=100`,
+      );
+      assert.equal(firstPage.status, 200, JSON.stringify(firstPage));
+      const firstBody = firstPage.body as {
+        documents: Array<{ id: number; title: string }>;
+        pagination: { limit: number; offset: number; hasMore: boolean };
+      };
+      assert.equal(firstBody.pagination.limit, 100);
+      assert.equal(firstBody.pagination.offset, 0);
+      assert.equal(firstBody.pagination.hasMore, true);
+      assert.equal(firstBody.documents.length, 100);
+      assert.ok(firstBody.documents.every(({ title }) => title.startsWith("Needle document")));
+      assert.deepEqual(firstBody.documents.map(({ id }) => id), expectedIds.slice(0, 100));
+
+      const secondPage = await apiRequest(
+        owner,
+        `/communities/${communityId}/documents?q=needle&documentsLimit=100&documentsOffset=100`,
+      );
+      assert.equal(secondPage.status, 200, JSON.stringify(secondPage));
+      const secondBody = secondPage.body as {
+        documents: Array<{ id: number; title: string }>;
+        pagination: { limit: number; offset: number; hasMore: boolean };
+      };
+      assert.equal(secondBody.documents.length, 1);
+      assert.deepEqual(secondBody.documents.map(({ id }) => id), expectedIds.slice(100));
+      assert.equal(secondBody.pagination.hasMore, false);
+    } finally {
+      if (communityId !== undefined) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
+  test("paginates workspace detail collections and logs with stable tie ordering", async () => {
+    const owner = await createTestSession("workspace_collection_pagination_owner");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const createdAt = new Date("2024-02-01T00:00:00.000Z");
+    let communityId: number | undefined;
+    let generatedUserIds: string[] = [];
+    try {
+      const ownerProfile = await apiRequest(owner, "/me");
+      assert.equal(ownerProfile.status, 200, JSON.stringify(ownerProfile));
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', false) RETURNING id`,
+        [`Collection pagination ${suffix}`, `collection-pagination-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0]?.id;
+      assert.ok(communityId);
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_owner', 'community', $2, $1)`,
+        [owner.userId, communityId],
+      );
+      const users = await pool.query<{ clerk_id: string }>(
+        `INSERT INTO irc_users (clerk_id, username, display_name, created_at)
+         SELECT 'pagination-${suffix}-' || series, 'pagination_${suffix}_' || series,
+                'Employee ' || lpad(series::text, 3, '0'), $1
+         FROM generate_series(1, 101) AS series
+         RETURNING clerk_id`,
+        [createdAt],
+      );
+      generatedUserIds = users.rows.map(({ clerk_id }) => clerk_id);
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status, joined_at)
+         SELECT $1, clerk_id, 'member', $2 FROM irc_users
+         WHERE clerk_id = ANY($3::text[])`,
+        [communityId, createdAt, generatedUserIds],
+      );
+      await pool.query(
+        `INSERT INTO irc_employee_profiles (community_id, user_id, employee_number)
+         SELECT $1, clerk_id, clerk_id FROM irc_users
+         WHERE clerk_id = ANY($2::text[])`,
+        [communityId, generatedUserIds],
+      );
+      await pool.query(
+        `INSERT INTO irc_workspace_invitations
+           (community_id, email, invited_by, token_hash, expires_at, created_at)
+         SELECT $1, 'invite-' || series || '@example.test', $2,
+                'token-${suffix}-' || series, now() + interval '1 day', $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_workspace_tasks
+           (community_id, title, created_by, created_at, updated_at)
+         SELECT $1, 'Task ' || series, $2, $3, $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_admin_audit_logs
+           (actor_id, community_id, action, target_label, created_at)
+         SELECT $1, $2, 'pagination_audit', 'audit-' || series, $3
+         FROM generate_series(1, 101) AS series`,
+        [owner.userId, communityId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_moderation_actions
+           (actor_id, community_id, action, details, created_at)
+         SELECT $1, $2, 'pagination_moderation', 'moderation-' || series, $3
+         FROM generate_series(1, 101) AS series`,
+        [owner.userId, communityId, createdAt],
+      );
+      const announcement = await pool.query<{ id: number }>(
+        `INSERT INTO irc_server_announcements
+           (author_id, community_id, title, body, created_at)
+         VALUES ($1, $2, 'Receipt counts', 'Many receipts', $3)
+         RETURNING id`,
+        [owner.userId, communityId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_announcement_read_receipts (announcement_id, user_id)
+         SELECT $1, unnest($2::text[])`,
+        [announcement.rows[0]?.id, generatedUserIds],
+      );
+      await pool.query(
+        `INSERT INTO irc_announcement_acknowledgements (announcement_id, user_id)
+         SELECT $1, unnest($2::text[])`,
+        [announcement.rows[0]?.id, generatedUserIds.slice(0, 73)],
+      );
+
+      const detail = await apiRequest(
+        owner,
+        `/communities/${communityId}?employeesLimit=100&invitationsLimit=100&tasksLimit=100`,
+      );
+      assert.equal(detail.status, 200, JSON.stringify(detail));
+      const detailBody = detail.body as {
+        employees: Array<{ displayName: string }>;
+        invitations: Array<{ id: number }>;
+        tasks: Array<{ id: number }>;
+        pagination: {
+          employees: { limit: number; offset: number; hasMore: boolean };
+          invitations: { limit: number; offset: number; hasMore: boolean };
+          tasks: { limit: number; offset: number; hasMore: boolean };
+        };
+        announcements: Array<{ title: string; readCount: number; acknowledgementCount: number }>;
+      };
+      assert.equal(detailBody.employees.length, 100);
+      assert.equal(detailBody.invitations.length, 100);
+      assert.equal(detailBody.tasks.length, 100);
+      assert.equal(detailBody.employees[0]?.displayName, "Employee 001");
+      assert.equal(detailBody.employees[99]?.displayName, "Employee 100");
+      assert.ok(detailBody.invitations[0].id > detailBody.invitations[99].id);
+      assert.ok(detailBody.tasks[0].id > detailBody.tasks[99].id);
+      for (const collection of ["employees", "invitations", "tasks"] as const) {
+        assert.deepEqual(detailBody.pagination[collection], { limit: 100, offset: 0, hasMore: true });
+      }
+      assert.equal(detailBody.announcements[0]?.readCount, 101);
+      assert.equal(detailBody.announcements[0]?.acknowledgementCount, 73);
+      const oversizedDetail = await apiRequest(
+        owner,
+        `/communities/${communityId}?employeesLimit=999&invitationsLimit=999&tasksLimit=999`,
+      );
+      assert.equal(oversizedDetail.status, 200);
+      const oversizedBody = oversizedDetail.body as { employees: unknown[]; invitations: unknown[]; tasks: unknown[] };
+      assert.equal(oversizedBody.employees.length, 100);
+      assert.equal(oversizedBody.invitations.length, 100);
+      assert.equal(oversizedBody.tasks.length, 100);
+
+      const detailSecondPage = await apiRequest(
+        owner,
+        `/communities/${communityId}?employeesLimit=100&employeesOffset=100&invitationsLimit=100&invitationsOffset=100&tasksLimit=100&tasksOffset=100`,
+      );
+      assert.equal(detailSecondPage.status, 200, JSON.stringify(detailSecondPage));
+      const secondBody = detailSecondPage.body as {
+        employees: Array<{ displayName: string }>;
+        invitations: Array<{ id: number }>;
+        tasks: Array<{ id: number }>;
+        pagination: { employees: { hasMore: boolean }; invitations: { hasMore: boolean }; tasks: { hasMore: boolean } };
+      };
+      assert.equal(secondBody.employees.length, 1);
+      assert.equal(secondBody.invitations.length, 1);
+      assert.equal(secondBody.tasks.length, 1);
+      assert.equal(secondBody.employees[0]?.displayName, "Employee 101");
+      assert.ok(secondBody.invitations[0].id < detailBody.invitations[99].id);
+      assert.ok(secondBody.tasks[0].id < detailBody.tasks[99].id);
+      assert.equal(secondBody.pagination.employees.hasMore, false);
+      assert.equal(secondBody.pagination.invitations.hasMore, false);
+      assert.equal(secondBody.pagination.tasks.hasMore, false);
+
+      const activity = await apiRequest(owner, `/communities/${communityId}/activity?action=pagination_audit&auditLimit=100`);
+      assert.equal(activity.status, 200, JSON.stringify(activity));
+      const activityBody = activity.body as { entries: Array<{ id: number }>; pagination: { hasMore: boolean } };
+      assert.equal(activityBody.entries.length, 100);
+      assert.ok(activityBody.entries[0].id > activityBody.entries[99].id);
+      assert.equal(activityBody.pagination.hasMore, true);
+      const oversizedActivity = await apiRequest(owner, `/communities/${communityId}/activity?action=pagination_audit&auditLimit=999`);
+      assert.equal((oversizedActivity.body as { entries: unknown[] }).entries.length, 100);
+      const activitySecond = await apiRequest(owner, `/communities/${communityId}/activity?action=pagination_audit&auditLimit=100&auditOffset=100`);
+      const activitySecondBody = activitySecond.body as { entries: Array<{ id: number }>; pagination: { hasMore: boolean } };
+      assert.equal(activitySecondBody.entries.length, 1);
+      assert.ok(activitySecondBody.entries[0].id < activityBody.entries[99].id);
+      assert.equal(activitySecondBody.pagination.hasMore, false);
+
+      const moderation = await apiRequest(owner, `/communities/${communityId}/moderation-logs?moderationLimit=100`);
+      assert.equal(moderation.status, 200, JSON.stringify(moderation));
+      const moderationBody = moderation.body as Array<{ id: number }>;
+      assert.equal(moderationBody.length, 100);
+      assert.ok(moderationBody[0].id > moderationBody[99].id);
+      const oversizedModeration = await apiRequest(owner, `/communities/${communityId}/moderation-logs?limit=999`);
+      assert.equal((oversizedModeration.body as unknown[]).length, 100);
+      const moderationSecond = await apiRequest(owner, `/communities/${communityId}/moderation-logs?moderationLimit=100&moderationOffset=100`);
+      const moderationSecondBody = moderationSecond.body as Array<{ id: number }>;
+      assert.equal(moderationSecondBody.length, 1);
+      assert.ok(moderationSecondBody[0].id < moderationBody[99].id);
+    } finally {
+      if (communityId !== undefined) {
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE community_id = $1 AND action = 'pagination_audit'",
+          [communityId],
+        );
+      }
+      if (communityId !== undefined) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      if (generatedUserIds.length) await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [generatedUserIds]);
+    }
+  });
+
+  test("caps and paginates workspace reference collections", async () => {
+    const owner = await createTestSession("workspace_reference_pagination_owner");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const createdAt = new Date("2024-03-01T00:00:00.000Z");
+    let communityId: number | undefined;
+    try {
+      const ownerProfile = await apiRequest(owner, "/me");
+      assert.equal(ownerProfile.status, 200, JSON.stringify(ownerProfile));
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', false) RETURNING id`,
+        [`Reference pagination ${suffix}`, `reference-pagination-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0]?.id;
+      assert.ok(communityId);
+      await pool.query(
+        `INSERT INTO irc_categories (name, owner_id, community_id, created_at)
+         SELECT 'Category ' || lpad(series::text, 3, '0'), $2, $1, $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_channels (name, owner_id, community_id, created_at)
+         SELECT 'Channel ' || lpad(series::text, 3, '0'), $2, $1, $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_departments (name, community_id, created_at)
+         SELECT 'Department ' || lpad(series::text, 3, '0'), $1, $2
+         FROM generate_series(1, 101) AS series`,
+        [communityId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_locations (name, community_id, created_at)
+         SELECT 'Location ' || lpad(series::text, 3, '0'), $1, $2
+         FROM generate_series(1, 101) AS series`,
+        [communityId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_teams (name, community_id, created_at)
+         SELECT 'Team ' || lpad(series::text, 3, '0'), $1, $2
+         FROM generate_series(1, 101) AS series`,
+        [communityId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_workspace_policies (title, body, community_id, created_by, created_at)
+         SELECT 'Policy ' || lpad(series::text, 3, '0'), 'Policy body', $1, $2, $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+      await pool.query(
+        `INSERT INTO irc_document_folders (community_id, name, created_by, created_at)
+         SELECT $1, 'Folder ' || lpad(series::text, 3, '0'), $2, $3
+         FROM generate_series(1, 101) AS series`,
+        [communityId, owner.userId, createdAt],
+      );
+
+      const detail = await apiRequest(
+        owner,
+        `/communities/${communityId}?channelsLimit=1000&categoriesLimit=1000&departmentsLimit=1000&locationsLimit=1000&teamsLimit=1000&policiesLimit=1000`,
+      );
+      assert.equal(detail.status, 200, JSON.stringify(detail));
+      const body = detail.body as {
+        channels: Array<{ name: string }>;
+        categories: Array<{ name: string }>;
+        departments: Array<{ name: string }>;
+        locations: Array<{ name: string }>;
+        teams: Array<{ name: string }>;
+        policies: Array<{ title: string }>;
+        pagination: Record<string, { limit: number; offset: number; hasMore: boolean }>;
+      };
+      for (const [key, rows, first, last] of [
+        ["channels", body.channels, "Channel 001", "Channel 100"],
+        ["categories", body.categories, "Category 001", "Category 100"],
+        ["departments", body.departments, "Department 001", "Department 100"],
+        ["locations", body.locations, "Location 001", "Location 100"],
+        ["teams", body.teams, "Team 001", "Team 100"],
+      ] as const) {
+        assert.equal(rows.length, 100, `${key} should be capped`);
+        assert.equal((rows[0] as { name?: string }).name, first);
+        assert.equal((rows[99] as { name?: string }).name, last);
+        assert.deepEqual(body.pagination[key], { limit: 100, offset: 0, hasMore: true });
+      }
+      assert.equal(body.policies.length, 100);
+      // Policies intentionally sort newest first; equal timestamps use id desc.
+      assert.ok(body.policies[0].title > body.policies[99].title);
+      assert.deepEqual(body.pagination.policies, { limit: 100, offset: 0, hasMore: true });
+
+      const second = await apiRequest(
+        owner,
+        `/communities/${communityId}?channelsLimit=100&channelsOffset=100&categoriesLimit=100&categoriesOffset=100&departmentsLimit=100&departmentsOffset=100&locationsLimit=100&locationsOffset=100&teamsLimit=100&teamsOffset=100&policiesLimit=100&policiesOffset=100`,
+      );
+      assert.equal(second.status, 200, JSON.stringify(second));
+      const secondBody = second.body as {
+        channels: Array<{ name: string }>;
+        categories: Array<{ name: string }>;
+        departments: Array<{ name: string }>;
+        locations: Array<{ name: string }>;
+        teams: Array<{ name: string }>;
+        policies: Array<{ title: string }>;
+        pagination: Record<string, { limit: number; offset: number; hasMore: boolean }>;
+      };
+      for (const [key, rows, expected] of [
+        ["channels", secondBody.channels, "Channel 101"],
+        ["categories", secondBody.categories, "Category 101"],
+        ["departments", secondBody.departments, "Department 101"],
+        ["locations", secondBody.locations, "Location 101"],
+        ["teams", secondBody.teams, "Team 101"],
+      ] as const) {
+        assert.equal(rows.length, 1, `${key} second page`);
+        assert.equal((rows[0] as { name?: string }).name, expected);
+        assert.deepEqual(secondBody.pagination[key], { limit: 100, offset: 100, hasMore: false });
+      }
+      assert.equal(secondBody.policies.length, 1);
+      assert.equal(secondBody.policies[0]?.title, "Policy 001");
+      assert.deepEqual(secondBody.pagination.policies, { limit: 100, offset: 100, hasMore: false });
+
+      const folders = await apiRequest(
+        owner,
+        `/communities/${communityId}/documents?foldersLimit=1000`,
+      );
+      assert.equal(folders.status, 200, JSON.stringify(folders));
+      const folderBody = folders.body as {
+        folders: Array<{ name: string }>;
+        foldersPagination: { limit: number; offset: number; hasMore: boolean };
+      };
+      assert.equal(folderBody.folders.length, 100);
+      assert.equal(folderBody.folders[0]?.name, "Folder 001");
+      assert.equal(folderBody.folders[99]?.name, "Folder 100");
+      assert.deepEqual(folderBody.foldersPagination, { limit: 100, offset: 0, hasMore: true });
+      const foldersSecond = await apiRequest(
+        owner,
+        `/communities/${communityId}/documents?foldersLimit=100&foldersOffset=100`,
+      );
+      assert.equal(foldersSecond.status, 200, JSON.stringify(foldersSecond));
+      const foldersSecondBody = foldersSecond.body as {
+        folders: Array<{ name: string }>;
+        foldersPagination: { limit: number; offset: number; hasMore: boolean };
+      };
+      assert.equal(foldersSecondBody.folders.length, 1);
+      assert.equal(foldersSecondBody.folders[0]?.name, "Folder 101");
+      assert.deepEqual(foldersSecondBody.foldersPagination, { limit: 100, offset: 100, hasMore: false });
+    } finally {
+      if (communityId !== undefined) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+    }
+  });
 });

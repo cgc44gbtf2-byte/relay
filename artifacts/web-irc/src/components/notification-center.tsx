@@ -41,18 +41,26 @@ type Props = {
   notifications: Notification[];
   setNotifications: Dispatch<SetStateAction<Notification[]>>;
   request: <T>(path: string, init?: RequestInit) => Promise<T>;
+  /**
+   * Page-aware requests are supplied by the app so pagination can consume
+   * response headers without loading every page up front.
+   */
+  requestPage?: <T>(path: string) => Promise<{ data: T[]; hasMore: boolean; nextOffset: number | null }>;
   onClose: () => void;
   onNavigate: (url: string) => void;
   onOpenMessage: (message: LinkedNotificationMessage) => void;
   revision: number;
 };
 
-export function NotificationCenter({ notifications, setNotifications, request, onClose, onNavigate, onOpenMessage, revision }: Props) {
+export function NotificationCenter({ notifications, setNotifications, request, requestPage, onClose, onNavigate, onOpenMessage, revision }: Props) {
   const [view, setView] = useState<"inbox" | "archived">("inbox");
   const [archived, setArchived] = useState<Notification[]>([]);
   const [selected, setSelected] = useState<Notification | null>(null);
   const [linkedMessage, setLinkedMessage] = useState<LinkedNotificationMessage | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState({ inbox: false, archived: false });
+  const [nextOffset, setNextOffset] = useState({ inbox: 0, archived: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | Notification["category"]>("all");
@@ -61,17 +69,62 @@ export function NotificationCenter({ notifications, setNotifications, request, o
   const visible = filter === "all" ? items : items.filter((item) => item.category === filter);
   const unreadCount = notifications.filter((item) => !item.readAt).length;
 
+  // Bootstrap data arrives after this component may mount. Until the app
+  // supplies page metadata, a full page is the only safe indication that
+  // another page may exist.
+  useEffect(() => {
+    if (nextOffset.inbox !== 0 || notifications.length === 0) return;
+    setHasMore((current) => ({ ...current, inbox: notifications.length >= 100 }));
+    setNextOffset((current) => ({ ...current, inbox: notifications.length }));
+  }, [notifications.length, nextOffset.inbox]);
+
   useEffect(() => {
     if (view !== "archived") return;
     let active = true;
     setLoading(true);
     setError("");
-    void request<Notification[]>("/notifications?archived=true")
-      .then((rows) => { if (active) setArchived(rows); })
+    const path = "/notifications?archived=true&limit=100&offset=0";
+    const pageRequest = requestPage
+      ? requestPage<Notification>(path).then(({ data, hasMore: more, nextOffset: next }) => ({ rows: data, more, next }))
+      : request<Notification[]>(path).then((rows) => ({ rows, more: rows.length >= 100, next: rows.length }));
+    void pageRequest
+      .then(({ rows, more, next }) => {
+        if (!active) return;
+        setArchived(rows);
+        setHasMore((current) => ({ ...current, archived: more }));
+        setNextOffset((current) => ({ ...current, archived: next ?? rows.length }));
+      })
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load archived notifications."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [view, request, revision]);
+  }, [view, request, requestPage, revision]);
+
+  const loadOlder = async () => {
+    if (loadingMore || !hasMore[view]) return;
+    setLoadingMore(true);
+    setError("");
+    const offset = nextOffset[view];
+    const path = `/notifications${view === "archived" ? "?archived=true" : "?"}limit=100&offset=${offset}`;
+    try {
+      const result = requestPage
+        ? await requestPage<Notification>(path)
+        : { data: await request<Notification[]>(path), hasMore: false, nextOffset: null };
+      const rows = result.data;
+      const merge = (current: Notification[]) => {
+        const byId = new Map(current.map((item) => [item.id, item]));
+        rows.forEach((item) => byId.set(item.id, item));
+        return [...byId.values()].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id - a.id);
+      };
+      if (view === "archived") setArchived(merge);
+      else setNotifications(merge);
+      setHasMore((current) => ({ ...current, [view]: result.hasMore }));
+      setNextOffset((current) => ({ ...current, [view]: result.nextOffset ?? offset + rows.length }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load older notifications.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const open = async (notice: Notification) => {
     const requestId = ++detailRequestId.current;
@@ -168,11 +221,12 @@ export function NotificationCenter({ notifications, setNotifications, request, o
             </div>}
           </div>
           <div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", ...Object.keys(labels)] as Array<"all" | Notification["category"]>).map((category) => <button type="button" key={category} onClick={() => setFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${filter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`} data-testid={`button-notification-filter-${category}`}>{category === "all" ? "All" : labels[category]}</button>)}</div>
-          {loading ? <p className="text-xs text-muted-foreground">Loading notifications…</p> : visible.length === 0 ? <p className="font-mono text-xs text-muted-foreground">{view === "archived" ? "No archived notifications." : "You are all caught up."}</p> : <div className="space-y-2">{visible.map((notice) => <div key={notice.id} className={`flex items-start gap-1 rounded-lg ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}>
+           {loading ? <p className="text-xs text-muted-foreground">Loading notifications…</p> : visible.length === 0 ? <p className="font-mono text-xs text-muted-foreground">{view === "archived" ? "No archived notifications." : "You are all caught up."}</p> : <div className="space-y-2">{visible.map((notice) => <div key={notice.id} className={`flex items-start gap-1 rounded-lg ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}>
             <button type="button" onClick={() => void open(notice)} className="flex min-w-0 flex-1 items-start gap-3 p-3 text-left" data-testid={`button-notification-${notice.id}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{labels[notice.category]}</span><span className="block line-clamp-2 break-words font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{new Date(notice.createdAt).toLocaleString()} · {notice.readAt ? "read" : "new"}</span></span></button>
             <button type="button" disabled={busy} onClick={() => view === "inbox" ? archive(notice) : restore(notice)} className="mt-2 rounded p-2 text-muted-foreground hover:text-primary disabled:opacity-40" aria-label={`${view === "inbox" ? "Archive" : "Restore"} notification ${notice.id}`} data-testid={`button-${view === "inbox" ? "archive" : "restore"}-notification-${notice.id}`}>{view === "inbox" ? <Archive className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}</button>
             <button type="button" disabled={busy} onClick={() => remove(notice)} className="mr-1 mt-2 rounded p-2 text-muted-foreground hover:text-destructive disabled:opacity-40" aria-label={`Delete notification ${notice.id}`} data-testid={`button-delete-notification-${notice.id}`}><Trash2 className="h-4 w-4" /></button>
-          </div>)}</div>}
+           </div>)}</div>}
+           {!selected && hasMore[view] && <button type="button" disabled={loadingMore} onClick={() => void loadOlder()} className="mt-4 w-full rounded border border-border px-3 py-2 font-mono text-xs text-muted-foreground hover:text-primary disabled:opacity-50" data-testid="button-load-older-notifications">{loadingMore ? "Loading older notifications…" : "Load older notifications"}</button>}
         </>}
       </div>
     </section>

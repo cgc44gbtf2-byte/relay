@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { clerkClient } from "@clerk/express";
-import { and, asc, count, desc, eq, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import {
   blocksTable,
@@ -254,6 +254,18 @@ async function writeCommunityAudit(
 function param(req: AuthenticatedRequest, key: string): string {
   const value = req.params[key];
   return Array.isArray(value) ? value[0] : value;
+}
+
+// Collection endpoints deliberately cap pages even when a caller omits pagination.
+// Offset pagination is retained for compatibility with the existing array responses.
+const MAX_PAGE_SIZE = 100;
+function pageParam(req: AuthenticatedRequest, name: string): { limit: number; offset: number } {
+  const rawLimit = typeof req.query[`${name}Limit`] === "string" ? Number(req.query[`${name}Limit`]) : Number(req.query.limit);
+  const rawOffset = typeof req.query[`${name}Offset`] === "string" ? Number(req.query[`${name}Offset`]) : Number(req.query.offset);
+  return {
+    limit: Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_PAGE_SIZE) : MAX_PAGE_SIZE,
+    offset: Number.isInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0,
+  };
 }
 
 function slugify(value: string): string {
@@ -647,6 +659,44 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     return;
   }
   await activateDueAnnouncements(community.id);
+  const employeePage = pageParam(req, "employees");
+  const invitationPage = pageParam(req, "invitations");
+  const taskPage = pageParam(req, "tasks");
+  const channelPage = pageParam(req, "channels");
+  const categoryPage = pageParam(req, "categories");
+  const assignmentPage = pageParam(req, "assignments");
+  const departmentPage = pageParam(req, "departments");
+  const locationPage = pageParam(req, "locations");
+  const teamPage = pageParam(req, "teams");
+  const policyPage = pageParam(req, "policies");
+  const [viewerMembership] = await db.select({ userId: communityMembersTable.userId })
+    .from(communityMembersTable)
+    .where(and(eq(communityMembersTable.communityId, community.id), eq(communityMembersTable.userId, userId)))
+    .limit(1);
+  const pagedTasks = await db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id))
+    .orderBy(desc(workspaceTasksTable.updatedAt), desc(workspaceTasksTable.id))
+    .limit(taskPage.limit + 1).offset(taskPage.offset);
+  const selectedTaskIds = pagedTasks.slice(0, taskPage.limit).map((task) => task.id);
+  const pagedMembers = await db.select({
+    id: usersTable.clerkId,
+    username: usersTable.username,
+    displayName: usersTable.displayName,
+    presenceStatus: usersTable.status,
+    status: usersTable.status,
+    joinedAt: communityMembersTable.joinedAt,
+  }).from(communityMembersTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+    .where(eq(communityMembersTable.communityId, community.id))
+    .orderBy(asc(usersTable.displayName), asc(communityMembersTable.userId))
+    .limit(employeePage.limit + 1).offset(employeePage.offset);
+  // The viewer's profile and team memberships also determine announcement
+  // visibility, even when their directory entry is on a later page.
+  const selectedMemberIds = [...new Set([...pagedMembers.map((member) => member.id), userId])];
+  const returnedAnnouncementIds = (await db.select({ id: serverAnnouncementsTable.id })
+    .from(serverAnnouncementsTable)
+    .where(eq(serverAnnouncementsTable.communityId, community.id))
+    .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
+    .limit(20)).map((row) => row.id);
   const taskCommentsQuery = summaryView
     ? Promise.resolve([] as Array<{
       id: number;
@@ -666,7 +716,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     }).from(workspaceTaskCommentsTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
       .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskCommentsTable.taskId))
-      .where(eq(workspaceTasksTable.communityId, community.id))
+       .where(selectedTaskIds.length ? inArray(workspaceTaskCommentsTable.taskId, selectedTaskIds) : sql`false`)
       .orderBy(asc(workspaceTaskCommentsTable.createdAt));
   const taskAttachmentsQuery = summaryView
     ? Promise.resolve([] as Array<{
@@ -690,23 +740,13 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       createdAt: workspaceTaskAttachmentsTable.createdAt,
     }).from(workspaceTaskAttachmentsTable)
       .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
-      .where(eq(workspaceTasksTable.communityId, community.id));
+       .where(selectedTaskIds.length ? inArray(workspaceTaskAttachmentsTable.taskId, selectedTaskIds) : sql`false`);
   const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
-    db.select({
-      id: usersTable.clerkId,
-      username: usersTable.username,
-      displayName: usersTable.displayName,
-      presenceStatus: usersTable.status,
-      status: usersTable.status,
-      joinedAt: communityMembersTable.joinedAt,
-    }).from(communityMembersTable)
-      .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
-      .where(eq(communityMembersTable.communityId, community.id))
-      .orderBy(asc(usersTable.displayName)),
-    db.select().from(channelsTable).where(eq(channelsTable.communityId, community.id)).orderBy(asc(channelsTable.name)),
-    db.select().from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(asc(categoriesTable.name)),
-    db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)),
-    db.select({
+     Promise.resolve(pagedMembers),
+    db.select().from(channelsTable).where(eq(channelsTable.communityId, community.id)).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
+    db.select().from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(categoryPage.limit + 1).offset(categoryPage.offset),
+    db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)).orderBy(asc(userRolesTable.userId), asc(userRolesTable.id)).limit(assignmentPage.limit + 1).offset(assignmentPage.offset),
+     db.select({
       id: serverAnnouncementsTable.id,
       title: serverAnnouncementsTable.title,
       body: serverAnnouncementsTable.body,
@@ -724,11 +764,11 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     }).from(serverAnnouncementsTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
       .where(eq(serverAnnouncementsTable.communityId, community.id))
-      .orderBy(desc(serverAnnouncementsTable.createdAt))
+       .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
       .limit(20),
-    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name)),
-    db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name)),
-    db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name)),
+    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(departmentPage.limit + 1).offset(departmentPage.offset),
+    db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name), asc(locationsTable.id)).limit(locationPage.limit + 1).offset(locationPage.offset),
+    db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name), asc(teamsTable.id)).limit(teamPage.limit + 1).offset(teamPage.offset),
     db.select({
       communityId: employeeProfilesTable.communityId,
       userId: employeeProfilesTable.userId,
@@ -743,10 +783,14 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       username: usersTable.username,
       displayName: usersTable.displayName,
     }).from(employeeProfilesTable).innerJoin(usersTable, eq(usersTable.clerkId, employeeProfilesTable.userId))
-      .where(eq(employeeProfilesTable.communityId, community.id)),
-    db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id)).orderBy(desc(workspaceInvitationsTable.createdAt)).limit(50),
-    db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt)),
-    db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.updatedAt)),
+       .where(selectedMemberIds.length
+         ? and(eq(employeeProfilesTable.communityId, community.id), inArray(employeeProfilesTable.userId, selectedMemberIds))
+         : sql`false`),
+     db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id))
+       .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id))
+       .limit(invitationPage.limit + 1).offset(invitationPage.offset),
+     db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt), desc(workspacePoliciesTable.id)).limit(policyPage.limit + 1).offset(policyPage.offset),
+     Promise.resolve(pagedTasks),
     taskCommentsQuery,
     taskAttachmentsQuery,
     db.select({
@@ -758,28 +802,40 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       endedAt: teamMembersTable.endedAt,
     }).from(teamMembersTable)
       .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-      .where(eq(teamsTable.communityId, community.id)),
-    db.select({
+       .where(and(eq(teamsTable.communityId, community.id), inArray(teamMembersTable.userId, selectedMemberIds))),
+     returnedAnnouncementIds.length ? db.select({
       announcementId: announcementReadReceiptsTable.announcementId,
       userId: announcementReadReceiptsTable.userId,
       readAt: announcementReadReceiptsTable.readAt,
     }).from(announcementReadReceiptsTable)
       .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementReadReceiptsTable.announcementId))
-      .where(eq(serverAnnouncementsTable.communityId, community.id)),
-    db.select({
+       .where(and(
+         inArray(announcementReadReceiptsTable.announcementId, returnedAnnouncementIds),
+         eq(announcementReadReceiptsTable.userId, userId),
+       )) : Promise.resolve([] as Array<{ announcementId: number; userId: string; readAt: Date }>),
+     returnedAnnouncementIds.length ? db.select({
       announcementId: announcementAcknowledgementsTable.announcementId,
       userId: announcementAcknowledgementsTable.userId,
       acknowledgedAt: announcementAcknowledgementsTable.acknowledgedAt,
     }).from(announcementAcknowledgementsTable)
       .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAcknowledgementsTable.announcementId))
-      .where(eq(serverAnnouncementsTable.communityId, community.id)),
-    db.select().from(announcementAttachmentsTable)
+       .where(and(
+         inArray(announcementAcknowledgementsTable.announcementId, returnedAnnouncementIds),
+         eq(announcementAcknowledgementsTable.userId, userId),
+       )) : Promise.resolve([] as Array<{ announcementId: number; userId: string; acknowledgedAt: Date }>),
+     returnedAnnouncementIds.length ? db.select().from(announcementAttachmentsTable)
       .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
-      .where(eq(serverAnnouncementsTable.communityId, community.id)),
-  ]);
-  const canManage = await communityPermission(userId, community.id, "manage_community");
+       .where(inArray(announcementAttachmentsTable.announcementId, returnedAnnouncementIds)) : Promise.resolve([] as Array<{ irc_announcement_attachments: typeof announcementAttachmentsTable.$inferSelect }>),
+   ]);
+   const [announcementReadCounts, announcementAckCounts] = await Promise.all([
+     returnedAnnouncementIds.length ? db.select({ announcementId: announcementReadReceiptsTable.announcementId, total: count() }).from(announcementReadReceiptsTable).where(inArray(announcementReadReceiptsTable.announcementId, returnedAnnouncementIds)).groupBy(announcementReadReceiptsTable.announcementId) : Promise.resolve([] as Array<{ announcementId: number; total: number }>),
+     returnedAnnouncementIds.length ? db.select({ announcementId: announcementAcknowledgementsTable.announcementId, total: count() }).from(announcementAcknowledgementsTable).where(inArray(announcementAcknowledgementsTable.announcementId, returnedAnnouncementIds)).groupBy(announcementAcknowledgementsTable.announcementId) : Promise.resolve([] as Array<{ announcementId: number; total: number }>),
+   ]);
+   const announcementReadCountById = new Map(announcementReadCounts.map((row) => [row.announcementId, Number(row.total)]));
+   const announcementAckCountById = new Map(announcementAckCounts.map((row) => [row.announcementId, Number(row.total)]));
+   const canManage = await communityPermission(userId, community.id, "manage_community");
   const canManageOrganization = await requireOrganizationManager(userId, community.id);
-  const viewerIsMember = members.some((member) => member.id === userId);
+   const viewerIsMember = Boolean(viewerMembership);
   const visibleChannels = channels.filter((channel) => !channel.isPrivate || viewerIsMember || canManage);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
   const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
@@ -825,27 +881,27 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     ));
   res.json({
     community,
-    members,
-    channels: visibleChannels.map((channel) => ({ ...channel, passwordHash: undefined })),
-    categories,
-    assignments: assignments.map((assignment) => ({ ...assignment, grantedBy: undefined })),
+    members: members.slice(0, employeePage.limit),
+    channels: visibleChannels.slice(0, channelPage.limit).map((channel) => ({ ...channel, passwordHash: undefined })),
+    categories: categories.slice(0, categoryPage.limit),
+    assignments: assignments.slice(0, assignmentPage.limit).map((assignment) => ({ ...assignment, grantedBy: undefined })),
     announcements: visibleAnnouncements.map((announcement) => ({
       ...announcement,
       readAt: announcementReceipts.find((receipt) => receipt.announcementId === announcement.id && receipt.userId === userId)?.readAt ?? null,
       acknowledgedAt: announcementAcks.find((ack) => ack.announcementId === announcement.id && ack.userId === userId)?.acknowledgedAt ?? null,
-      readCount: announcementReceipts.filter((receipt) => receipt.announcementId === announcement.id).length,
-      acknowledgementCount: announcementAcks.filter((ack) => ack.announcementId === announcement.id).length,
+       readCount: announcementReadCountById.get(announcement.id) ?? 0,
+       acknowledgementCount: announcementAckCountById.get(announcement.id) ?? 0,
       attachments: announcementAttachments
         .map(({ irc_announcement_attachments: attachment }) => attachment)
         .filter((attachment) => attachment.announcementId === announcement.id),
     })),
-    departments,
-    locations,
-    teams,
-    employees: directoryEmployees,
-    invitations: invitations.map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
-    policies,
-    tasks: tasks.map((task) => ({
+    departments: departments.slice(0, departmentPage.limit),
+    locations: locations.slice(0, locationPage.limit),
+    teams: teams.slice(0, teamPage.limit),
+    employees: directoryEmployees.slice(0, employeePage.limit),
+    invitations: invitations.slice(0, invitationPage.limit).map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
+    policies: policies.slice(0, policyPage.limit),
+     tasks: tasks.slice(0, taskPage.limit).map((task) => ({
       ...task,
       comments: taskComments.filter((comment) => comment.taskId === task.id),
       attachments: taskAttachments.filter((attachment) => attachment.taskId === task.id),
@@ -854,6 +910,18 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     canManageOrganization,
     isOwner: community.ownerId === userId,
     teamMemberships,
+     pagination: {
+       employees: { limit: employeePage.limit, offset: employeePage.offset, hasMore: members.length > employeePage.limit },
+       invitations: { limit: invitationPage.limit, offset: invitationPage.offset, hasMore: invitations.length > invitationPage.limit },
+       tasks: { limit: taskPage.limit, offset: taskPage.offset, hasMore: tasks.length > taskPage.limit },
+       channels: { limit: channelPage.limit, offset: channelPage.offset, hasMore: channels.length > channelPage.limit },
+       categories: { limit: categoryPage.limit, offset: categoryPage.offset, hasMore: categories.length > categoryPage.limit },
+       assignments: { limit: assignmentPage.limit, offset: assignmentPage.offset, hasMore: assignments.length > assignmentPage.limit },
+       departments: { limit: departmentPage.limit, offset: departmentPage.offset, hasMore: departments.length > departmentPage.limit },
+       locations: { limit: locationPage.limit, offset: locationPage.offset, hasMore: locations.length > locationPage.limit },
+       teams: { limit: teamPage.limit, offset: teamPage.offset, hasMore: teams.length > teamPage.limit },
+       policies: { limit: policyPage.limit, offset: policyPage.offset, hasMore: policies.length > policyPage.limit },
+     },
   });
 });
 
@@ -961,6 +1029,7 @@ router.get("/communities/:communityId/activity", requireAuth, async (req: Authen
   const resource = typeof req.query.resource === "string" && req.query.resource.trim() ? req.query.resource.trim().slice(0, 120) : null;
   const from = typeof req.query.from === "string" && req.query.from.trim() ? new Date(`${req.query.from}T00:00:00.000Z`) : null;
   const to = typeof req.query.to === "string" && req.query.to.trim() ? new Date(`${req.query.to}T23:59:59.999Z`) : null;
+  const activityPage = pageParam(req, "audit");
   if (
     (departmentId !== null && !Number.isInteger(departmentId))
     || (locationId !== null && !Number.isInteger(locationId))
@@ -1008,16 +1077,17 @@ router.get("/communities/:communityId/activity", requireAuth, async (req: Authen
     }).from(adminAuditLogsTable)
       .leftJoin(usersTable, eq(usersTable.clerkId, adminAuditLogsTable.actorId))
       .where(filters)
-      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
-      .limit(200),
+       .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+       .limit(activityPage.limit + 1).offset(activityPage.offset),
     db.selectDistinct({ action: adminAuditLogsTable.action })
       .from(adminAuditLogsTable)
       .where(workspaceScope)
       .orderBy(asc(adminAuditLogsTable.action)),
   ]);
   res.json({
-    entries,
+    entries: entries.slice(0, activityPage.limit),
     actions: actionOptions.map((item) => item.action),
+    pagination: { limit: activityPage.limit, offset: activityPage.offset, hasMore: entries.length > activityPage.limit },
   });
 });
 
@@ -2333,40 +2403,75 @@ router.get("/communities/:communityId/documents", requireAuth, async (req: Authe
   }
   const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
   const folderId = typeof req.query.folderId === "string" && req.query.folderId ? Number(req.query.folderId) : null;
+  const category = typeof req.query.category === "string" && req.query.category.trim() ? req.query.category.trim() : null;
+  const documentPage = pageParam(req, "documents");
+  const folderPage = pageParam(req, "folders");
   const manager = await communityPermission(userId, communityId, "manage_community");
-  const [folders, documents, versions, acknowledgements, permissions, downloads] = await Promise.all([
-    db.select().from(documentFoldersTable).where(eq(documentFoldersTable.communityId, communityId)).orderBy(asc(documentFoldersTable.name)),
-    db.select().from(businessDocumentsTable).where(eq(businessDocumentsTable.communityId, communityId)).orderBy(desc(businessDocumentsTable.updatedAt)),
-    db.select().from(documentVersionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)).orderBy(desc(documentVersionsTable.version)),
-    db.select().from(documentAcknowledgementsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentAcknowledgementsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
-    db.select().from(documentPermissionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentPermissionsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
-    db.select({ documentId: documentDownloadsTable.documentId }).from(documentDownloadsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentDownloadsTable.documentId)).where(eq(businessDocumentsTable.communityId, communityId)),
+  const documentSearch = query ? or(
+    ilike(businessDocumentsTable.title, `%${query}%`),
+    ilike(businessDocumentsTable.description, `%${query}%`),
+    ilike(businessDocumentsTable.category, `%${query}%`),
+    exists(db.select({ id: documentVersionsTable.id }).from(documentVersionsTable)
+      .where(and(
+        eq(documentVersionsTable.documentId, businessDocumentsTable.id),
+        ilike(documentVersionsTable.fileName, `%${query}%`),
+      ))),
+  ) : undefined;
+  const documentVisibility = manager ? undefined : or(
+    eq(businessDocumentsTable.visibility, "company"),
+    and(eq(businessDocumentsTable.visibility, "employee"), eq(businessDocumentsTable.targetUserId, userId)),
+    exists(db.select({ id: documentPermissionsTable.documentId }).from(documentPermissionsTable)
+      .where(and(
+        eq(documentPermissionsTable.documentId, businessDocumentsTable.id),
+        eq(documentPermissionsTable.userId, userId),
+      ))),
+  );
+  const [folders, documents] = await Promise.all([
+    db.select().from(documentFoldersTable).where(eq(documentFoldersTable.communityId, communityId)).orderBy(asc(documentFoldersTable.name), asc(documentFoldersTable.id)).limit(folderPage.limit + 1).offset(folderPage.offset),
+    db.select().from(businessDocumentsTable).where(and(
+      eq(businessDocumentsTable.communityId, communityId),
+      folderId !== null ? eq(businessDocumentsTable.folderId, folderId) : undefined,
+      category ? eq(businessDocumentsTable.category, category) : undefined,
+      documentSearch,
+      documentVisibility,
+    ))
+      .orderBy(desc(businessDocumentsTable.updatedAt), desc(businessDocumentsTable.id))
+      // Fetch one sentinel row so clients can request the next page without a count query.
+      .limit(documentPage.limit + 1).offset(documentPage.offset),
+  ]);
+  const documentIds = documents.slice(0, documentPage.limit).map((document) => document.id);
+  const [versions, acknowledgements, acknowledgementCounts, downloadCounts, permissions] = await Promise.all([
+    documentIds.length ? db.select().from(documentVersionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId)).where(inArray(documentVersionsTable.documentId, documentIds)).orderBy(desc(documentVersionsTable.version)) : Promise.resolve([] as Array<{ irc_document_versions: typeof documentVersionsTable.$inferSelect; irc_business_documents: typeof businessDocumentsTable.$inferSelect }>),
+    documentIds.length ? db.select().from(documentAcknowledgementsTable).where(and(inArray(documentAcknowledgementsTable.documentId, documentIds), eq(documentAcknowledgementsTable.userId, userId))) : Promise.resolve([] as Array<typeof documentAcknowledgementsTable.$inferSelect>),
+    documentIds.length ? db.select({ documentId: documentAcknowledgementsTable.documentId, total: count() }).from(documentAcknowledgementsTable).where(inArray(documentAcknowledgementsTable.documentId, documentIds)).groupBy(documentAcknowledgementsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
+    documentIds.length ? db.select({ documentId: documentDownloadsTable.documentId, total: count() }).from(documentDownloadsTable).where(inArray(documentDownloadsTable.documentId, documentIds)).groupBy(documentDownloadsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
+    documentIds.length ? db.select().from(documentPermissionsTable).where(inArray(documentPermissionsTable.documentId, documentIds)) : Promise.resolve([] as Array<typeof documentPermissionsTable.$inferSelect>),
   ]);
   const permissionsByDocument = new Map<number, Array<{ userId: string; permission: string }>>();
-  permissions.forEach(({ irc_document_permissions: permission }) => {
+  permissions.forEach((permission) => {
     const current = permissionsByDocument.get(permission.documentId) ?? [];
     current.push({ userId: permission.userId, permission: permission.permission });
     permissionsByDocument.set(permission.documentId, current);
   });
-  const visible = documents.filter((document) => {
-    if (folderId !== null && document.folderId !== folderId) return false;
-    const textMatch = !query || `${document.title} ${document.description} ${document.category}`.toLowerCase().includes(query)
-      || versions.some(({ irc_document_versions: version }) => version.documentId === document.id && version.fileName.toLowerCase().includes(query));
-    if (!textMatch) return false;
-    if (manager || document.visibility === "company" || (document.visibility === "employee" && document.targetUserId === userId)) return true;
-    return permissionsByDocument.get(document.id)?.some((permission) => permission.userId === userId) ?? false;
-  });
+  const acknowledgementCountByDocument = new Map(acknowledgementCounts.map((row) => [row.documentId, Number(row.total)]));
+  const downloadCountByDocument = new Map(downloadCounts.map((row) => [row.documentId, Number(row.total)]));
   res.json({
-    folders,
-    documents: visible.map((document) => ({
+    folders: folders.slice(0, folderPage.limit),
+     documents: documents.slice(0, documentPage.limit).map((document) => ({
       ...document,
       versions: versions.filter(({ irc_document_versions: version }) => version.documentId === document.id).map(({ irc_document_versions: version }) => version),
-      acknowledgedAt: acknowledgements.find(({ irc_document_acknowledgements: acknowledgement }) => acknowledgement.documentId === document.id && acknowledgement.userId === userId)?.irc_document_acknowledgements.acknowledgedAt ?? null,
-      acknowledgementCount: acknowledgements.filter(({ irc_document_acknowledgements: acknowledgement }) => acknowledgement.documentId === document.id).length,
-      downloadCount: downloads.filter((download) => download.documentId === document.id).length,
+      acknowledgedAt: acknowledgements.find((acknowledgement) => acknowledgement.documentId === document.id)?.acknowledgedAt ?? null,
+      acknowledgementCount: acknowledgementCountByDocument.get(document.id) ?? 0,
+      downloadCount: downloadCountByDocument.get(document.id) ?? 0,
       permissions: manager ? permissionsByDocument.get(document.id) ?? [] : undefined,
     })),
     canManage: manager,
+     pagination: {
+       limit: documentPage.limit,
+       offset: documentPage.offset,
+       hasMore: documents.length > documentPage.limit,
+     },
+     foldersPagination: { limit: folderPage.limit, offset: folderPage.offset, hasMore: folders.length > folderPage.limit },
   });
 });
 
@@ -3524,10 +3629,15 @@ router.get("/communities/:communityId/moderation-logs", requireAuth, async (req:
     res.status(403).json({ error: "Moderation-log access required." });
     return;
   }
-  res.json(await db.select().from(moderationActionsTable)
+  const moderationPage = pageParam(req, "moderation");
+  const rows = await db.select().from(moderationActionsTable)
     .where(eq(moderationActionsTable.communityId, communityId))
-    .orderBy(desc(moderationActionsTable.createdAt))
-    .limit(100));
+    .orderBy(desc(moderationActionsTable.createdAt), desc(moderationActionsTable.id))
+    .limit(moderationPage.limit + 1).offset(moderationPage.offset);
+  // Retain the existing array contract for both paged and unpaged callers.
+  res.set("X-Has-More", String(rows.length > moderationPage.limit));
+  if (rows.length > moderationPage.limit) res.set("X-Next-Offset", String(moderationPage.offset + moderationPage.limit));
+  res.json(rows.slice(0, moderationPage.limit));
 });
 
 export default router;

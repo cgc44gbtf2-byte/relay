@@ -268,3 +268,393 @@ export const AdvanceOnboardingResponse = zod.object({
 })
 
 
+/**
+ * @summary List the signed-in user's notifications
+ */
+export const listNotificationsQueryLimitDefault = 100;
+export const listNotificationsQueryLimitMax = 100;
+
+export const listNotificationsQueryOffsetDefault = 0;
+export const listNotificationsQueryOffsetMin = 0;
+
+export const listNotificationsQueryArchivedDefault = false;
+
+export const ListNotificationsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listNotificationsQueryLimitMax).default(listNotificationsQueryLimitDefault).describe('Maximum number of records to return. Values above 100 are capped.'),
+  "offset": zod.coerce.number().int().min(listNotificationsQueryOffsetMin).default(listNotificationsQueryOffsetDefault).describe('Number of records to skip.'),
+  "archived": zod.coerce.boolean().default(listNotificationsQueryArchivedDefault)
+})
+
+export const ListNotificationsResponseItem = zod.object({
+  "id": zod.number().int(),
+  "userId": zod.string(),
+  "type": zod.string(),
+  "category": zod.string(),
+  "body": zod.string(),
+  "communityId": zod.number().int().nullish(),
+  "entityType": zod.string().nullish(),
+  "entityId": zod.string().nullish(),
+  "actionUrl": zod.string().nullish(),
+  "readAt": zod.coerce.date().nullish(),
+  "archivedAt": zod.coerce.date().nullish(),
+  "deletedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date()
+})
+export const ListNotificationsResponse = zod.array(ListNotificationsResponseItem)
+
+
+/**
+ * @summary Get workspace data and bounded collection pages
+ */
+export const GetCommunityWorkspaceParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const getCommunityWorkspaceQueryEmployeesLimitDefault = 100;
+export const getCommunityWorkspaceQueryEmployeesLimitMax = 100;
+
+export const getCommunityWorkspaceQueryEmployeesOffsetDefault = 0;
+export const getCommunityWorkspaceQueryEmployeesOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryInvitationsLimitDefault = 100;
+export const getCommunityWorkspaceQueryInvitationsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryInvitationsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryInvitationsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryTasksLimitDefault = 100;
+export const getCommunityWorkspaceQueryTasksLimitMax = 100;
+
+export const getCommunityWorkspaceQueryTasksOffsetDefault = 0;
+export const getCommunityWorkspaceQueryTasksOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryChannelsLimitDefault = 100;
+export const getCommunityWorkspaceQueryChannelsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryChannelsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryChannelsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryCategoriesLimitDefault = 100;
+export const getCommunityWorkspaceQueryCategoriesLimitMax = 100;
+
+export const getCommunityWorkspaceQueryCategoriesOffsetDefault = 0;
+export const getCommunityWorkspaceQueryCategoriesOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryAssignmentsLimitDefault = 100;
+export const getCommunityWorkspaceQueryAssignmentsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryAssignmentsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryAssignmentsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryDepartmentsLimitDefault = 100;
+export const getCommunityWorkspaceQueryDepartmentsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryDepartmentsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryDepartmentsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryLocationsLimitDefault = 100;
+export const getCommunityWorkspaceQueryLocationsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryLocationsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryLocationsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryTeamsLimitDefault = 100;
+export const getCommunityWorkspaceQueryTeamsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryTeamsOffsetDefault = 0;
+export const getCommunityWorkspaceQueryTeamsOffsetMin = 0;
+
+export const getCommunityWorkspaceQueryPoliciesLimitDefault = 100;
+export const getCommunityWorkspaceQueryPoliciesLimitMax = 100;
+
+export const getCommunityWorkspaceQueryPoliciesOffsetDefault = 0;
+export const getCommunityWorkspaceQueryPoliciesOffsetMin = 0;
+
+
+
+export const GetCommunityWorkspaceQueryParams = zod.object({
+  "employeesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryEmployeesLimitMax).default(getCommunityWorkspaceQueryEmployeesLimitDefault),
+  "employeesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryEmployeesOffsetMin).default(getCommunityWorkspaceQueryEmployeesOffsetDefault),
+  "invitationsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryInvitationsLimitMax).default(getCommunityWorkspaceQueryInvitationsLimitDefault),
+  "invitationsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryInvitationsOffsetMin).default(getCommunityWorkspaceQueryInvitationsOffsetDefault),
+  "tasksLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTasksLimitMax).default(getCommunityWorkspaceQueryTasksLimitDefault),
+  "tasksOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTasksOffsetMin).default(getCommunityWorkspaceQueryTasksOffsetDefault),
+  "channelsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryChannelsLimitMax).default(getCommunityWorkspaceQueryChannelsLimitDefault),
+  "channelsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryChannelsOffsetMin).default(getCommunityWorkspaceQueryChannelsOffsetDefault),
+  "categoriesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryCategoriesLimitMax).default(getCommunityWorkspaceQueryCategoriesLimitDefault),
+  "categoriesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryCategoriesOffsetMin).default(getCommunityWorkspaceQueryCategoriesOffsetDefault),
+  "assignmentsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryAssignmentsLimitMax).default(getCommunityWorkspaceQueryAssignmentsLimitDefault),
+  "assignmentsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryAssignmentsOffsetMin).default(getCommunityWorkspaceQueryAssignmentsOffsetDefault),
+  "departmentsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryDepartmentsLimitMax).default(getCommunityWorkspaceQueryDepartmentsLimitDefault),
+  "departmentsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryDepartmentsOffsetMin).default(getCommunityWorkspaceQueryDepartmentsOffsetDefault),
+  "locationsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryLocationsLimitMax).default(getCommunityWorkspaceQueryLocationsLimitDefault),
+  "locationsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryLocationsOffsetMin).default(getCommunityWorkspaceQueryLocationsOffsetDefault),
+  "teamsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamsLimitMax).default(getCommunityWorkspaceQueryTeamsLimitDefault),
+  "teamsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamsOffsetMin).default(getCommunityWorkspaceQueryTeamsOffsetDefault),
+  "policiesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryPoliciesLimitMax).default(getCommunityWorkspaceQueryPoliciesLimitDefault),
+  "policiesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryPoliciesOffsetMin).default(getCommunityWorkspaceQueryPoliciesOffsetDefault)
+})
+
+export const getCommunityWorkspaceResponsePaginationLimitMax = 100;
+
+export const getCommunityWorkspaceResponsePaginationOffsetMin = 0;
+
+
+
+export const GetCommunityWorkspaceResponse = zod.object({
+  "community": zod.object({
+
+}).passthrough(),
+  "members": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "channels": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "categories": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "assignments": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "departments": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "locations": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "teams": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "policies": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "employees": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "invitations": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "tasks": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "pagination": zod.record(zod.string(), zod.object({
+  "limit": zod.number().int().min(1).max(getCommunityWorkspaceResponsePaginationLimitMax),
+  "offset": zod.number().int().min(getCommunityWorkspaceResponsePaginationOffsetMin),
+  "hasMore": zod.boolean()
+}))
+})
+
+
+/**
+ * @summary List recent moderation actions
+ */
+export const ListModerationLogsParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const listModerationLogsQueryLimitDefault = 100;
+export const listModerationLogsQueryLimitMax = 100;
+
+export const listModerationLogsQueryOffsetDefault = 0;
+export const listModerationLogsQueryOffsetMin = 0;
+
+
+
+export const ListModerationLogsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listModerationLogsQueryLimitMax).default(listModerationLogsQueryLimitDefault).describe('Maximum number of records to return. Values above 100 are capped.'),
+  "offset": zod.coerce.number().int().min(listModerationLogsQueryOffsetMin).default(listModerationLogsQueryOffsetDefault).describe('Number of records to skip.')
+})
+
+export const ListModerationLogsResponseItem = zod.object({
+  "id": zod.number().int(),
+  "actorId": zod.string(),
+  "targetUserId": zod.string().nullish(),
+  "communityId": zod.number().int().nullish(),
+  "channelId": zod.number().int().nullish(),
+  "action": zod.string(),
+  "details": zod.string().nullish(),
+  "createdAt": zod.coerce.date()
+})
+export const ListModerationLogsResponse = zod.array(ListModerationLogsResponseItem)
+
+
+/**
+ * @summary List workspace audit activity
+ */
+export const ListCommunityActivityParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const listCommunityActivityQueryAuditLimitDefault = 100;
+export const listCommunityActivityQueryAuditLimitMax = 100;
+
+export const listCommunityActivityQueryAuditOffsetDefault = 0;
+export const listCommunityActivityQueryAuditOffsetMin = 0;
+
+export const listCommunityActivityQueryResourceMax = 120;
+
+
+
+export const ListCommunityActivityQueryParams = zod.object({
+  "auditLimit": zod.coerce.number().int().min(1).max(listCommunityActivityQueryAuditLimitMax).default(listCommunityActivityQueryAuditLimitDefault),
+  "auditOffset": zod.coerce.number().int().min(listCommunityActivityQueryAuditOffsetMin).default(listCommunityActivityQueryAuditOffsetDefault),
+  "userId": zod.coerce.string().optional(),
+  "departmentId": zod.coerce.number().int().optional(),
+  "locationId": zod.coerce.number().int().optional(),
+  "action": zod.coerce.string().optional(),
+  "resource": zod.coerce.string().max(listCommunityActivityQueryResourceMax).optional(),
+  "from": zod.date().optional(),
+  "to": zod.date().optional()
+})
+
+export const listCommunityActivityResponsePaginationLimitMax = 100;
+
+export const listCommunityActivityResponsePaginationOffsetMin = 0;
+
+
+
+export const ListCommunityActivityResponse = zod.object({
+  "entries": zod.array(zod.object({
+  "id": zod.number().int(),
+  "actorId": zod.string().nullish(),
+  "actor": zod.string().optional(),
+  "action": zod.string(),
+  "departmentId": zod.number().int().nullish(),
+  "locationId": zod.number().int().nullish(),
+  "resourceType": zod.string().nullish(),
+  "resourceId": zod.string().nullish(),
+  "targetLabel": zod.string().nullish(),
+  "details": zod.string().nullish(),
+  "createdAt": zod.coerce.date()
+})),
+  "actions": zod.array(zod.string()),
+  "pagination": zod.object({
+  "limit": zod.number().int().min(1).max(listCommunityActivityResponsePaginationLimitMax),
+  "offset": zod.number().int().min(listCommunityActivityResponsePaginationOffsetMin),
+  "hasMore": zod.boolean()
+})
+})
+
+
+/**
+ * @summary List workspace documents and bounded document pages
+ */
+export const ListCommunityDocumentsParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const listCommunityDocumentsQueryDocumentsLimitDefault = 100;
+export const listCommunityDocumentsQueryDocumentsLimitMax = 100;
+
+export const listCommunityDocumentsQueryDocumentsOffsetDefault = 0;
+export const listCommunityDocumentsQueryDocumentsOffsetMin = 0;
+
+export const listCommunityDocumentsQueryFoldersLimitDefault = 100;
+export const listCommunityDocumentsQueryFoldersLimitMax = 100;
+
+export const listCommunityDocumentsQueryFoldersOffsetDefault = 0;
+export const listCommunityDocumentsQueryFoldersOffsetMin = 0;
+
+
+
+export const ListCommunityDocumentsQueryParams = zod.object({
+  "q": zod.coerce.string().optional(),
+  "folderId": zod.coerce.number().int().optional(),
+  "category": zod.coerce.string().optional(),
+  "documentsLimit": zod.coerce.number().int().min(1).max(listCommunityDocumentsQueryDocumentsLimitMax).default(listCommunityDocumentsQueryDocumentsLimitDefault),
+  "documentsOffset": zod.coerce.number().int().min(listCommunityDocumentsQueryDocumentsOffsetMin).default(listCommunityDocumentsQueryDocumentsOffsetDefault),
+  "foldersLimit": zod.coerce.number().int().min(1).max(listCommunityDocumentsQueryFoldersLimitMax).default(listCommunityDocumentsQueryFoldersLimitDefault),
+  "foldersOffset": zod.coerce.number().int().min(listCommunityDocumentsQueryFoldersOffsetMin).default(listCommunityDocumentsQueryFoldersOffsetDefault)
+})
+
+export const listCommunityDocumentsResponsePaginationLimitMax = 100;
+
+export const listCommunityDocumentsResponsePaginationOffsetMin = 0;
+
+export const listCommunityDocumentsResponseFoldersPaginationLimitMax = 100;
+
+export const listCommunityDocumentsResponseFoldersPaginationOffsetMin = 0;
+
+
+
+export const ListCommunityDocumentsResponse = zod.object({
+  "folders": zod.array(zod.object({
+
+}).passthrough()),
+  "documents": zod.array(zod.object({
+
+}).passthrough()),
+  "canManage": zod.boolean(),
+  "pagination": zod.object({
+  "limit": zod.number().int().min(1).max(listCommunityDocumentsResponsePaginationLimitMax),
+  "offset": zod.number().int().min(listCommunityDocumentsResponsePaginationOffsetMin),
+  "hasMore": zod.boolean()
+}),
+  "foldersPagination": zod.object({
+  "limit": zod.number().int().min(1).max(listCommunityDocumentsResponseFoldersPaginationLimitMax),
+  "offset": zod.number().int().min(listCommunityDocumentsResponseFoldersPaginationOffsetMin),
+  "hasMore": zod.boolean()
+}).optional()
+})
+
+
+/**
+ * @summary Get administrative statistics and activity
+ */
+export const getAdminOverviewQueryActivityLimitDefault = 20;
+export const getAdminOverviewQueryActivityLimitMax = 50;
+
+export const getAdminOverviewQueryActivityOffsetDefault = 0;
+export const getAdminOverviewQueryActivityOffsetMin = 0;
+export const getAdminOverviewQueryActivityOffsetMax = 10000;
+
+export const getAdminOverviewQueryActivityCursorMax = 256;
+
+export const getAdminOverviewQueryActivityActorMax = 200;
+
+export const getAdminOverviewQueryActivityActionMax = 200;
+
+
+
+export const GetAdminOverviewQueryParams = zod.object({
+  "activityLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryActivityLimitMax).default(getAdminOverviewQueryActivityLimitDefault),
+  "activityOffset": zod.coerce.number().int().min(getAdminOverviewQueryActivityOffsetMin).max(getAdminOverviewQueryActivityOffsetMax).default(getAdminOverviewQueryActivityOffsetDefault),
+  "activityCursor": zod.coerce.string().max(getAdminOverviewQueryActivityCursorMax).optional(),
+  "activityActor": zod.coerce.string().max(getAdminOverviewQueryActivityActorMax).optional(),
+  "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional()
+})
+
+export const getAdminOverviewResponseActivityPaginationLimitMax = 100;
+
+export const getAdminOverviewResponseActivityPaginationOffsetMin = 0;
+
+
+
+export const GetAdminOverviewResponse = zod.object({
+  "stats": zod.object({
+
+}).passthrough(),
+  "users": zod.array(zod.object({
+
+}).passthrough()),
+  "channels": zod.array(zod.object({
+
+}).passthrough()),
+  "categories": zod.array(zod.object({
+
+}).passthrough()),
+  "recentMessages": zod.array(zod.object({
+
+}).passthrough()),
+  "activity": zod.array(zod.object({
+
+}).passthrough()),
+  "activityPagination": zod.object({
+  "limit": zod.number().int().min(1).max(getAdminOverviewResponseActivityPaginationLimitMax),
+  "offset": zod.number().int().min(getAdminOverviewResponseActivityPaginationOffsetMin),
+  "hasMore": zod.boolean()
+})
+})
+
+

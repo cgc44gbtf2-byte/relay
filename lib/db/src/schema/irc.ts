@@ -256,7 +256,8 @@ export const workspaceInvitationsTable = pgTable("irc_workspace_invitations", {
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
 }, (table) => [
-  index("irc_workspace_invitations_community_created_idx").on(table.communityId, table.createdAt),
+  index("irc_workspace_invitations_community_created_idx").on(table.communityId, table.createdAt, table.id),
+  index("irc_workspace_invitations_community_email_status_idx").on(table.communityId, table.email, table.status),
 ]);
 
 export const workspacePoliciesTable = pgTable("irc_workspace_policies", {
@@ -311,7 +312,10 @@ export const businessDocumentsTable = pgTable("irc_business_documents", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("irc_business_documents_community_updated_idx").on(table.communityId, table.updatedAt),
+  index("irc_business_documents_community_updated_idx").on(table.communityId, table.updatedAt, table.id),
+  index("irc_business_documents_title_trgm_idx").using("gin", sql`${table.title} gin_trgm_ops`),
+  index("irc_business_documents_description_trgm_idx").using("gin", sql`${table.description} gin_trgm_ops`),
+  index("irc_business_documents_category_trgm_idx").using("gin", sql`${table.category} gin_trgm_ops`),
 ]);
 
 export const documentVersionsTable = pgTable("irc_document_versions", {
@@ -327,6 +331,7 @@ export const documentVersionsTable = pgTable("irc_document_versions", {
 }, (table) => [
   uniqueIndex("irc_document_versions_document_version_uidx").on(table.documentId, table.version),
   unique("irc_document_versions_id_document_id_uidx").on(table.id, table.documentId),
+  index("irc_document_versions_filename_trgm_idx").using("gin", sql`${table.fileName} gin_trgm_ops`),
 ]);
 
 export const documentPermissionsTable = pgTable("irc_document_permissions", {
@@ -378,7 +383,7 @@ export const workspaceTasksTable = pgTable("irc_workspace_tasks", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
 }, (table) => [
-  index("irc_workspace_tasks_community_updated_idx").on(table.communityId, table.updatedAt),
+  index("irc_workspace_tasks_community_updated_idx").on(table.communityId, table.updatedAt, table.id),
   index("irc_workspace_tasks_community_status_due_idx").on(table.communityId, table.status, table.dueDate),
   index("irc_workspace_tasks_assignee_status_due_idx").on(table.assignedTo, table.status, table.dueDate),
   foreignKey({
@@ -595,12 +600,17 @@ export const notificationsTable = pgTable("irc_notifications", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_notifications_user_created_idx").on(table.userId, table.createdAt),
-  index("irc_notifications_user_visibility_idx").on(
+  index("irc_notifications_user_entity_idx").on(table.userId, table.type, table.entityType, table.entityId),
+  index("irc_notifications_user_active_page_idx").on(
     table.userId,
-    table.archivedAt,
-    table.deletedAt,
     table.createdAt,
-  ),
+    table.id,
+  ).where(sql`${table.deletedAt} IS NULL AND ${table.archivedAt} IS NULL`),
+  index("irc_notifications_user_archived_page_idx").on(
+    table.userId,
+    table.createdAt,
+    table.id,
+  ).where(sql`${table.deletedAt} IS NULL AND ${table.archivedAt} IS NOT NULL`),
 ]);
 
 export const serverAnnouncementsTable = pgTable("irc_server_announcements", {
@@ -659,7 +669,7 @@ export const moderationActionsTable = pgTable("irc_moderation_actions", {
   details: text("details"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("irc_moderation_actions_community_created_idx").on(table.communityId, table.createdAt),
+  index("irc_moderation_actions_community_created_idx").on(table.communityId, table.createdAt, table.id),
   index("irc_moderation_actions_channel_created_idx").on(table.channelId, table.createdAt),
   index("irc_moderation_actions_actor_created_idx").on(table.actorId, table.createdAt),
 ]);
@@ -680,6 +690,7 @@ export const adminAuditLogsTable = pgTable("irc_admin_audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_admin_audit_logs_community_created_idx").on(table.communityId, table.createdAt, table.id),
+  index("irc_admin_audit_logs_created_idx").on(table.createdAt, table.id),
   index("irc_admin_audit_logs_community_action_created_idx").on(table.communityId, table.action, table.createdAt, table.id),
   index("irc_admin_audit_logs_community_actor_created_idx").on(table.communityId, table.actorId, table.createdAt, table.id),
   index("irc_admin_audit_logs_legacy_target_created_idx").on(table.targetId, table.targetLabel, table.createdAt, table.id),

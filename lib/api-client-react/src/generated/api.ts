@@ -20,16 +20,28 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AdminOverview,
+  CommunityActivityResponse,
+  CommunityWorkspaceResponse,
   CustomRole,
   CustomRoleCatalog,
   CustomRoleInput,
+  DocumentListResponse,
   ErrorResponse,
+  GetAdminOverviewParams,
+  GetCommunityWorkspaceParams,
   GetIrcStateParams,
   HealthStatus,
   IrcJoinInput,
   IrcMessage,
   IrcMessageInput,
   IrcState,
+  ListCommunityActivityParams,
+  ListCommunityDocumentsParams,
+  ListModerationLogsParams,
+  ListNotificationsParams,
+  ModerationAction,
+  Notification,
   OnboardingProgress,
   OnboardingProgressInput,
   OnboardingState,
@@ -982,3 +994,520 @@ export const useAdvanceOnboarding = <TError = ErrorType<ErrorResponse>,
       return useMutation(getAdvanceOnboardingMutationOptions(options));
     }
 
+export const getListNotificationsUrl = (params?: ListNotificationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/notifications?${stringifiedParams}` : `/api/notifications`
+}
+
+/**
+ * @summary List the signed-in user's notifications
+ */
+export const listNotifications = async (params?: ListNotificationsParams, options?: Parameters<typeof customFetch>[1]): Promise<Notification[]> => {
+
+  return customFetch<Notification[]>(getListNotificationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListNotificationsQueryKey = (params?: ListNotificationsParams,) => {
+    return [
+    `/api/notifications`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListNotificationsQueryOptions = <TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<unknown>>(params?: ListNotificationsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListNotificationsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listNotifications>>> = ({ signal }) => listNotifications(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListNotificationsQueryResult = NonNullable<Awaited<ReturnType<typeof listNotifications>>>
+export type ListNotificationsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List the signed-in user's notifications
+ */
+
+export function useListNotifications<TData = Awaited<ReturnType<typeof listNotifications>>, TError = ErrorType<unknown>>(
+ params?: ListNotificationsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listNotifications>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListNotificationsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetCommunityWorkspaceUrl = (communityId: number,
+    params?: GetCommunityWorkspaceParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}?${stringifiedParams}` : `/api/communities/${communityId}`
+}
+
+/**
+ * @summary Get workspace data and bounded collection pages
+ */
+export const getCommunityWorkspace = async (communityId: number,
+    params?: GetCommunityWorkspaceParams, options?: Parameters<typeof customFetch>[1]): Promise<CommunityWorkspaceResponse> => {
+
+  return customFetch<CommunityWorkspaceResponse>(getGetCommunityWorkspaceUrl(communityId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCommunityWorkspaceQueryKey = (communityId: number,
+    params?: GetCommunityWorkspaceParams,) => {
+    return [
+    `/api/communities/${communityId}`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetCommunityWorkspaceQueryOptions = <TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<unknown>>(communityId: number,
+    params?: GetCommunityWorkspaceParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityWorkspace>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCommunityWorkspaceQueryKey(communityId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunityWorkspace>>> = ({ signal }) => getCommunityWorkspace(communityId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCommunityWorkspace>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCommunityWorkspaceQueryResult = NonNullable<Awaited<ReturnType<typeof getCommunityWorkspace>>>
+export type GetCommunityWorkspaceQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get workspace data and bounded collection pages
+ */
+
+export function useGetCommunityWorkspace<TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<unknown>>(
+ communityId: number,
+    params?: GetCommunityWorkspaceParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityWorkspace>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCommunityWorkspaceQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListModerationLogsUrl = (communityId: number,
+    params?: ListModerationLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/moderation-logs?${stringifiedParams}` : `/api/communities/${communityId}/moderation-logs`
+}
+
+/**
+ * @summary List recent moderation actions
+ */
+export const listModerationLogs = async (communityId: number,
+    params?: ListModerationLogsParams, options?: Parameters<typeof customFetch>[1]): Promise<ModerationAction[]> => {
+
+  return customFetch<ModerationAction[]>(getListModerationLogsUrl(communityId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListModerationLogsQueryKey = (communityId: number,
+    params?: ListModerationLogsParams,) => {
+    return [
+    `/api/communities/${communityId}/moderation-logs`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListModerationLogsQueryOptions = <TData = Awaited<ReturnType<typeof listModerationLogs>>, TError = ErrorType<unknown>>(communityId: number,
+    params?: ListModerationLogsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listModerationLogs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListModerationLogsQueryKey(communityId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listModerationLogs>>> = ({ signal }) => listModerationLogs(communityId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listModerationLogs>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListModerationLogsQueryResult = NonNullable<Awaited<ReturnType<typeof listModerationLogs>>>
+export type ListModerationLogsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List recent moderation actions
+ */
+
+export function useListModerationLogs<TData = Awaited<ReturnType<typeof listModerationLogs>>, TError = ErrorType<unknown>>(
+ communityId: number,
+    params?: ListModerationLogsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listModerationLogs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListModerationLogsQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListCommunityActivityUrl = (communityId: number,
+    params?: ListCommunityActivityParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/activity?${stringifiedParams}` : `/api/communities/${communityId}/activity`
+}
+
+/**
+ * @summary List workspace audit activity
+ */
+export const listCommunityActivity = async (communityId: number,
+    params?: ListCommunityActivityParams, options?: Parameters<typeof customFetch>[1]): Promise<CommunityActivityResponse> => {
+
+  return customFetch<CommunityActivityResponse>(getListCommunityActivityUrl(communityId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCommunityActivityQueryKey = (communityId: number,
+    params?: ListCommunityActivityParams,) => {
+    return [
+    `/api/communities/${communityId}/activity`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCommunityActivityQueryOptions = <TData = Awaited<ReturnType<typeof listCommunityActivity>>, TError = ErrorType<unknown>>(communityId: number,
+    params?: ListCommunityActivityParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityActivity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCommunityActivityQueryKey(communityId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCommunityActivity>>> = ({ signal }) => listCommunityActivity(communityId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCommunityActivity>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCommunityActivityQueryResult = NonNullable<Awaited<ReturnType<typeof listCommunityActivity>>>
+export type ListCommunityActivityQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List workspace audit activity
+ */
+
+export function useListCommunityActivity<TData = Awaited<ReturnType<typeof listCommunityActivity>>, TError = ErrorType<unknown>>(
+ communityId: number,
+    params?: ListCommunityActivityParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityActivity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCommunityActivityQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListCommunityDocumentsUrl = (communityId: number,
+    params?: ListCommunityDocumentsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/documents?${stringifiedParams}` : `/api/communities/${communityId}/documents`
+}
+
+/**
+ * @summary List workspace documents and bounded document pages
+ */
+export const listCommunityDocuments = async (communityId: number,
+    params?: ListCommunityDocumentsParams, options?: Parameters<typeof customFetch>[1]): Promise<DocumentListResponse> => {
+
+  return customFetch<DocumentListResponse>(getListCommunityDocumentsUrl(communityId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCommunityDocumentsQueryKey = (communityId: number,
+    params?: ListCommunityDocumentsParams,) => {
+    return [
+    `/api/communities/${communityId}/documents`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCommunityDocumentsQueryOptions = <TData = Awaited<ReturnType<typeof listCommunityDocuments>>, TError = ErrorType<unknown>>(communityId: number,
+    params?: ListCommunityDocumentsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityDocuments>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCommunityDocumentsQueryKey(communityId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCommunityDocuments>>> = ({ signal }) => listCommunityDocuments(communityId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCommunityDocuments>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCommunityDocumentsQueryResult = NonNullable<Awaited<ReturnType<typeof listCommunityDocuments>>>
+export type ListCommunityDocumentsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List workspace documents and bounded document pages
+ */
+
+export function useListCommunityDocuments<TData = Awaited<ReturnType<typeof listCommunityDocuments>>, TError = ErrorType<unknown>>(
+ communityId: number,
+    params?: ListCommunityDocumentsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityDocuments>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCommunityDocumentsQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetAdminOverviewUrl = (params?: GetAdminOverviewParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/admin/overview?${stringifiedParams}` : `/api/admin/overview`
+}
+
+/**
+ * @summary Get administrative statistics and activity
+ */
+export const getAdminOverview = async (params?: GetAdminOverviewParams, options?: Parameters<typeof customFetch>[1]): Promise<AdminOverview> => {
+
+  return customFetch<AdminOverview>(getGetAdminOverviewUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAdminOverviewQueryKey = (params?: GetAdminOverviewParams,) => {
+    return [
+    `/api/admin/overview`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetAdminOverviewQueryOptions = <TData = Awaited<ReturnType<typeof getAdminOverview>>, TError = ErrorType<unknown>>(params?: GetAdminOverviewParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAdminOverview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAdminOverviewQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAdminOverview>>> = ({ signal }) => getAdminOverview(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAdminOverview>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAdminOverviewQueryResult = NonNullable<Awaited<ReturnType<typeof getAdminOverview>>>
+export type GetAdminOverviewQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get administrative statistics and activity
+ */
+
+export function useGetAdminOverview<TData = Awaited<ReturnType<typeof getAdminOverview>>, TError = ErrorType<unknown>>(
+ params?: GetAdminOverviewParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAdminOverview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAdminOverviewQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}

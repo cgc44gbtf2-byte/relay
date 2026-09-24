@@ -27,3 +27,4 @@
 - [Drizzle foreign-key introspection](drizzle-fk-introspection.md) — a successful push may still plan repeated FK rewrites unless paired columns and truncated names are compared correctly.
 - [Audit filter test fixtures](audit-filter-test-fixtures.md) — include automatic workspace audit events and keep integer/text SQL parameters separate.
 - [Deletion race tests](deletion-race-tests.md) — prove access revocation against production routes and worker entry points, not only shared guards.
+- [Orval parameter export collisions](orval-parameter-collisions.md) — path-and-query parameter validators need explicit barrel exports to disambiguate generated type names.

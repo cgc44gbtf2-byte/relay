@@ -236,8 +236,352 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /notifications:
+    get:
+      operationId: listNotifications
+      tags: [notifications]
+      summary: List the signed-in user's notifications
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+        - name: archived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+          headers:
+            X-Has-More:
+              description: Whether another page is available.
+              schema: { type: boolean }
+            X-Next-Offset:
+              description: Offset to use for the next page when X-Has-More is true.
+              schema: { type: integer, minimum: 0 }
+  /communities/{communityId}:
+    get:
+      operationId: getCommunityWorkspace
+      tags: [communities]
+      summary: Get workspace data and bounded collection pages
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: employeesLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: employeesOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: invitationsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: invitationsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: tasksLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: tasksOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: channelsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: channelsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: categoriesLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: categoriesOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: assignmentsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: assignmentsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: departmentsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: departmentsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: locationsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: locationsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: teamsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: teamsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: policiesLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: policiesOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Workspace data
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommunityWorkspaceResponse" }
+  /communities/{communityId}/moderation-logs:
+    get:
+      operationId: listModerationLogs
+      tags: [moderation]
+      summary: List recent moderation actions
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema: { type: integer }
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Moderation actions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ModerationAction" }
+          headers:
+            X-Has-More:
+              description: Whether another page is available.
+              schema: { type: boolean }
+            X-Next-Offset:
+              description: Offset to use for the next page when X-Has-More is true.
+              schema: { type: integer, minimum: 0 }
+  /communities/{communityId}/activity:
+    get:
+      operationId: listCommunityActivity
+      tags: [audit]
+      summary: List workspace audit activity
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: auditLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: auditOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: userId
+          in: query
+          schema: { type: string }
+        - name: departmentId
+          in: query
+          schema: { type: integer }
+        - name: locationId
+          in: query
+          schema: { type: integer }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: resource
+          in: query
+          schema: { type: string, maxLength: 120 }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Workspace audit activity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommunityActivityResponse" }
+  /communities/{communityId}/documents:
+    get:
+      operationId: listCommunityDocuments
+      tags: [documents]
+      summary: List workspace documents and bounded document pages
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: folderId
+          in: query
+          schema: { type: integer }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: documentsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: documentsOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: foldersLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: foldersOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Workspace documents and related metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentListResponse" }
+  /admin/overview:
+    get:
+      operationId: getAdminOverview
+      tags: [admin]
+      summary: Get administrative statistics and activity
+      parameters:
+        - name: activityLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: activityOffset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+        - name: activityCursor
+          in: query
+          schema: { type: string, maxLength: 256 }
+        - name: activityActor
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: activityAction
+          in: query
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: Administrative overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminOverview" }
 components:
+  parameters:
+    PageLimit:
+      name: limit
+      in: query
+      description: Maximum number of records to return. Values above 100 are capped.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+    PageOffset:
+      name: offset
+      in: query
+      description: Number of records to skip.
+      schema: { type: integer, minimum: 0, default: 0 }
   schemas:
+    Notification:
+      type: object
+      required: [id, userId, type, category, body, createdAt]
+      properties:
+        id: { type: integer }
+        userId: { type: string }
+        type: { type: string }
+        category: { type: string }
+        body: { type: string }
+        communityId: { type: integer, nullable: true }
+        entityType: { type: string, nullable: true }
+        entityId: { type: string, nullable: true }
+        actionUrl: { type: string, nullable: true }
+        readAt: { type: string, format: date-time, nullable: true }
+        archivedAt: { type: string, format: date-time, nullable: true }
+        deletedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    ModerationAction:
+      type: object
+      required: [id, actorId, action, createdAt]
+      properties:
+        id: { type: integer }
+        actorId: { type: string }
+        targetUserId: { type: string, nullable: true }
+        communityId: { type: integer, nullable: true }
+        channelId: { type: integer, nullable: true }
+        action: { type: string }
+        details: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    DocumentListResponse:
+      type: object
+      required: [folders, documents, canManage, pagination]
+      properties:
+        folders: { type: array, items: { type: object } }
+        documents: { type: array, items: { type: object } }
+        canManage: { type: boolean }
+        pagination: { $ref: "#/components/schemas/PageInfo" }
+        foldersPagination: { $ref: "#/components/schemas/PageInfo" }
+    CommunityWorkspaceResponse:
+      type: object
+      required: [community, pagination]
+      properties:
+        community: { type: object }
+        members: { type: array, items: { type: object } }
+        channels: { type: array, items: { type: object } }
+        categories: { type: array, items: { type: object } }
+        assignments: { type: array, items: { type: object } }
+        departments: { type: array, items: { type: object } }
+        locations: { type: array, items: { type: object } }
+        teams: { type: array, items: { type: object } }
+        policies: { type: array, items: { type: object } }
+        employees: { type: array, items: { type: object } }
+        invitations: { type: array, items: { type: object } }
+        tasks: { type: array, items: { type: object } }
+        pagination:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/PageInfo" }
+    PageInfo:
+      type: object
+      required: [limit, offset, hasMore]
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+        hasMore: { type: boolean }
+    AdminOverview:
+      type: object
+      required: [stats, users, channels, categories, recentMessages, activity, activityPagination]
+      properties:
+        stats: { type: object }
+        users: { type: array, items: { type: object } }
+        channels: { type: array, items: { type: object } }
+        categories: { type: array, items: { type: object } }
+        recentMessages: { type: array, items: { type: object } }
+        activity: { type: array, items: { type: object } }
+        activityPagination: { $ref: "#/components/schemas/PageInfo" }
+    AuditEntry:
+      type: object
+      required: [id, action, createdAt]
+      properties:
+        id: { type: integer }
+        actorId: { type: string, nullable: true }
+        actor: { type: string }
+        action: { type: string }
+        departmentId: { type: integer, nullable: true }
+        locationId: { type: integer, nullable: true }
+        resourceType: { type: string, nullable: true }
+        resourceId: { type: string, nullable: true }
+        targetLabel: { type: string, nullable: true }
+        details: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    CommunityActivityResponse:
+      type: object
+      required: [entries, actions, pagination]
+      properties:
+        entries: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+        actions: { type: array, items: { type: string } }
+        pagination: { $ref: "#/components/schemas/PageInfo" }
     CustomRoleInput:
       type: object
       required: [label, description, scopeType, permissions]

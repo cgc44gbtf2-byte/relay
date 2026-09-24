@@ -194,9 +194,7 @@ async function pagedApi<T>(path: string): Promise<T[]> {
   let offset = 0;
   for (let page = 0; page < 1_000; page += 1) {
     const { data, response } = await apiResponse<T[]>(
-      page === 0
-        ? path
-        : `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
+      page === 0 ? path : `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
     );
     results.push(...data);
     if (response.headers.get("X-Has-More") !== "true") return results;
@@ -205,6 +203,14 @@ async function pagedApi<T>(path: string): Promise<T[]> {
     offset = nextOffset;
   }
   return results;
+}
+
+async function notificationPage<T>(path: string): Promise<{ data: T[]; hasMore: boolean; nextOffset: number | null }> {
+  const { data, response } = await apiResponse<T[]>(path);
+  const hasMore = response.headers.get("X-Has-More") === "true";
+  const value = response.headers.get("X-Next-Offset");
+  const nextOffset = value === null ? null : Number(value);
+  return { data, hasMore, nextOffset: nextOffset !== null && Number.isSafeInteger(nextOffset) ? nextOffset : null };
 }
 
 function isRecoverableChannelError(error: unknown): boolean {
@@ -642,7 +648,7 @@ function ChatApp() {
       api<Profile>("/me"),
       api<Channel[]>("/channels"),
       api<Category[]>("/categories"),
-      api<Notification[]>("/notifications"),
+      api<Notification[]>("/notifications?limit=100&offset=0"),
     ]).then(([meResult, channelsResult, categoriesResult, notificationsResult]) => {
       if (cancelled) return;
       if (meResult.status === "rejected" || channelsResult.status === "rejected") {
@@ -682,7 +688,7 @@ function ChatApp() {
            if (data.type === "notifications_read_all" && data.notificationIds) setNotifications((items) => items.map((item) => data.notificationIds!.includes(item.id) ? { ...item, readAt: data.readAt ?? new Date().toISOString() } : item));
            if (data.type === "notification_archived" || data.type === "notification_deleted") setNotifications((items) => items.filter((item) => item.id !== data.notificationId));
            if (data.type === "notifications_cleared" && data.notificationIds) setNotifications((items) => items.filter((item) => !data.notificationIds!.includes(item.id)));
-           if (data.type === "notification_restored") void api<Notification[]>("/notifications").then(setNotifications).catch(() => undefined);
+           if (data.type === "notification_restored") void api<Notification[]>("/notifications?limit=100&offset=0").then(setNotifications).catch(() => undefined);
            if (["notification_archived", "notification_deleted", "notification_restored", "notifications_cleared"].includes(data.type)) setNotificationRevision((value) => value + 1);
           if (data.type === "dm" && socketRoomIsCurrent() && data.message && socketDmId && (data.message.sender?.id === socketDmId || data.message.recipientId === socketDmId)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
@@ -1345,7 +1351,7 @@ function ChatApp() {
         </form>
       </Overlay>}
 
-      {panel === "notifications" && <NotificationCenter notifications={notifications} setNotifications={setNotifications} request={api} revision={notificationRevision} onClose={() => setPanel(null)} onNavigate={(url) => { setPanel(null); setLocation(url); }} onOpenMessage={openNotificationMessage} />}
+      {panel === "notifications" && <NotificationCenter notifications={notifications} setNotifications={setNotifications} request={api} requestPage={notificationPage} revision={notificationRevision} onClose={() => setPanel(null)} onNavigate={(url) => { setPanel(null); setLocation(url); }} onOpenMessage={openNotificationMessage} />}
        {organizeChannelOpen && currentChannel && <Overlay title={`Organize ${currentChannel.name}`} onClose={() => { if (!organizeWorking) setOrganizeChannelOpen(false); }}><form onSubmit={moveCurrentChannel} className="space-y-4"><p className="text-xs text-muted-foreground">Move this channel to a category without affecting its members or messages.</p><label className="block font-mono text-xs">category<select value={organizeCategoryId} onChange={(event) => setOrganizeCategoryId(event.target.value)} className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3"><option value="">uncategorized</option>{categories.filter((category) => category.communityId === currentChannel.communityId).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{organizeError && <p role="alert" className="text-xs text-destructive">{organizeError}</p>}<div className="flex justify-end gap-2"><button type="button" disabled={organizeWorking} onClick={() => setOrganizeChannelOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button><button disabled={organizeWorking || organizeCategoryId === (currentChannel.categoryId === null ? "" : String(currentChannel.categoryId))} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{organizeWorking ? "moving…" : "save category"}</button></div></form></Overlay>}
          {panel === "profile" && <Overlay title="Your profile" onClose={() => { setProfileError(""); setPanel(null); }}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{profileError && <p role="alert" className="font-mono text-[10px] leading-4 text-destructive">{profileError}</p>}<button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a><a href={`${basePath}/community-upgrades`} data-testid="link-community-upgrades" className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10">request public community</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
@@ -2295,6 +2301,7 @@ type CommunityDetail = {
   canManage: boolean;
   canManageOrganization: boolean;
   isOwner: boolean;
+  pagination?: { employees: { hasMore: boolean }; invitations: { hasMore: boolean }; tasks: { hasMore: boolean }; channels: { hasMore: boolean; offset: number; limit: number }; categories: { hasMore: boolean }; assignments: { hasMore: boolean }; departments: { hasMore: boolean }; locations: { hasMore: boolean }; teams: { hasMore: boolean }; policies: { hasMore: boolean } };
 };
 type OwnerConfirmation = {
   kind: "remove-member" | "delete-account" | "delete-channel" | "delete-workspace";
@@ -2406,7 +2413,7 @@ type BusinessActivityEntry = {
   details: string | null;
   createdAt: string;
 };
-type BusinessActivityPayload = { entries: BusinessActivityEntry[]; actions: string[] };
+type BusinessActivityPayload = { entries: BusinessActivityEntry[]; actions: string[]; pagination?: { limit: number; offset: number; hasMore: boolean } };
 
 function BusinessDashboard({ detail, setError }: { detail: CommunityDetail; setError: (value: string) => void }) {
   const [dashboard, setDashboard] = useState<BusinessDashboardPayload | null>(null);
@@ -2479,6 +2486,7 @@ function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; se
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [loading, setLoading] = useState(true);
+  const [auditOffset, setAuditOffset] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -2490,16 +2498,21 @@ function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; se
     if (resource.trim()) query.set("resource", resource.trim());
     if (from) query.set("from", from);
     if (to) query.set("to", to);
+     query.set("auditLimit", "100");
+     query.set("auditOffset", String(auditOffset));
     setLoading(true);
     api<BusinessActivityPayload>(`/communities/${detail.community.id}/activity${query.size ? `?${query.toString()}` : ""}`).then((next) => {
-      if (!cancelled) setPayload(next);
+       if (!cancelled) setPayload((current) => auditOffset ? { ...next, entries: [...current.entries, ...next.entries] } : next);
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load business activity");
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [detail.community.id, userId, locationId, departmentId, action, resource, from, to, setError]);
+  }, [detail.community.id, userId, locationId, departmentId, action, resource, from, to, auditOffset, setError]);
+  useEffect(() => {
+    setAuditOffset(0);
+  }, [userId, locationId, departmentId, action, resource, from, to]);
 
   const resetFilters = () => {
     setUserId("");
@@ -2509,6 +2522,7 @@ function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; se
     setResource("");
     setFrom("");
     setTo("");
+     setAuditOffset(0);
   };
 
   return <section className="space-y-4">
@@ -2537,7 +2551,8 @@ function BusinessAuditCenter({ detail, setError }: { detail: CommunityDetail; se
         </div>;
       })}</div>}
     </section>
-  </section>;
+     {payload.pagination?.hasMore && <button type="button" disabled={loading} onClick={() => setAuditOffset((value) => value + 100)} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary disabled:opacity-50">load older activity</button>}
+   </section>;
 }
 
 type BusinessDocument = {
@@ -2557,7 +2572,7 @@ type BusinessDocument = {
   versions: Array<{ id: number; version: number; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
   permissions?: Array<{ userId: string; permission: string }>;
 };
-type DocumentsPayload = { folders: Array<{ id: number; parentId: number | null; name: string }>; documents: BusinessDocument[]; canManage: boolean };
+type DocumentsPayload = { folders: Array<{ id: number; parentId: number | null; name: string }>; documents: BusinessDocument[]; canManage: boolean; pagination?: { limit: number; offset: number; hasMore: boolean }; foldersPagination?: { limit: number; offset: number; hasMore: boolean } };
 
 export function DocumentCenter({ detail, working, setWorking, setNotice, setError }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void }) {
   const [payload, setPayload] = useState<DocumentsPayload>({ folders: [], documents: [], canManage: detail.canManage });
@@ -2579,12 +2594,14 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
   const [permissionUserId, setPermissionUserId] = useState("");
   const [permissionRole, setPermissionRole] = useState("viewer");
   const documentRequestRef = useRef(0);
-  const loadDocuments = async (signal?: AbortSignal) => {
+  const loadDocuments = async (signal?: AbortSignal, append = false) => {
     const requestId = ++documentRequestRef.current;
     try {
-      const next = await api<DocumentsPayload>(`/communities/${detail.community.id}/documents?q=${encodeURIComponent(query)}${folderId ? `&folderId=${folderId}` : ""}`, { signal });
+       const offset = append ? payload.documents.length : 0;
+       const folderOffset = append ? payload.folders.length : 0;
+       const next = await api<DocumentsPayload>(`/communities/${detail.community.id}/documents?limit=100&offset=${offset}&foldersLimit=100&foldersOffset=${folderOffset}&q=${encodeURIComponent(query)}${folderId ? `&folderId=${folderId}` : ""}${category !== "all" ? `&category=${encodeURIComponent(category)}` : ""}`, { signal });
       if (requestId === documentRequestRef.current) {
-        setPayload(next);
+         setPayload(append ? { ...next, folders: [...payload.folders, ...next.folders], documents: [...payload.documents, ...next.documents] } : next);
         setDocumentLoadError("");
       }
     } catch (reason) {
@@ -2601,7 +2618,7 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [detail.community.id, query, folderId]);
+  }, [detail.community.id, query, folderId, category]);
   const createFolder = async (event: FormEvent) => {
     event.preventDefault();
     setWorking(true);
@@ -2660,7 +2677,8 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
     <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">knowledge base</p><h2 className="mt-2 font-mono text-xl font-bold">Business documents</h2><p className="mt-1 text-sm text-muted-foreground">Keep policies, procedures, training, forms, and employee records organized.</p></div><span className="font-mono text-[10px] text-muted-foreground">{payload.documents.length} document{payload.documents.length === 1 ? "" : "s"}</span></div>
     <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-card p-4"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search documents…" className="h-9 min-w-[220px] flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><select value={folderId} onChange={(event) => setFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">All folders</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={category} onChange={(event) => setCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="all">All categories</option><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select>{payload.canManage && <button onClick={() => setShowCreate((value) => !value)} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">{showCreate ? "close editor" : "add document"}</button>}</div>
     {payload.canManage && showCreate && <div className="grid gap-5 xl:grid-cols-2"><form onSubmit={uploadDocument} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">upload document</h3><div className="mt-4 grid gap-3"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Document title" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" className="min-h-20 rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><div className="grid gap-3 sm:grid-cols-2"><select value={documentCategory} onChange={(event) => setDocumentCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select><select value={documentFolderId} onChange={(event) => setDocumentFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No folder</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={visibility} onChange={(event) => setVisibility(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="company">Everyone in workspace</option><option value="managers">Managers only</option><option value="employee">One employee</option><option value="private">Explicit permissions</option></select>{visibility === "employee" && <select required value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select>}</div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={requiresAcknowledgement} onChange={(event) => setRequiresAcknowledgement(event.target.checked)} /> require acknowledgment</label><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} aria-label="Document expiration" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><input required type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="h-9 rounded border border-input bg-background px-2 py-1.5 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">upload document</button></div></form><form onSubmit={createFolder} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">organize folders</h3><p className="mt-1 text-xs text-muted-foreground">Create folders for recurring operating materials.</p><div className="mt-4 flex gap-2"><input required value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="Folder name" className="h-9 min-w-0 flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create</button></div><div className="mt-5 space-y-2">{payload.folders.map((folder) => <button type="button" key={folder.id} onClick={() => setFolderId(String(folder.id))} className={`block w-full rounded border px-3 py-2 text-left font-mono text-xs ${folderId === String(folder.id) ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>/ {folder.name}</button>)}</div></form></div>}
-     <div className="grid gap-4 md:grid-cols-2">{documentLoadError ? <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/10 p-8 font-mono text-xs text-destructive md:col-span-2">{documentLoadError}</div> : <>{visibleDocuments.map((document) => { const latest = document.versions[0]; const expired = document.expiresAt ? new Date(document.expiresAt) <= new Date() : false; return <article key={document.id} className="rounded-xl border border-border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-[9px] uppercase tracking-[.15em] text-primary">{document.category} · {document.visibility}</p><h3 className="mt-2 truncate font-mono text-sm font-bold">{document.title}</h3><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{document.description || "No description provided."}</p></div><span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${expired ? "bg-destructive/10 text-destructive" : "bg-chart-4/10 text-chart-4"}`}>{expired ? "expired" : "current"}</span></div><div className="mt-4 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>v{latest?.version ?? 0}</span><span>{document.versions.length} version{document.versions.length === 1 ? "" : "s"}</span><span>{document.downloadCount} download{document.downloadCount === 1 ? "" : "s"}</span>{document.requiresAcknowledgement && <span>{document.acknowledgementCount} acknowledged</span>}</div>{latest && <a href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${latest.id}`} target="_blank" rel="noreferrer" className="mt-4 block truncate rounded border border-border px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{latest.fileName}</a>}{payload.canManage && <label className="mt-3 block font-mono text-[10px] text-muted-foreground">upload new version<input type="file" onChange={(event) => { const nextFile = event.target.files?.[0]; if (nextFile) void uploadVersion(document.id, nextFile); }} className="mt-1 block h-8 w-full rounded border border-input bg-background px-2 py-1 font-mono text-[9px]" /></label>}{document.requiresAcknowledgement && !document.acknowledgedAt && !expired && <button disabled={working} onClick={() => void acknowledge(document.id)} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge document</button>}<div className="mt-3 space-y-1">{document.versions.slice(1).map((version) => <a key={version.id} href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${version.id}`} target="_blank" rel="noreferrer" className="block truncate font-mono text-[10px] text-muted-foreground hover:text-primary">v{version.version} · {version.fileName}</a>)}</div>{payload.canManage && <div className="mt-4 border-t border-border pt-3"><p className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">grant explicit access</p><div className="mt-2 flex gap-2"><select value={permissionUserId} onChange={(event) => setPermissionUserId(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="">employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><select value={permissionRole} onChange={(event) => setPermissionRole(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="viewer">viewer</option><option value="editor">editor</option><option value="acknowledger">acknowledger</option></select><button type="button" disabled={working || !permissionUserId} onClick={() => void grantPermission(document.id)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">grant</button></div></div>}</article>; })}{visibleDocuments.length === 0 && <div className="rounded-xl border border-dashed border-border p-8 font-mono text-xs text-muted-foreground md:col-span-2">No documents match this search.</div>}</>}</div>
+      <div className="grid gap-4 md:grid-cols-2">{documentLoadError ? <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/10 p-8 font-mono text-xs text-destructive md:col-span-2">{documentLoadError}</div> : <>{visibleDocuments.map((document) => { const latest = document.versions[0]; const expired = document.expiresAt ? new Date(document.expiresAt) <= new Date() : false; return <article key={document.id} className="rounded-xl border border-border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-[9px] uppercase tracking-[.15em] text-primary">{document.category} · {document.visibility}</p><h3 className="mt-2 truncate font-mono text-sm font-bold">{document.title}</h3><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{document.description || "No description provided."}</p></div><span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${expired ? "bg-destructive/10 text-destructive" : "bg-chart-4/10 text-chart-4"}`}>{expired ? "expired" : "current"}</span></div><div className="mt-4 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>v{latest?.version ?? 0}</span><span>{document.versions.length} version{document.versions.length === 1 ? "" : "s"}</span><span>{document.downloadCount} download{document.downloadCount === 1 ? "" : "s"}</span>{document.requiresAcknowledgement && <span>{document.acknowledgementCount} acknowledged</span>}</div>{latest && <a href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${latest.id}`} target="_blank" rel="noreferrer" className="mt-4 block truncate rounded border border-border px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{latest.fileName}</a>}{payload.canManage && <label className="mt-3 block font-mono text-[10px] text-muted-foreground">upload new version<input type="file" onChange={(event) => { const nextFile = event.target.files?.[0]; if (nextFile) void uploadVersion(document.id, nextFile); }} className="mt-1 block h-8 w-full rounded border border-input bg-background px-2 py-1 font-mono text-[9px]" /></label>}{document.requiresAcknowledgement && !document.acknowledgedAt && !expired && <button disabled={working} onClick={() => void acknowledge(document.id)} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge document</button>}<div className="mt-3 space-y-1">{document.versions.slice(1).map((version) => <a key={version.id} href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${version.id}`} target="_blank" rel="noreferrer" className="block truncate font-mono text-[10px] text-muted-foreground hover:text-primary">v{version.version} · {version.fileName}</a>)}</div>{payload.canManage && <div className="mt-4 border-t border-border pt-3"><p className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">grant explicit access</p><div className="mt-2 flex gap-2"><select value={permissionUserId} onChange={(event) => setPermissionUserId(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="">employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><select value={permissionRole} onChange={(event) => setPermissionRole(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="viewer">viewer</option><option value="editor">editor</option><option value="acknowledger">acknowledger</option></select><button type="button" disabled={working || !permissionUserId} onClick={() => void grantPermission(document.id)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">grant</button></div></div>}</article>; })}{visibleDocuments.length === 0 && <div className="rounded-xl border border-dashed border-border p-8 font-mono text-xs text-muted-foreground md:col-span-2">No documents match this search.</div>}</>}</div>
+      {(payload.pagination?.hasMore || payload.foldersPagination?.hasMore) && <button type="button" onClick={() => void loadDocuments(undefined, true)} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary">{payload.pagination?.hasMore ? "load older documents" : "load older folders"}</button>}
     {documentLoadError && <button type="button" onClick={() => setDocumentLoadError("")} className="sr-only" aria-label="Dismiss error">Dismiss document error</button>}
   </section>;
 }
@@ -3757,6 +3775,8 @@ function CommunityConsole() {
   const [newWorkspaceChannelPrivate, setNewWorkspaceChannelPrivate] = useState(false);
   const [ownerConfirmation, setOwnerConfirmation] = useState<OwnerConfirmation | null>(null);
   const [ownerActionError, setOwnerActionError] = useState("");
+  const [loadingMoreDetail, setLoadingMoreDetail] = useState(false);
+  const [loadMoreDetailError, setLoadMoreDetailError] = useState("");
 
   const loadCommunities = async () => {
     const [nextPermissions, nextCommunities, me] = await Promise.all([
@@ -3776,7 +3796,9 @@ function CommunityConsole() {
     });
   };
   const loadDetail = async (id: number) => {
-    const next = await api<CommunityDetail>(`/communities/${id}?view=summary`);
+    const next = await api<CommunityDetail>(`/communities/${id}?view=summary&employeesLimit=100&employeesOffset=0&invitationsLimit=100&invitationsOffset=0&tasksLimit=100&tasksOffset=0&channelsLimit=100&channelsOffset=0&categoriesLimit=100&categoriesOffset=0&assignmentsLimit=100&assignmentsOffset=0&departmentsLimit=100&departmentsOffset=0&locationsLimit=100&locationsOffset=0&teamsLimit=100&teamsOffset=0&policiesLimit=100&policiesOffset=0`);
+    // The legacy detail shape remains unchanged, while large workspaces are
+    // reassembled explicitly here so existing panels still see every record.
     setDetail(next);
     setSettings({
       name: next.community.name,
@@ -3788,6 +3810,39 @@ function CommunityConsole() {
       contactEmail: next.community.contactEmail,
       contactPhone: next.community.contactPhone,
     });
+  };
+  const loadMoreDetail = async () => {
+    if (!detail) return;
+    if (loadingMoreDetail) return;
+    const id = detail.community.id;
+    const employeeOffset = detail.employees.length;
+    const invitationOffset = detail.invitations.length;
+    const taskOffset = detail.tasks.length;
+    setLoadingMoreDetail(true);
+    setLoadMoreDetailError("");
+    try {
+      const page = await api<CommunityDetail>(`/communities/${id}?view=summary&employeesLimit=${detail.pagination?.employees?.hasMore ? 100 : 1}&employeesOffset=${employeeOffset}&invitationsLimit=${detail.pagination?.invitations?.hasMore ? 100 : 1}&invitationsOffset=${invitationOffset}&tasksLimit=${detail.pagination?.tasks?.hasMore ? 100 : 1}&tasksOffset=${taskOffset}&channelsLimit=${detail.pagination?.channels?.hasMore ? 100 : 1}&channelsOffset=${detail.pagination?.channels ? detail.pagination.channels.offset + detail.pagination.channels.limit : detail.channels.length}&categoriesLimit=${detail.pagination?.categories?.hasMore ? 100 : 1}&categoriesOffset=${detail.categories.length}&assignmentsLimit=${detail.pagination?.assignments?.hasMore ? 100 : 1}&assignmentsOffset=${detail.assignments.length}&departmentsLimit=${detail.pagination?.departments?.hasMore ? 100 : 1}&departmentsOffset=${detail.departments.length}&locationsLimit=${detail.pagination?.locations?.hasMore ? 100 : 1}&locationsOffset=${detail.locations.length}&teamsLimit=${detail.pagination?.teams?.hasMore ? 100 : 1}&teamsOffset=${detail.teams.length}&policiesLimit=${detail.pagination?.policies?.hasMore ? 100 : 1}&policiesOffset=${detail.policies.length}`);
+      if (selectedId !== id) return;
+      setDetail((current) => current && current.community.id === id ? {
+        ...current,
+        members: [...current.members, ...(current.pagination?.employees?.hasMore ? page.members : [])],
+        employees: [...current.employees, ...(current.pagination?.employees?.hasMore ? page.employees : [])],
+        invitations: [...current.invitations, ...(current.pagination?.invitations?.hasMore ? page.invitations : [])],
+        tasks: [...current.tasks, ...(current.pagination?.tasks?.hasMore ? page.tasks : [])],
+        channels: [...current.channels, ...(current.pagination?.channels?.hasMore ? page.channels : [])],
+        categories: [...current.categories, ...(current.pagination?.categories?.hasMore ? page.categories : [])],
+        assignments: [...current.assignments, ...(current.pagination?.assignments?.hasMore ? page.assignments : [])],
+        departments: [...current.departments, ...(current.pagination?.departments?.hasMore ? page.departments : [])],
+        locations: [...current.locations, ...(current.pagination?.locations?.hasMore ? page.locations : [])],
+        teams: [...current.teams, ...(current.pagination?.teams?.hasMore ? page.teams : [])],
+        policies: [...current.policies, ...(current.pagination?.policies?.hasMore ? page.policies : [])],
+        pagination: page.pagination,
+      } : current);
+    } catch (reason) {
+      if (selectedId === id) setLoadMoreDetailError(reason instanceof Error ? reason.message : "Could not load more workspace records");
+    } finally {
+      setLoadingMoreDetail(false);
+    }
   };
   useEffect(() => {
     loadCommunities().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load communities")).finally(() => setLoading(false));
@@ -4059,6 +4114,7 @@ function CommunityConsole() {
               {detail.isOwner && <><TestAccountsPanel detail={detail} setError={setError} setNotice={setNotice} /><section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">This permanently deletes every channel, member relationship, and business record in this workspace. This cannot be undone.</p></div><button type="button" disabled={working} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-workspace", label: detail.community.name, phrase: detail.community.name }); }} className="rounded border border-destructive/40 px-3 py-2 font-mono text-[10px] font-bold text-destructive">delete workspace</button></div></section></>}
               {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
               {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
+             {detail.pagination && Object.values(detail.pagination).some((page) => page.hasMore) && <section className="rounded-xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><p className="font-mono text-[10px] text-muted-foreground">More workspace records are available.</p><button type="button" disabled={loadingMoreDetail} onClick={() => void loadMoreDetail()} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary disabled:opacity-50">{loadingMoreDetail ? "loading…" : "load more workspace records"}</button></div>{loadMoreDetailError && <p role="alert" className="mt-2 font-mono text-[10px] text-destructive">{loadMoreDetailError}</p>}</section>}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
              <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} initialTaskId={selectedId === requestedCommunityId ? requestedTaskId : null} />
