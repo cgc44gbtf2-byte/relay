@@ -2528,6 +2528,108 @@ describe("admin access controls", () => {
     assert.deepEqual(adminResponses[1].body, { error: "Invalid channel." });
   });
 
+  test("keeps malformed invite and join-request decisions at their legacy 400 responses", async () => {
+    const ownerSession = await createTestSession("malformed_action_owner");
+    const requesterSession = await createTestSession("malformed_action_requester");
+    const channelIds: number[] = [];
+
+    try {
+      const profile = await apiRequest(requesterSession, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+      assert.ok(profile.body && typeof profile.body === "object");
+      const username = (profile.body as { username?: unknown }).username;
+      assert.equal(typeof username, "string");
+
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `malformed-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const joinRequest = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(joinRequest.status, 202, JSON.stringify(joinRequest));
+      assert.deepEqual(joinRequest.body, { ok: true, status: "pending" });
+
+      const channelRecords = async () => {
+        const [members, invites, requests] = await Promise.all([
+          pool.query(
+            "SELECT * FROM irc_channel_members WHERE channel_id = $1 ORDER BY user_id",
+            [channelId],
+          ),
+          pool.query(
+            "SELECT * FROM irc_channel_invites WHERE channel_id = $1 ORDER BY user_id",
+            [channelId],
+          ),
+          pool.query(
+            "SELECT * FROM irc_channel_join_requests WHERE channel_id = $1 ORDER BY id",
+            [channelId],
+          ),
+        ]);
+        return {
+          members: members.rows,
+          invites: invites.rows,
+          requests: requests.rows,
+        };
+      };
+      const before = await channelRecords();
+      assert.deepEqual(
+        before.members.map((member) => ({ userId: member.user_id, role: member.role })),
+        [{ userId: ownerSession.userId, role: "owner" }],
+      );
+      assert.deepEqual(before.invites, []);
+      assert.equal(before.requests.length, 1);
+      const request = before.requests[0] as { id: number; status: string };
+      assert.equal(request.status, "pending");
+
+      const malformedInvite = await apiRequest(
+        ownerSession,
+        "/channels/not-a-channel/invites",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username }),
+        },
+      );
+      assert.equal(malformedInvite.status, 400, JSON.stringify(malformedInvite));
+      assert.deepEqual(malformedInvite.body, {
+        error: "A channel and username are required.",
+      });
+
+      const malformedDecision = await apiRequest(
+        ownerSession,
+        `/channels/not-a-channel/join-requests/${request.id}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(malformedDecision.status, 400, JSON.stringify(malformedDecision));
+      assert.deepEqual(malformedDecision.body, {
+        error: "Invalid join-request decision.",
+      });
+
+      assert.deepEqual(await channelRecords(), before);
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        requesterSession.userId,
+      ]);
+    }
+  });
+
   test("a non-admin cannot read the overview or update roles", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);
