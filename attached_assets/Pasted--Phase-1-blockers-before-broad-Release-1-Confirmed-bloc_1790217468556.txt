@@ -1,0 +1,50 @@
+## Phase 1 blockers before broad Release 1
+
+### Confirmed blockers
+
+1. **Full API suite is not green**
+   - Two Clerk test cases create invalid test identities.
+   - One malformed-channel test expects an outdated error message.
+
+2. **PostgreSQL 14/15/16 CI execution is still pending**
+   - The matrix configuration is present.
+   - Local PostgreSQL 16 runner tests pass: 20 passed, 0 skipped.
+   - Actual GitHub Actions runs for PostgreSQL 14, 15, and 16 still need to complete successfully.
+
+3. **Deployment migration gating remains open**
+   - The deployed API must not start until migrations succeed.
+   - This is the pending task: “Start the deployed API only after migrations succeed.”
+
+4. **License compliance is not cleared**
+   - Four installed Replit packages still have unresolved license evidence.
+   - `pnpm run audit:licenses` is not green.
+   - A third-party notice bundle is not yet tracked.
+
+### Audit-level release blockers still requiring closure or explicit acceptance
+
+5. **Complete tenant-isolation proof**
+   - Every nested resource must validate its full workspace/parent chain.
+   - Broad reads followed by in-memory authorization filtering must be eliminated or formally accepted.
+   - Negative cross-workspace read and mutation tests must cover all sensitive ID paths.
+
+6. **Restrict credentialed CORS**
+   - Credentialed requests must be limited to trusted origins.
+
+7. **Complete release CI gates**
+   - Root/frontend build and test validation must be part of the release gate.
+   - The compatibility matrix and authenticated API suite must both be required checks.
+
+8. **Add remaining scale safeguards**
+   - Missing indexes on high-growth and reverse/unread/due-date lookups.
+   - Bounded pagination on every large-list path.
+   - Abuse controls for joins, invites, search, and uploads.
+
+9. **Define retention and archival behavior**
+   - Append-only messages, notifications, audit records, and related datasets need an explicit retention/archive policy.
+
+10. **Prove realtime and deployment behavior under production conditions**
+    - Multi-socket presence and ticket cleanup.
+    - Deployment migration/rollback rehearsal.
+    - Observability, SLOs, and load testing.
+
+Several individual authorization, audit, pagination, notification, cleanup, and private-room issues have already been addressed. The remaining gap is proving the complete release gate is green, not adding more product features.
