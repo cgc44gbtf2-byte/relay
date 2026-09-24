@@ -1850,7 +1850,7 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
-  test("preserves audit history and actor snapshot after the actor account is deleted", async () => {
+  test("preserves audit history, actor ID, and actor snapshot after account cleanup", async () => {
     const actorId = `audit_actor_${randomUUID()}`;
     const username = `audit_actor_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const displayName = "Former Audit Actor";
@@ -1880,13 +1880,33 @@ describe("admin access controls", () => {
         [auditId],
       );
       assert.deepEqual(preserved.rows, [{
-        actor_id: null,
+        actor_id: actorId,
         actor_display_name: displayName,
         action: "audit_actor_deleted",
         target_id: "preserved-target",
         target_label: "Preserved target",
         details: "Preserved details",
       }]);
+
+      const overview = await apiRequest(
+        adminSession,
+        "/admin/overview?activityAction=audit_actor_deleted",
+      );
+      assert.equal(overview.status, 200, JSON.stringify(overview));
+      const activity = (overview.body as {
+        activity?: Array<{
+          actorId: string | null;
+          actor: string | null;
+          action: string;
+          targetLabel: string | null;
+        }>;
+      }).activity;
+      assert.deepEqual(activity?.find((entry) => entry.action === "audit_actor_deleted"), {
+        actorId,
+        actor: displayName,
+        action: "audit_actor_deleted",
+        targetLabel: "Preserved target",
+      });
     } finally {
       if (auditId !== undefined) {
         await pool.query("DELETE FROM irc_admin_audit_logs WHERE id = $1", [auditId]);
