@@ -984,11 +984,49 @@ router.post("/channels/:channelId/invites", requireAuth, async (req: Authenticat
     res.status(404).json({ error: "User not found." });
     return;
   }
-  await db.insert(channelInvitesTable).values({ channelId: channel.id, userId: target.clerkId, invitedBy: userId }).onConflictDoUpdate({
-    target: [channelInvitesTable.channelId, channelInvitesTable.userId],
-    set: { invitedBy: userId, createdAt: new Date() },
+  const invitation = await db.transaction(async (tx) => {
+    const [lockedChannel] = await tx.select().from(channelsTable)
+      .where(eq(channelsTable.id, channel.id)).for("update");
+    if (!lockedChannel) return { outcome: "not_found" } as const;
+    const [actor] = await tx.select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, userId)))
+      .for("update");
+    const authorized = (actor && ["owner", "moderator"].includes(actor.role))
+      || await hasPermission(userId, "manage_channel", { channelId: channel.id }, tx, true)
+      || await hasPermission(userId, "moderate_channel", { channelId: channel.id }, tx, true);
+    if (!authorized) {
+      return { outcome: "forbidden" } as const;
+    }
+    await tx.insert(channelInvitesTable).values({ channelId: channel.id, userId: target.clerkId, invitedBy: userId }).onConflictDoUpdate({
+      target: [channelInvitesTable.channelId, channelInvitesTable.userId],
+      set: { invitedBy: userId, createdAt: new Date() },
+    });
+    const [notification] = await tx.insert(notificationsTable).values({
+      userId: target.clerkId,
+      type: "channel_invite",
+      category: "join_request",
+      body: `You were invited to ${lockedChannel.name}.`,
+      entityType: "channel",
+      entityId: String(channel.id),
+    }).returning();
+    return { outcome: "created", notification } as const;
   });
-  await createNotification({ userId: target.clerkId, type: "channel_invite", category: "join_request", body: `You were invited to ${channel.name}.`, entityType: "channel", entityId: channel.id });
+  if (invitation.outcome === "not_found") {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (invitation.outcome === "forbidden") {
+    res.status(403).json({ error: "Only channel operators can invite users." });
+    return;
+  }
+  wsHub.broadcastUser(invitation.notification.userId, {
+    type: "notification",
+    notification: {
+      ...invitation.notification,
+      category: categoryForNotification(invitation.notification.type, invitation.notification.category),
+    },
+  });
   res.status(201).json({ ok: true });
 });
 

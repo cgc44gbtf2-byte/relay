@@ -8410,6 +8410,99 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rejects channel invites after moderator revocation and while revocation races", async () => {
+    const owner = await createTestSession("invite_race_owner");
+    const moderator = await createTestSession("invite_race_mod");
+    const target = await createTestSession("invite_race_target");
+    const channelIds: number[] = [];
+    const revocation = await pool.connect();
+    const broadcasts: unknown[] = [];
+    const broadcast = mock.method(wsHub, "broadcastUser", (...args: unknown[]) => {
+      broadcasts.push(args);
+    });
+    try {
+      await apiRequest(moderator, "/me");
+      const profile = await apiRequest(target, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+      const created = await apiRequest(owner, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `invite-race-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      const channelId = (created.body as { id: number }).id;
+      channelIds.push(channelId);
+      const invite = (session = moderator) => apiRequest(session, `/channels/${channelId}/invites`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: (profile.body as { username: string }).username }),
+      });
+      const grant = () => pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')
+         ON CONFLICT (channel_id, user_id) DO UPDATE SET role = 'moderator'`,
+        [channelId, moderator.userId],
+      );
+      const assertDenied = (response: ApiResponse) => {
+        assert.equal(response.status, 403, JSON.stringify(response));
+        assert.deepEqual(response.body, { error: "Only channel operators can invite users." });
+      };
+      for (const revoke of [
+        `DELETE FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2`,
+        `UPDATE irc_channel_members SET role = 'member' WHERE channel_id = $1 AND user_id = $2`,
+      ]) {
+        await grant();
+        await pool.query(revoke, [channelId, moderator.userId]);
+        assertDenied(await invite());
+        await grant();
+        await revocation.query("BEGIN");
+        await revocation.query(revoke, [channelId, moderator.userId]);
+        const pendingInvite = invite();
+        try {
+          let blocked = false;
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const waiting = await revocation.query(
+              `SELECT 1 FROM pg_stat_activity
+               WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+                 AND query ILIKE '%irc_channel_members%'`,
+            );
+            if (waiting.rowCount) { blocked = true; break; }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.equal(blocked, true, "invite must wait for the actor's membership lock");
+        } finally {
+          await revocation.query("COMMIT");
+          assertDenied(await pendingInvite);
+        }
+      }
+      const saved = await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM irc_channel_invites WHERE channel_id = $1) AS invites,
+           (SELECT count(*)::int FROM irc_notifications
+            WHERE user_id = $2 AND type = 'channel_invite' AND entity_id = $3) AS notifications`,
+        [channelId, target.userId, String(channelId)],
+      );
+      assert.deepEqual(saved.rows, [{ invites: 0, notifications: 0 }]);
+      assert.equal(broadcasts.length, 0);
+      await grant();
+      assert.equal((await invite()).status, 201);
+      const successful = await pool.query(
+        `SELECT invited_by FROM irc_channel_invites WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, target.userId],
+      );
+      assert.deepEqual(successful.rows, [{ invited_by: moderator.userId }]);
+      assert.equal(broadcasts.length, 1);
+    } finally {
+      broadcast.mock.restore();
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
+      await removeTestChannels(channelIds, [owner.userId, moderator.userId, target.userId]);
+    }
+  });
+
   test("removes pending private-room requests when the room is deleted", async () => {
     const ownerSession = await createTestSession("request_cleanup_owner");
     const requesterSession = await createTestSession("request_cleanup_requester");
