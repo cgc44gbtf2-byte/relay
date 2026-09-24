@@ -1269,6 +1269,75 @@ describe("admin access controls", () => {
     assert.deepEqual(unchanged.rows, [{ username: originalUsername }]);
   });
 
+  test("returns one stable conflict when users concurrently claim the same username", async () => {
+    const contenders = [firstSession, secondSession];
+    const profiles = await Promise.all(
+      contenders.map((session) => apiRequest(session, "/me")),
+    );
+    for (const profile of profiles) {
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+    }
+
+    const originalProfiles = new Map<string, unknown[]>();
+    for (const session of contenders) {
+      const profile = await pool.query(
+        "SELECT * FROM irc_users WHERE clerk_id = $1",
+        [session.userId],
+      );
+      assert.equal(
+        profile.rowCount,
+        1,
+        `Expected a profile for ${session.userId}`,
+      );
+      originalProfiles.set(session.userId, profile.rows);
+    }
+
+    const claimedUsername = `claim_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const updates = contenders.map((session, index) => ({
+      session,
+      displayName: `Username contender ${index + 1}`,
+    }));
+    const responses = await Promise.all(
+      updates.map(({ session, displayName }) =>
+        apiRequest(session, "/me", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: claimedUsername, displayName }),
+        }),
+      ),
+    );
+
+    const successfulIndexes = responses.flatMap((response, index) =>
+      response.status === 200 ? [index] : [],
+    );
+    const conflictingIndexes = responses.flatMap((response, index) =>
+      response.status === 409 ? [index] : [],
+    );
+    assert.equal(successfulIndexes.length, 1, JSON.stringify(responses));
+    assert.equal(conflictingIndexes.length, 1, JSON.stringify(responses));
+    assert.deepEqual(responses[conflictingIndexes[0]].body, {
+      error: "That username is already taken.",
+      code: "USERNAME_TAKEN",
+    });
+
+    const winnerIndex = successfulIndexes[0];
+    assert.ok(
+      responses[winnerIndex].body &&
+        typeof responses[winnerIndex].body === "object",
+    );
+    assert.equal(
+      (responses[winnerIndex].body as { username?: unknown }).username,
+      claimedUsername,
+    );
+
+    const loser = contenders[conflictingIndexes[0]];
+    const unchangedProfile = await pool.query(
+      "SELECT * FROM irc_users WHERE clerk_id = $1",
+      [loser.userId],
+    );
+    assert.deepEqual(unchangedProfile.rows, originalProfiles.get(loser.userId));
+  });
+
   test("does not create duplicate chat identities during concurrent session refreshes", async () => {
     const session = await createTestSession("profile_bootstrap_race");
     const responses = await Promise.all(
