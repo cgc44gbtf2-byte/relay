@@ -3056,12 +3056,57 @@ describe("admin access controls", () => {
     const displayName = "Former Moderator";
     let auditId: number | undefined;
     let moderationId: number | undefined;
+    let communityId: number | undefined;
+    let channelId: number | undefined;
     try {
       await pool.query(
         `INSERT INTO irc_users (clerk_id, username, display_name)
          VALUES ($1, $2, $3)`,
         [actorId, username, displayName],
       );
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ('Former Moderator History', $1, $2, 'free_community', false)
+         RETURNING id`,
+        [`former-moderator-history-${randomUUID()}`, adminSession.userId],
+      );
+      communityId = community.rows[0]?.id;
+      assert.ok(communityId);
+
+      const createdChannel = await apiRequest(adminSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `#former-mod-${randomUUID().replaceAll("-", "").slice(0, 8)}`,
+          communityId,
+        }),
+      });
+      assert.equal(createdChannel.status, 201, JSON.stringify(createdChannel));
+      channelId = (createdChannel.body as { id: number }).id;
+      const updatedChannel = await apiRequest(adminSession, `/channels/${channelId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Snapshot actor name" }),
+      });
+      assert.equal(updatedChannel.status, 200, JSON.stringify(updatedChannel));
+      const writtenActor = await pool.query<{
+        actor_id: string;
+        actor_display_name: string | null;
+      }>(
+        `SELECT actor_id, actor_display_name
+         FROM irc_moderation_actions
+         WHERE channel_id = $1 AND action = 'updated_channel'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [channelId],
+      );
+      assert.equal(writtenActor.rows[0]?.actor_id, adminSession.userId);
+      const adminProfile = await pool.query<{ display_name: string }>(
+        "SELECT display_name FROM irc_users WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+      assert.equal(writtenActor.rows[0]?.actor_display_name, adminProfile.rows[0]?.display_name);
+
       const inserted = await pool.query<{ id: number; created_at: Date }>(
         `INSERT INTO irc_admin_audit_logs
            (actor_id, actor_display_name, action, target_id, target_label, details)
@@ -3072,11 +3117,12 @@ describe("admin access controls", () => {
       auditId = inserted.rows[0]?.id;
       assert.ok(auditId);
 
-      const insertedModeration = await pool.query<{ id: number }>(
-        `INSERT INTO irc_moderation_actions (actor_id, action, details)
-         VALUES ($1, 'moderation_actor_deleted', 'Preserved moderation details')
-         RETURNING id`,
-        [actorId],
+      const insertedModeration = await pool.query<{ id: number; created_at: Date }>(
+        `INSERT INTO irc_moderation_actions
+           (actor_id, actor_display_name, community_id, action, details)
+         VALUES ($1, $2, $3, 'moderation_actor_deleted', 'Preserved moderation details')
+         RETURNING id, created_at`,
+        [actorId, displayName, communityId],
       );
       moderationId = insertedModeration.rows[0]?.id;
       assert.ok(moderationId);
@@ -3099,16 +3145,40 @@ describe("admin access controls", () => {
       }]);
 
       const preservedModeration = await pool.query(
-        `SELECT actor_id, action, details
+        `SELECT actor_id, actor_display_name, action, details
          FROM irc_moderation_actions
          WHERE id = $1`,
         [moderationId],
       );
       assert.deepEqual(preservedModeration.rows, [{
         actor_id: actorId,
+        actor_display_name: displayName,
         action: "moderation_actor_deleted",
         details: "Preserved moderation details",
       }]);
+
+      const moderationHistory = await apiRequest(
+        adminSession,
+        `/communities/${communityId}/moderation-logs`,
+      );
+      assert.equal(moderationHistory.status, 200, JSON.stringify(moderationHistory));
+      const moderationEntry = (moderationHistory.body as Array<{
+        id: number;
+        actorId: string;
+        actorDisplayName: string | null;
+        createdAt: string;
+      }>).find((entry) => entry.id === moderationId);
+      assert.deepEqual(moderationEntry, {
+        id: moderationId,
+        actorId,
+        actorDisplayName: displayName,
+        targetUserId: null,
+        communityId,
+        channelId: null,
+        action: "moderation_actor_deleted",
+        details: "Preserved moderation details",
+        createdAt: insertedModeration.rows[0]?.created_at.toISOString(),
+      });
 
       const overview = await apiRequest(
         adminSession,
@@ -3139,6 +3209,12 @@ describe("admin access controls", () => {
       }
       if (moderationId !== undefined) {
         await pool.query("DELETE FROM irc_moderation_actions WHERE id = $1", [moderationId]);
+      }
+      if (communityId !== undefined) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+      if (channelId !== undefined) {
+        await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
       }
       await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
     }

@@ -9,6 +9,7 @@
 export interface ModerationAction {
   id: number;
   actorId: string;
+  actorDisplayName: string | null;
   targetUserId?: string | null;
   communityId?: number | null;
   channelId?: number | null;

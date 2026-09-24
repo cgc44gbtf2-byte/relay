@@ -852,10 +852,11 @@ components:
         createdAt: { type: string, format: date-time }
     ModerationAction:
       type: object
-      required: [id, actorId, action, createdAt]
+      required: [id, actorId, actorDisplayName, action, createdAt]
       properties:
         id: { type: integer }
         actorId: { type: string }
+        actorDisplayName: { type: string, nullable: true }
         targetUserId: { type: string, nullable: true }
         communityId: { type: integer, nullable: true }
         channelId: { type: integer, nullable: true }

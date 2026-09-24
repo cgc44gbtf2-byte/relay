@@ -109,6 +109,15 @@ function listPage(req: AuthenticatedRequest): { limit: number; offset: number } 
   };
 }
 
+async function moderationActorDisplayName(actorId: string): Promise<string> {
+  const [actor] = await db.select({ displayName: usersTable.displayName })
+    .from(usersTable)
+    .where(eq(usersTable.clerkId, actorId))
+    .limit(1);
+  if (!actor) throw new Error("Authenticated moderation actor profile was not found.");
+  return actor.displayName;
+}
+
 function validatedListPage(req: AuthenticatedRequest, res: Response): { limit: number; offset: number } | null {
   const page = parseCollectionPage(req.query, MAX_LIST_PAGE_SIZE);
   if (!page) {
@@ -1331,11 +1340,17 @@ router.patch("/channels/:channelId/public-space", requireAuth, async (req: Authe
       || !(await isPublicCommunityAvailable(destination)) || destination.status !== "active") {
       return { outcome: "invalid_destination" } as const;
     }
+    const [actor] = await tx.select({ displayName: usersTable.displayName })
+      .from(usersTable)
+      .where(eq(usersTable.clerkId, userId))
+      .limit(1);
+    if (!actor) throw new Error("Authenticated moderation actor profile was not found.");
     const [updated] = await tx.update(channelsTable)
       .set({ communityId: destinationId, categoryId: null })
       .where(eq(channelsTable.id, channelId)).returning();
     await tx.insert(moderationActionsTable).values({
       actorId: userId,
+      actorDisplayName: actor.displayName,
       communityId: destinationId,
       channelId,
       action: "moved_public_channel",
@@ -1404,6 +1419,11 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
         .from(categoriesTable).where(eq(categoriesTable.id, categoryId)).for("share");
       if (!category || category.communityId !== channel.communityId) return { outcome: "wrong_workspace" } as const;
     }
+    const [actor] = await tx.select({ displayName: usersTable.displayName })
+      .from(usersTable)
+      .where(eq(usersTable.clerkId, userId))
+      .limit(1);
+    if (!actor) throw new Error("Authenticated moderation actor profile was not found.");
     const [updated] = await tx.update(channelsTable).set({
       ...(topic === undefined ? {} : { topic }),
       ...(description === undefined ? {} : { description }),
@@ -1413,6 +1433,7 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     }).where(eq(channelsTable.id, channelId)).returning();
     await tx.insert(moderationActionsTable).values({
       actorId: userId,
+      actorDisplayName: actor.displayName,
       communityId: channel.communityId,
       channelId,
       action: "updated_channel",
@@ -1684,6 +1705,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }
+  const actorDisplayName = await moderationActorDisplayName(userId);
   if (
     action !== "moderator"
     && action !== "kick"
@@ -1825,6 +1847,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
       }
       await tx.insert(moderationActionsTable).values({
         actorId: userId,
+        actorDisplayName,
         targetUserId,
         communityId: channel.communityId,
         channelId: lockedChannel.id,
@@ -1855,6 +1878,7 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   if (action !== "kick" && action !== "ban") {
     await db.insert(moderationActionsTable).values({
       actorId: userId,
+      actorDisplayName,
       targetUserId,
       communityId: channel.communityId,
       channelId: channel.id,

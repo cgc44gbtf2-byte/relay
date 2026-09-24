@@ -535,6 +535,7 @@ export const ListModerationLogsQueryParams = zod.object({
 export const ListModerationLogsResponseItem = zod.object({
   "id": zod.number().int(),
   "actorId": zod.string(),
+  "actorDisplayName": zod.string().nullable(),
   "targetUserId": zod.string().nullish(),
   "communityId": zod.number().int().nullish(),
   "channelId": zod.number().int().nullish(),

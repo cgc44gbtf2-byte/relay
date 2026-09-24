@@ -3728,7 +3728,17 @@ router.get("/communities/:communityId/moderation-logs", requireAuth, async (req:
     return;
   }
   const moderationPage = pageParam(req, "moderation");
-  const rows = await db.select().from(moderationActionsTable)
+  const rows = await db.select({
+    id: moderationActionsTable.id,
+    actorId: moderationActionsTable.actorId,
+    actorDisplayName: moderationActionsTable.actorDisplayName,
+    targetUserId: moderationActionsTable.targetUserId,
+    communityId: moderationActionsTable.communityId,
+    channelId: moderationActionsTable.channelId,
+    action: moderationActionsTable.action,
+    details: moderationActionsTable.details,
+    createdAt: moderationActionsTable.createdAt,
+  }).from(moderationActionsTable)
     .where(eq(moderationActionsTable.communityId, communityId))
     .orderBy(desc(moderationActionsTable.createdAt), desc(moderationActionsTable.id))
     .limit(moderationPage.limit + 1).offset(moderationPage.offset);
