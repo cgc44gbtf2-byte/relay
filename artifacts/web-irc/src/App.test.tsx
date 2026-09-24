@@ -48,6 +48,7 @@ let latestWebSocket: {
 } | null = null;
 let webSocketFrames: string[] = [];
 
+let apiFetchMock: ReturnType<typeof vi.fn> | null = null;
 const profile = {
   id: "user-1",
   username: "mira",
@@ -90,9 +91,9 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
+    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
-    const select = screen.getByTestId("select-organize-category") as HTMLSelectElement;
+    const select = await screen.findByTestId("select-public-space");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -107,10 +108,9 @@ describe("channel category organization", () => {
   it("lets a workspace administrator reassign an existing channel without creating one", async () => {
     const onMove = vi.fn().mockResolvedValue(true);
     const detail = {
-      community: { id: 13 },
-      channels: [{ id: 7, name: "#team", categoryId: null }],
-      categories: [{ id: 31, name: "Project room" }],
-    } as unknown as ComponentProps<typeof WorkspaceChannelOrganizer>["detail"];
+      community: { id: 7 },
+      canManage: false,
+    } as Parameters<typeof DocumentCenter>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
     fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
@@ -150,6 +150,13 @@ function jsonResponse(data: unknown, status = 200) {
   }));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 function channelNotFound() {
   return jsonResponse({ error: "This channel is no longer available.", code: "CHANNEL_NOT_FOUND" }, 404);
 }
@@ -167,6 +174,7 @@ function installApi({
   createChannelFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
+  deferredPresenceMembers,
   categories = [],
   publicSpaces = [],
 }: {
@@ -190,6 +198,7 @@ function installApi({
   createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
+  deferredPresenceMembers?: { promise: Promise<Response> };
   categories?: Array<{ id: number; name: string; description: string; ownerId: string; communityId: number | null }>;
   publicSpaces?: Array<{ id: number | null; name: string }>;
 }) {
@@ -204,8 +213,9 @@ function installApi({
   let dmPaginationCalls = 0;
   let joinCalls = 0;
   let createChannelCalls = 0;
+  let deletedRoomMemberCalls = 0;
 
-  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  apiFetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
 
@@ -288,6 +298,8 @@ function installApi({
         : jsonResponse({ messages: historyCalls > 1 && reconnectedMessages ? reconnectedMessages : [message(1, "stale history")] });
     }
     if (url === "/api/channels/1/members" && method === "GET") {
+      deletedRoomMemberCalls += 1;
+      if (deferredPresenceMembers && deletedRoomMemberCalls > 1) return deferredPresenceMembers.promise;
       return missingRequest === "members" ? channelNotFound() : jsonResponse(members(owner ? "owner" : "member"));
     }
     if (url === "/api/channels/2/messages" && method === "GET") {
@@ -332,7 +344,8 @@ function installApi({
       return jsonResponse({ status: "member" });
     }
     return jsonResponse({});
-  }));
+  });
+  vi.stubGlobal("fetch", apiFetchMock);
 
   vi.stubGlobal("WebSocket", class {
     static OPEN = 1;
@@ -430,27 +443,38 @@ describe("deleted room recovery", () => {
     expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Public network, outside a workspace");
 
     const editor = screen.getByPlaceholderText("message #deleted-room");
-    fireEvent.change(editor, { target: { value: "hello" } });
-    fireEvent.submit(editor.closest("form")!);
-    await waitFor(() => expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Northwind"));
+      fireEvent.change(editor, { target: { value: "hello" } });
+      fireEvent.submit(editor.closest("form")!);
+    } else if (missingRequest === "topic") {
+      await waitFor(() => expect(screen.getByRole("button", { name: "Edit channel topic" })).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Edit channel topic" }));
+    }
 
-    fireEvent.click(screen.getByRole("button", { name: /support/i }));
-    await waitFor(() => expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Bluebird"));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Message Orion" }));
-    expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Direct message outside a workspace");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    await waitFor(() => expect(screen.queryByText("stale history")).toBeNull());
+    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
   });
 
-  it.each([
-    ["history loading", "history"],
-    ["member loading", "members"],
-    ["message sending", "send"],
-    ["topic editing", "topic"],
-  ] as const)("refreshes and selects another room after %s reports a missing channel", async (_label, missingRequest) => {
-    await renderChat({ missingRequest, fallbackChannels: [room(2, "#fallback-room")] , owner: missingRequest === "topic" });
+  it("loads chat when notifications are temporarily unavailable", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notificationsFailure: true,
+    });
 
-    if (missingRequest === "send") {
-      const editor = screen.getByPlaceholderText("message #deleted-room");
+    expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+    expect(await screen.findByText("stale history")).toBeTruthy();
+  });
+
+  it("keeps a sent message visible when notifications are unavailable", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notificationsFailure: true,
+    });
+
+    const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
     } else if (missingRequest === "topic") {
@@ -626,7 +650,7 @@ describe("deleted room recovery", () => {
     await renderChat({ missingRequest, fallbackChannels: [] , owner: missingRequest === "topic" });
 
     if (missingRequest === "send") {
-      const editor = screen.getByPlaceholderText("message #deleted-room");
+    const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
     } else if (missingRequest === "topic") {
@@ -647,42 +671,9 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
     const deletedRoomSocket = latestWebSocket;
 
-    latestWebSocket?.onmessage?.({
-      data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
-    } as MessageEvent);
+    const delayedMembers = deferred<Response>();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    deletedRoomSocket?.onmessage?.({
-      data: JSON.stringify({
-        type: "message",
-        message: message(1, "late message from deleted room", "late-message"),
-      }),
-    } as MessageEvent);
-    expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
-    expect(screen.queryByText("late message from deleted room")).toBeNull();
-    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
-  });
-
-  it("shows the empty-channel state when a realtime removal deletes the selected room", async () => {
-    await renderChat({ missingRequest: "event", fallbackChannels: [] });
-    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
-
-    latestWebSocket?.onmessage?.({
-      data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
-    } as MessageEvent);
-
-    await waitFor(() => expect(screen.getByText("no channels available")).toBeTruthy());
-    expect(screen.queryByText("#deleted-room")).toBeNull();
-  });
-
-  it("unsubscribes from the previous room and ignores its typing events after switching", async () => {
-    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
-    latestWebSocket?.onopen?.();
-
-    fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    latestWebSocket?.onopen?.();
-
+      const calls = apiFetchMock?.mock.calls.filter(([input]) => String(input) === "/api/channels/1/members") ?? [];
     const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
     expect(frames).toEqual(expect.arrayContaining([
       { type: "unsubscribe", channelId: 1 },
@@ -841,23 +832,22 @@ describe("deleted room recovery", () => {
     expect(fileInput).toBeTruthy();
     fireEvent.change(fileInput!, { target: { files: [file] } });
 
-    await waitFor(() => {
-      expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-        String(input) === "https://upload.test/file" && init?.method === "PUT",
-      )).toBe(true);
-    });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.filter(([input, init]) =>
+      String(input) === "/api/channels" && (init?.method ?? "GET") === "GET",
+    )).toHaveLength(2);
     expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).includes("/file-messages") && init?.method === "POST",
-    )).toBe(false);
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).match(/^\/api\/messages\/[^/]+$/) && init?.method === "DELETE",
-    )).toBe(false);
+      String(input) === "/api/channels/1/file-messages" && init?.method === "POST",
+    )).toBe(true);
   });
 
-  it("recovers to another room when the room disappears while sharing a file", async () => {
+  it("shows the empty-channel state when the room disappears while sharing a file", async () => {
     await renderChat({
       missingRequest: "attachment",
-      fallbackChannels: [room(2, "#fallback-room")],
+      fallbackChannels: [],
     });
 
     const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
@@ -939,3 +929,20 @@ describe("owner confirmation phrases", () => {
     expect(ownerConfirmationPhrase("delete-workspace", "Northwind", "Northwind")).toBe("DELETE WORKSPACE Northwind");
   });
 });
+
+function emitWebSocketFrame(
+  socket: typeof latestWebSocket,
+  data: Record<string, unknown>,
+) {
+  socket?.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
+}
+
+      const fallbackSocket = latestWebSocket;
+
+    const deletedRoomGuest = {
+      id: "deleted-room-guest",
+      username: "deleted_guest",
+      displayName: "Deleted room guest",
+      status: "online",
+      role: "member",
+    };

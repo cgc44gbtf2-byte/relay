@@ -357,6 +357,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const changedMessagesRef = useRef(new Map<string, { version: number; message: ChatMessage }>());
   const roomKey = activeDm ? `dm:${activeDm.id}` : channelId ? `channel:${channelId}` : "none";
   const roomKeyRef = useRef(roomKey);
+  roomKeyRef.current = roomKey;
   onMissingChannelRef.current = onMissingChannel;
   messagesRef.current = messages;
 
@@ -413,11 +414,11 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
         setHasOlder(Boolean(activeDm && data.messages.length === 100));
       }
     } catch (error) {
-      if (refreshId !== messageRefreshRef.current) return;
+      if (refreshId !== messageRefreshRef.current || roomKeyRef.current !== refreshRoomKey) return;
       setMessages([]);
       if (channelId && !activeDm && isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
     } finally {
-      if (showLoading && refreshId === messageRefreshRef.current) setLoading(false);
+      if (showLoading && refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) setLoading(false);
     }
   }, [activeDm, channelId, roomKey]);
 
@@ -445,7 +446,6 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   }, [activeDm, hasOlder, loadingOlder, messages, roomKey, updateMessages]);
 
   useEffect(() => {
-    roomKeyRef.current = roomKey;
     messageVersionRef.current = 0;
     changedMessagesRef.current.clear();
     messagesRef.current = [];
@@ -461,10 +461,11 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     void refreshMessages(true);
     let cancelled = false;
     if (channelId && !activeDm) {
+      const membersRoomKey = roomKey;
       pagedApi<Member>(`/channels/${channelId}/members`).then((data) => {
-        if (!cancelled) setMembers(data);
+        if (!cancelled && roomKeyRef.current === membersRoomKey) setMembers(data);
       }).catch((error) => {
-        if (cancelled) return;
+        if (cancelled || roomKeyRef.current !== membersRoomKey) return;
         setMembers([]);
         if (isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
       });
@@ -643,6 +644,11 @@ function ChatApp() {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
+    const socketChannelId = currentChannelId;
+    const socketDmId = activeDm?.id ?? null;
+    const socketRoomIsCurrent = () =>
+      currentChannelIdRef.current === socketChannelId
+      && activeDmIdRef.current === socketDmId;
     const connect = async () => {
       try {
         const { ticket } = await api<{ ticket: string }>("/ws-ticket");
@@ -674,7 +680,7 @@ function ChatApp() {
         try {
            if (cancelled) return;
            const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; notificationIds?: number[]; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
-            if (data.type === "message" && data.message?.channelId === currentChannelIdRef.current && !activeDmIdRef.current) room.setMessages((items) => upsertBoundedMessage(items, data.message!, 100));
+            if (data.type === "message" && socketRoomIsCurrent() && data.message?.channelId === socketChannelId && !socketDmId) room.setMessages((items) => upsertBoundedMessage(items, data.message!, 100));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
            if (data.type === "notifications_read_all" && data.notificationIds) setNotifications((items) => items.map((item) => data.notificationIds!.includes(item.id) ? { ...item, readAt: data.readAt ?? new Date().toISOString() } : item));
@@ -682,7 +688,7 @@ function ChatApp() {
            if (data.type === "notifications_cleared" && data.notificationIds) setNotifications((items) => items.filter((item) => !data.notificationIds!.includes(item.id)));
            if (data.type === "notification_restored") void api<Notification[]>("/notifications").then(setNotifications).catch(() => undefined);
            if (["notification_archived", "notification_deleted", "notification_restored", "notifications_cleared"].includes(data.type)) setNotificationRevision((value) => value + 1);
-          if (data.type === "dm" && data.message && activeDm && (data.message.sender?.id === activeDm.id || data.message.recipientId === activeDm.id)) room.setMessages((items) => upsertMessage(items, data.message!));
+          if (data.type === "dm" && socketRoomIsCurrent() && data.message && socketDmId && (data.message.sender?.id === socketDmId || data.message.recipientId === socketDmId)) room.setMessages((items) => upsertMessage(items, data.message!));
           if (data.type === "channel" && data.channel) setChannels((items) => items.map((item) => item.id === data.channel!.id ? { ...item, ...data.channel } : item));
            if (data.type === "channel_list_changed") void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
@@ -703,18 +709,25 @@ function ChatApp() {
                return next;
              }), 1900);
            }
-           if (data.type === "message_deleted" && data.messageId) {
+            if (data.type === "message_deleted" && socketRoomIsCurrent() && data.messageId) {
              room.setMessages((items) => items.map((item) => item.id === data.messageId ? { ...item, body: "[message deleted]", kind: "deleted", deletedAt: new Date().toISOString() } : item));
            }
-           if (data.type === "reaction" && data.messageId && data.reactions) {
+            if (data.type === "reaction" && socketRoomIsCurrent() && data.messageId && data.reactions) {
              room.setMessages((items) => items.map((item) => item.id === data.messageId ? { ...item, reactions: data.reactions } : item));
            }
            if (
              data.type === "presence"
+              && socketRoomIsCurrent()
              && data.channelId === currentChannelIdRef.current
+              && data.channelId === socketChannelId
              && !activeDmIdRef.current
            ) {
-             pagedApi<Member>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
+              const presenceChannelId = data.channelId;
+              pagedApi<Member>(`/channels/${presenceChannelId}/members`).then((members) => {
+                if (socketRoomIsCurrent() && currentChannelIdRef.current === presenceChannelId && !activeDmIdRef.current) {
+                  room.setMembers(members);
+                }
+              }).catch(() => undefined);
              const presenceUser = data.user?.displayName ?? "Someone";
              const presenceId = data.eventId
                ?? `${data.channelId}-${data.user?.id ?? data.userId ?? "unknown"}-${data.action ?? "changed"}`;
