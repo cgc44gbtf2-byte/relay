@@ -54,6 +54,23 @@ const channelJoinLimiter = new FixedWindowLimiter(20, 60_000);
 const channelInviteLimiter = new FixedWindowLimiter(30, 60_000);
 const userSearchLimiter = new FixedWindowLimiter(60, 60_000);
 const messageSearchLimiter = new FixedWindowLimiter(60, 60_000);
+const MAX_LIST_PAGE_SIZE = 100;
+
+function listPage(req: AuthenticatedRequest): { limit: number; offset: number } {
+  const requestedLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : MAX_LIST_PAGE_SIZE;
+  const requestedOffset = typeof req.query.offset === "string" ? Number(req.query.offset) : 0;
+  return {
+    limit: Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, MAX_LIST_PAGE_SIZE)
+      : MAX_LIST_PAGE_SIZE,
+    offset: Number.isSafeInteger(requestedOffset) && requestedOffset >= 0 ? requestedOffset : 0,
+  };
+}
+
+function setListPageHeaders(res: Response, hasMore: boolean, nextOffset: number): void {
+  res.set("X-Has-More", String(hasMore));
+  if (hasMore) res.set("X-Next-Offset", String(nextOffset));
+}
 
 function enforceRateLimit(
   req: AuthenticatedRequest,
@@ -717,6 +734,7 @@ router.get("/channels/:channelId/join-requests", requireAuth, async (req: Authen
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
   }
+  const page = listPage(req);
   const rows = await db
     .select({
       id: channelJoinRequestsTable.id,
@@ -727,7 +745,12 @@ router.get("/channels/:channelId/join-requests", requireAuth, async (req: Authen
     .from(channelJoinRequestsTable)
     .innerJoin(usersTable, eq(usersTable.clerkId, channelJoinRequestsTable.userId))
     .where(and(eq(channelJoinRequestsTable.channelId, channel.id), eq(channelJoinRequestsTable.status, "pending")))
-    .orderBy(asc(channelJoinRequestsTable.createdAt));
+    .orderBy(asc(channelJoinRequestsTable.createdAt), asc(channelJoinRequestsTable.id))
+    .limit(page.limit + 1)
+    .offset(page.offset);
+  const hasMore = rows.length > page.limit;
+  if (hasMore) rows.pop();
+  setListPageHeaders(res, hasMore, page.offset + page.limit);
   res.json(rows.map(({ id, status, createdAt, user }) => ({
     id,
     status,
@@ -904,6 +927,7 @@ router.get("/channels/:channelId/members", requireAuth, async (req: Authenticate
     res.status(403).json({ error: "Join the private channel before viewing its members." });
     return;
   }
+  const page = listPage(req);
   const rows = await db
     .select({
       user: usersTable,
@@ -913,7 +937,12 @@ router.get("/channels/:channelId/members", requireAuth, async (req: Authenticate
     .from(channelMembersTable)
     .innerJoin(usersTable, eq(usersTable.clerkId, channelMembersTable.userId))
     .where(eq(channelMembersTable.channelId, channel.id))
-    .orderBy(asc(usersTable.displayName));
+    .orderBy(asc(usersTable.displayName), asc(usersTable.clerkId))
+    .limit(page.limit + 1)
+    .offset(page.offset);
+  const hasMore = rows.length > page.limit;
+  if (hasMore) rows.pop();
+  setListPageHeaders(res, hasMore, page.offset + page.limit);
   res.json(rows.map(({ user, role, mutedUntil }) => ({
     id: user.clerkId,
     username: user.username,

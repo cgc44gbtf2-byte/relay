@@ -169,7 +169,7 @@ class ApiError extends Error {
   }
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiResponse<T>(path: string, init?: RequestInit): Promise<{ data: T; response: Response }> {
   const response = await fetch(`/api${path}`, {
     ...init,
     credentials: "include",
@@ -177,7 +177,29 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(data.error ?? "Something went wrong", response.status, data.code);
-  return data as T;
+  return { data: data as T, response };
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await apiResponse<T>(path, init)).data;
+}
+
+async function pagedApi<T>(path: string): Promise<T[]> {
+  const results: T[] = [];
+  let offset = 0;
+  for (let page = 0; page < 1_000; page += 1) {
+    const { data, response } = await apiResponse<T[]>(
+      page === 0
+        ? path
+        : `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
+    );
+    results.push(...data);
+    if (response.headers.get("X-Has-More") !== "true") return results;
+    const nextOffset = Number(response.headers.get("X-Next-Offset"));
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) return results;
+    offset = nextOffset;
+  }
+  return results;
 }
 
 function isMissingChannelError(error: unknown): boolean {
@@ -439,7 +461,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     void refreshMessages(true);
     let cancelled = false;
     if (channelId && !activeDm) {
-      api<Member[]>(`/channels/${channelId}/members`).then((data) => {
+      pagedApi<Member>(`/channels/${channelId}/members`).then((data) => {
         if (!cancelled) setMembers(data);
       }).catch((error) => {
         if (cancelled) return;
@@ -580,7 +602,7 @@ function ChatApp() {
       setJoinRequests([]);
       return;
     }
-    api<JoinRequest[]>(`/channels/${currentChannel.id}/join-requests`).then(setJoinRequests).catch(() => setJoinRequests([]));
+    pagedApi<JoinRequest>(`/channels/${currentChannel.id}/join-requests`).then(setJoinRequests).catch(() => setJoinRequests([]));
   }, [currentChannel?.id, actorRole]);
 
   useEffect(() => {
@@ -692,7 +714,7 @@ function ChatApp() {
              && data.channelId === currentChannelIdRef.current
              && !activeDmIdRef.current
            ) {
-             api<Member[]>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
+             pagedApi<Member>(`/channels/${currentChannelIdRef.current}/members`).then(room.setMembers).catch(() => undefined);
              const presenceUser = data.user?.displayName ?? "Someone";
              const presenceId = data.eventId
                ?? `${data.channelId}-${data.user?.id ?? data.userId ?? "unknown"}-${data.action ?? "changed"}`;
