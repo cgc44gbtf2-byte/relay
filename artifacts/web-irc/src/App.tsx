@@ -560,10 +560,12 @@ function ChatApp() {
   const [returnOwnerError, setReturnOwnerError] = useState("");
   const [returningToOwner, setReturningToOwner] = useState(false);
   const [channelRefreshError, setChannelRefreshError] = useState("");
+  const [roomRecoveryError, setRoomRecoveryError] = useState("");
   const [profileError, setProfileError] = useState("");
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
   const channelRefreshRef = useRef<Promise<Channel[]> | null>(null);
+  const automaticJoinBlockedIdsRef = useRef(new Set<number>());
   const userSearchRequestRef = useRef(0);
   const profileRef = useRef<Profile | null>(profile);
   currentChannelIdRef.current = currentChannelId;
@@ -584,19 +586,44 @@ function ChatApp() {
     return request;
   };
   const selectPreferredChannel = (list: Channel[]) => {
-    const next = preferredChannel(list);
+    const next = preferredChannel(list.filter((channel) =>
+      channel.joined || !automaticJoinBlockedIdsRef.current.has(channel.id),
+    ));
     if (!next) return;
     currentChannelIdRef.current = next.id;
     setCurrentChannelId(next.id);
     setActiveDm(null);
+    setRoomRecoveryError("");
     if (!next.joined && !next.isPrivate) {
+      automaticJoinBlockedIdsRef.current.add(next.id);
       void api<{ status: "member" | "pending" }>(`/channels/${next.id}/join`, { method: "POST", body: "{}" })
         .then((result) => {
+          if (result.status === "pending") {
+            automaticJoinBlockedIdsRef.current.add(next.id);
+            if (!activeDmIdRef.current && (currentChannelIdRef.current === null || currentChannelIdRef.current === next.id)) {
+              if (currentChannelIdRef.current === next.id) {
+                currentChannelIdRef.current = null;
+                setCurrentChannelId(null);
+              }
+              setRoomRecoveryError(`Access to ${next.name} is pending approval. Choose another room while the owner reviews your request.`);
+            }
+            return;
+          }
+          automaticJoinBlockedIdsRef.current.delete(next.id);
           if (result.status === "member") {
             setChannels((items) => items.map((item) => item.id === next.id ? { ...item, joined: true, accessStatus: "member" } : item));
           }
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          automaticJoinBlockedIdsRef.current.add(next.id);
+          if (activeDmIdRef.current || (currentChannelIdRef.current !== null && currentChannelIdRef.current !== next.id)) return;
+          if (currentChannelIdRef.current === next.id) {
+            currentChannelIdRef.current = null;
+            setCurrentChannelId(null);
+          }
+          const reason = error instanceof Error ? error.message : "The server denied access.";
+          setRoomRecoveryError(`Could not restore ${next.name}: ${reason} Choose another room, or select ${next.name} in the channel list to try joining again.`);
+        });
     }
   };
   const retryChannelRecovery = async () => {
@@ -618,6 +645,7 @@ function ChatApp() {
     if (currentChannelIdRef.current !== channelId || activeDmIdRef.current) return;
     currentChannelIdRef.current = null;
     setCurrentChannelId(null);
+    setRoomRecoveryError("");
     setActiveDm(null);
     setJoinRequests([]);
     setShowRequests(false);
@@ -987,6 +1015,8 @@ function ChatApp() {
   }, [currentChannelId, activeDm]);
   const joinChannel = async (channel: Channel) => {
     if (joiningChannelId === channel.id) return;
+    automaticJoinBlockedIdsRef.current.delete(channel.id);
+    if (currentChannelIdRef.current !== null || activeDmIdRef.current) setRoomRecoveryError("");
     setJoiningChannelId(channel.id);
     setJoinErrors((errors) => {
       const next = { ...errors };
@@ -997,10 +1027,16 @@ function ChatApp() {
       const result = await api<{ status: "member" | "pending" }>(`/channels/${channel.id}/join`, { method: "POST", body: "{}" });
       if (result.status === "pending") {
         setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, accessStatus: "pending" } : item));
+        if (currentChannelIdRef.current === null && !activeDmIdRef.current) {
+          setRoomRecoveryError(`Access to ${channel.name} is pending approval. Choose another room while the owner reviews your request.`);
+        }
         window.alert("Join request sent. The channel owner will review it.");
         return;
       }
       setChannels((items) => items.map((item) => item.id === channel.id ? { ...item, joined: true, accessStatus: "member" } : item));
+      setRoomRecoveryError("");
+      currentChannelIdRef.current = channel.id;
+      activeDmIdRef.current = null;
       setCurrentChannelId(channel.id);
       setActiveDm(null);
     } catch (error) {
@@ -1010,11 +1046,19 @@ function ChatApp() {
         } catch {
           setJoinErrors((errors) => ({ ...errors, [channel.id]: "The channel is no longer available." }));
         }
+        if (currentChannelIdRef.current === null && !activeDmIdRef.current) {
+          const reason = error instanceof Error ? error.message : "The server denied access.";
+          setRoomRecoveryError(`Could not join ${channel.name}: ${reason} Choose another room, or try again.`);
+        }
       } else {
+        const reason = error instanceof Error ? error.message : "Channel could not be joined.";
         setJoinErrors((errors) => ({
           ...errors,
-          [channel.id]: error instanceof Error ? error.message : "Channel could not be joined.",
+          [channel.id]: reason,
         }));
+        if (currentChannelIdRef.current === null && !activeDmIdRef.current) {
+          setRoomRecoveryError(`Could not join ${channel.name}: ${reason} Choose another room, or try again.`);
+        }
       }
     } finally {
       setJoiningChannelId((joining) => joining === channel.id ? null : joining);
@@ -1257,7 +1301,7 @@ function ChatApp() {
   };
   const renderChannel = (channel: Channel) => <div key={channel.id}>
     <button disabled={joiningChannelId === channel.id}
-      onClick={() => channel.joined ? (setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)}
+      onClick={() => channel.joined ? (setRoomRecoveryError(""), setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)}
       className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}>
       <span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span>
       <span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span>
@@ -1323,6 +1367,10 @@ function ChatApp() {
         </div>}
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
+            {roomRecoveryError && !activeDm && !currentChannel && <div data-testid="recovery-room-picker" className="mx-auto mt-3 w-full max-w-sm px-3 sm:px-6">
+              <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 font-mono text-[10px] leading-5 text-destructive">{roomRecoveryError}</p>
+              {channels.length > 0 && <div aria-label="Room choices" className="mt-2 max-h-48 space-y-1 overflow-y-auto">{channels.map(renderChannel)}</div>}
+            </div>}
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
                {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p>{channelRefreshError && <p role="alert" className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}<button onClick={() => void retryChannelRecovery()} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />{channelRefreshError ? "retry channel refresh" : "refresh channels"}</button></div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <div className="text-center"><button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>{room.olderMessagesError && <p className="mt-2 font-mono text-[10px] text-destructive">{room.olderMessagesError}</p>}</div>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
               {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}

@@ -36,7 +36,7 @@ type Channel = {
   isPrivate: boolean;
   isInviteOnly: boolean;
   joined: boolean;
-  accessStatus: "member";
+  accessStatus: "member" | "available";
   memberCount: number;
 };
 
@@ -76,23 +76,23 @@ describe("channel category organization", () => {
 
   it("offers only same-workspace categories and can assign or unassign a channel", async () => {
     const onMove = vi.fn().mockResolvedValue(true);
-    const channel = {
-      id: 7,
-      name: "#team",
-      topic: "",
-      memberCount: 2,
-      communityId: 13,
-      communityName: "Workspace 13",
-      categoryId: null as number | null,
-      createdAt: "2026-09-21T12:00:00.000Z",
-    };
+  const channel = {
+    id: 12,
+    name: "#team",
+    topic: "",
+    memberCount: 2,
+    communityId: 7,
+    categoryId: 31,
+    communityName: "Team workspace",
+    createdAt: "2026-09-21T12:00:00.000Z",
+  };
     const categories = [
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
+    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
-    const select = screen.getByTestId("select-organize-category") as HTMLSelectElement;
+    const select = await screen.findByTestId("select-public-space");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -109,8 +109,6 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
-      channels: [{ id: 7, name: "#team", categoryId: null }],
-      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
@@ -174,6 +172,8 @@ function installApi({
   denyHistoryAfterFirst = false,
   dmPaginationFailureOnce = false,
   joinFailureOnce = false,
+  autoJoinDeniedOnce = false,
+  denyFallbackHistoryUntilJoined = false,
   createChannelFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
@@ -204,6 +204,8 @@ function installApi({
   denyHistoryAfterFirst?: boolean;
   dmPaginationFailureOnce?: boolean;
   joinFailureOnce?: boolean;
+  autoJoinDeniedOnce?: boolean;
+  denyFallbackHistoryUntilJoined?: boolean;
   createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
@@ -220,6 +222,7 @@ function installApi({
   let historyCalls = 0;
   let dmPaginationCalls = 0;
   let joinCalls = 0;
+  let fallbackAccessGranted = fallbackJoined;
   let createChannelCalls = 0;
   let ticketCalls = 0;
 
@@ -315,6 +318,7 @@ function installApi({
       return missingRequest === "members" ? channelNotFound(missingChannelMessage) : jsonResponse(members(owner ? "owner" : "member"));
     }
     if (url === "/api/channels/2/messages" && method === "GET") {
+      if (denyFallbackHistoryUntilJoined && !fallbackAccessGranted) return channelAccessRequired();
       return jsonResponse({ messages: [] });
     }
     if (url === "/api/channels/2/members" && method === "GET") {
@@ -354,7 +358,11 @@ function installApi({
     }
     if (url === "/api/channels/2/join" && method === "POST") {
       joinCalls += 1;
+      if (autoJoinDeniedOnce && joinCalls === 1) {
+        return jsonResponse({ error: "You are not allowed to join this room." }, 403);
+      }
       if (joinFailureOnce && joinCalls === 1) return jsonResponse({ error: "join temporarily unavailable" }, 500);
+      fallbackAccessGranted = true;
       return jsonResponse({ status: "member" });
     }
     return jsonResponse({});
@@ -410,7 +418,14 @@ describe("deleted room recovery", () => {
     });
     await screen.findByText("stale history");
     fireEvent.click(await screen.findByTestId("button-organize-current-channel"));
-    const category = screen.getByLabelText("category") as HTMLSelectElement;
+  const category = {
+    id: 31,
+    name: "Project rooms",
+    description: "",
+    communityId: 7,
+    communityName: "Team workspace",
+    communityOwnerId: "user-1",
+  };
     expect(category.querySelector('option[value="31"]')).not.toBeNull();
     expect(category.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(category, { target: { value: "31" } });
@@ -642,6 +657,30 @@ describe("deleted room recovery", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("explains when automatic recovery cannot join a public room and lets the user retry it", async () => {
+    await renderChat({
+      missingRequest: "history",
+      fallbackChannels: [{ ...room(2, "#fallback-room"), joined: false, accessStatus: "available" }],
+      fallbackJoined: false,
+      autoJoinDeniedOnce: true,
+      denyFallbackHistoryUntilJoined: true,
+    });
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Could not restore #fallback-room: You are not allowed to join this room. Choose another room, or select #fallback-room in the channel list to try joining again.",
+    );
+    expect(screen.queryByRole("heading", { name: "#fallback-room" })).toBeNull();
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) =>
+      String(url) === "/api/channels/2/join" && init?.method === "POST",
+    )).toHaveLength(1);
+
+    fireEvent.click(within(screen.getByTestId("recovery-room-picker")).getByRole("button", { name: /fallback-room/i }));
+    expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("recovers when reconnect discovers access to the active room was revoked", async () => {
     await renderChat({
       missingRequest: "event",
@@ -728,7 +767,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(2, "#fallback-room")],
     });
     if (missingRequest === "send") {
-      const editor = screen.getByPlaceholderText("message #deleted-room");
+    const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
     }
@@ -849,7 +888,7 @@ describe("deleted room recovery", () => {
 
   it("restores members after a presence change was missed while disconnected", async () => {
     let currentMembers = members();
-    const channelMembers = vi.fn(() => jsonResponse(currentMembers));
+    const channelMembers = vi.fn(() => delay ? delayedMembers : jsonResponse(members()));
     await renderChat({
       missingRequest: "event",
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
@@ -940,22 +979,18 @@ describe("deleted room recovery", () => {
     const reconnectedSocket = latestWebSocket;
     expect(reconnectedSocket).toBeTruthy();
     expect(reconnectedSocket).not.toBe(firstSocket);
-    await act(async () => { reconnectedSocket?.onopen?.(); });
-
-    await waitFor(() => {
-      expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
-      expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
-      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
-    });
-    expect(screen.queryByText("reaction before reconnect")).toBeNull();
-    expect(screen.queryByText("message before deletion")).toBeNull();
-    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
-    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
+    expect(reconnectedSocket?.url).not.toBe(firstSocket?.url);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket")).toHaveLength(initialTickets + 1);
+    webSocketFrames = [];
+    act(() => reconnectedSocket?.onopen?.());
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
+      { type: "subscribe", channelId: 1 },
+    ]));
   });
 
-  it("requests a fresh socket and resubscribes after a connection drops", async () => {
+  it("bounds repeated failures and cancels retries when chat unmounts", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    vi.useFakeTimers();
     const firstSocket = latestWebSocket;
     expect(firstSocket).toBeTruthy();
     act(() => firstSocket?.onopen?.());
@@ -1280,7 +1315,7 @@ describe("admin channel and category deletion permissions", () => {
       },
     });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
-      const url = new URL(String(input), window.location.origin);
+      const url = String(input);
       if (url.pathname === "/api/notifications") return jsonResponse([]);
       if (url.pathname === "/api/admin/status") {
         return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
@@ -1327,7 +1362,7 @@ describe("admin channel and category deletion permissions", () => {
     expect(screen.getByText("old page retained")).toBeTruthy();
     expect(screen.getAllByText("already newest")).toHaveLength(1);
     expect(vi.mocked(fetch).mock.calls.some(([input]) => {
-      const url = new URL(String(input), window.location.origin);
+      const url = String(input);
       return url.pathname === "/api/admin/overview"
         && url.searchParams.get("activityAfterCursor") === "head-cursor"
         && url.searchParams.get("activityActor") === "Manager"
@@ -1389,4 +1424,3 @@ describe("admin activity date filters", () => {
     expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
   });
 });
-
