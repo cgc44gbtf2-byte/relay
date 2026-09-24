@@ -170,7 +170,7 @@ function installApi({
   categories = [],
   publicSpaces = [],
 }: {
-  missingRequest: "history" | "members" | "send" | "topic" | "event";
+  missingRequest: "history" | "members" | "send" | "attachment" | "topic" | "event";
   fallbackChannels: Channel[];
   owner?: boolean;
   reconnectedMessages?: unknown[];
@@ -306,7 +306,7 @@ function installApi({
       return missingRequest === "send" ? channelNotFound() : jsonResponse(message(1, "sent"));
     }
     if (url === "/api/channels/1/file-messages" && method === "POST") {
-      return missingRequest === "send"
+      return missingRequest === "attachment"
         ? channelNotFound()
         : jsonResponse({
           ...message(1, "notes.txt"),
@@ -856,7 +856,7 @@ describe("deleted room recovery", () => {
 
   it("recovers to another room when the room disappears while sharing a file", async () => {
     await renderChat({
-      missingRequest: "send",
+      missingRequest: "attachment",
       fallbackChannels: [room(2, "#fallback-room")],
     });
 
@@ -869,6 +869,35 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
     expect(screen.queryByText("stale history")).toBeNull();
     expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.filter(([input, init]) =>
+      String(input) === "/api/channels" && (init?.method ?? "GET") === "GET",
+    )).toHaveLength(2);
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input) === "/api/channels/1/file-messages" && init?.method === "POST",
+    )).toBe(true);
+  });
+
+  it("shows the empty-channel state when the room disappears while sharing a file", async () => {
+    await renderChat({
+      missingRequest: "attachment",
+      fallbackChannels: [],
+    });
+
+    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByText("no channels available")).toBeTruthy());
+    expect(screen.queryByText("#deleted-room")).toBeNull();
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.queryByText("Orion")).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.filter(([input, init]) =>
+      String(input) === "/api/channels" && (init?.method ?? "GET") === "GET",
+    )).toHaveLength(2);
+    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input) === "/api/channels/1/file-messages" && init?.method === "POST",
+    )).toBe(true);
   });
 });
 
