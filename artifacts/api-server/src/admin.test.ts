@@ -965,7 +965,7 @@ describe("admin access controls", () => {
     assert.deepEqual(afterRows, beforeRows);
   });
 
-  test("keeps another IRC session active for profile updates when one session is revoked", async () => {
+  test("keeps one IRC profile available to a refreshed sibling session after revoking another session", async () => {
     const revokedSession = await createTestSession("revoked_scoped");
     const activeSession = await createSessionForUser(revokedSession.userId);
     const initialProfile = await apiRequest(revokedSession, "/me");
@@ -1007,9 +1007,21 @@ describe("admin access controls", () => {
     assert.equal(refreshedActiveResponse.status, 200, JSON.stringify(refreshedActiveResponse));
     assert.ok(refreshedActiveResponse.body && typeof refreshedActiveResponse.body === "object");
     assert.equal(
+      (refreshedActiveResponse.body as { id?: unknown }).id,
+      revokedSession.userId,
+    );
+    assert.equal(
       (refreshedActiveResponse.body as { displayName?: unknown }).displayName,
       activeDisplayName,
     );
+
+    const profiles = await pool.query<{ count: string; userId: string }>(
+      `SELECT count(*)::text AS count, min(clerk_id) AS "userId"
+       FROM irc_users
+       WHERE clerk_id = $1`,
+      [revokedSession.userId],
+    );
+    assert.deepEqual(profiles.rows, [{ count: "1", userId: revokedSession.userId }]);
   });
 
   test("does not create duplicate chat identities during concurrent session refreshes", async () => {
