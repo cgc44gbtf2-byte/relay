@@ -59,7 +59,7 @@ import {
   permissionsForUser,
   type PermissionKey,
 } from "../lib/permissions";
-import { createNotification, createNotifications } from "../lib/notifications";
+import { categoryForNotification, createNotification, createNotifications } from "../lib/notifications";
 import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
 import { validateUploadMetadata } from "./storage";
@@ -2959,31 +2959,73 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
     return;
   }
   const isScheduled = scheduledAt !== null && scheduledAt > new Date();
-  const [announcement] = await db.insert(serverAnnouncementsTable).values({
-    authorId: userId, communityId, title, body, audienceType, departmentId, locationId, teamId, recipientId,
-    requiresAcknowledgement, scheduledAt, expiresAt, status: isScheduled ? "scheduled" : "published",
-  }).returning();
-  const recipients = audienceType === "company"
-    ? await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(eq(communityMembersTable.communityId, communityId))
-    : audienceType === "department"
-      ? await db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, departmentId!)))
-      : audienceType === "location"
-        ? await db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, locationId!)))
-        : audienceType === "team"
-          ? await db.select({ userId: teamMembersTable.userId }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!)))
-          : recipientId ? [{ userId: recipientId }] : [];
-  if (recipients.length && !isScheduled) {
-    await createNotifications(recipients.map((recipient) => recipient.userId), {
-      type: "community_announcement",
-      category: "announcement",
-      body: `${title}: ${body}`,
+  const { announcement, notifications } = await db.transaction(async (tx) => {
+    const [announcement] = await tx.insert(serverAnnouncementsTable).values({
+      authorId: userId, communityId, title, body, audienceType, departmentId, locationId, teamId, recipientId,
+      requiresAcknowledgement, scheduledAt, expiresAt, status: isScheduled ? "scheduled" : "published",
+    }).returning();
+    const recipients = audienceType === "company"
+      ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(eq(communityMembersTable.communityId, communityId))
+      : audienceType === "department"
+        ? await tx.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, departmentId!)))
+        : audienceType === "location"
+          ? await tx.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, locationId!)))
+          : audienceType === "team"
+            ? await tx.select({ userId: teamMembersTable.userId }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!)))
+            : recipientId ? [{ userId: recipientId }] : [];
+    const notificationRecipients = isScheduled ? [] : [...new Set(recipients.map((recipient) => recipient.userId))];
+    const announcementNotifications = notificationRecipients.length
+      ? await tx.insert(notificationsTable).values(notificationRecipients.map((recipientUserId) => ({
+        userId: recipientUserId,
+        type: "community_announcement",
+        category: "announcement",
+        body: `${title}: ${body}`,
+        communityId,
+        entityType: "announcement",
+        entityId: String(announcement.id),
+        actionUrl: `/communities/${communityId}`,
+      }))).returning()
+      : [];
+
+    const [actor] = await tx.select({ displayName: usersTable.displayName })
+      .from(usersTable).where(eq(usersTable.clerkId, userId)).limit(1);
+    const action = isScheduled ? "scheduled_community_announcement" : "published_community_announcement";
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: userId,
+      actorDisplayName: actor?.displayName,
       communityId,
-      entityType: "announcement",
-      entityId: announcement.id,
-      actionUrl: `/communities/${communityId}`,
+      action,
+      resourceType: "workspace",
+      resourceId: String(communityId),
+      targetId: String(communityId),
+      targetLabel: `community:${communityId}`,
+      details: title,
+    });
+    const managers = await tx.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
+      eq(userRolesTable.communityId, communityId),
+      inArray(userRolesTable.role, ["workspace_owner", "workspace_admin", "community_admin", "department_admin"]),
+    ));
+    const managerIds = [...new Set(managers.map((manager) => manager.userId))];
+    const auditNotifications = managerIds.length
+      ? await tx.insert(notificationsTable).values(managerIds.map((managerId) => ({
+        userId: managerId,
+        type: "administrative_action",
+        category: "administrative_action",
+        body: `${action.replaceAll("_", " ")}: ${title}`,
+        communityId,
+        entityType: "community",
+        entityId: String(communityId),
+        actionUrl: `/communities/${communityId}`,
+      }))).returning()
+      : [];
+    return { announcement, notifications: [...announcementNotifications, ...auditNotifications] };
+  });
+  for (const notification of notifications) {
+    wsHub.broadcastUser(notification.userId, {
+      type: "notification",
+      notification: { ...notification, category: categoryForNotification(notification.type, notification.category) },
     });
   }
-  await writeCommunityAudit(userId, isScheduled ? "scheduled_community_announcement" : "published_community_announcement", communityId, title);
   res.status(201).json(announcement);
 });
 

@@ -686,6 +686,100 @@ after(async () => {
 });
 
 describe("admin access controls", () => {
+  test("rolls back announcements and all notifications when announcement auditing fails", async () => {
+    const owner = await createTestSession("announcement_rollback_owner");
+    const member = await createTestSession("announcement_rollback_member");
+    const title = `Atomic announcement ${randomUUID()}`;
+    const body = "Delivery must match audit history";
+    const triggerName = `fail_announcement_audit_${randomUUID().replaceAll("-", "")}`;
+    const functionName = `${triggerName}_fn`;
+    let communityId: number | null = null;
+    let triggerInstalled = false;
+
+    try {
+      assert.equal((await apiRequest(member, "/me")).status, 200);
+      const community = await apiRequest(owner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `Announcement rollback ${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      communityId = (community.body as { id: number }).id;
+      assert.equal(typeof communityId, "number");
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+        [communityId, member.userId],
+      );
+
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'published_community_announcement' AND NEW.community_id = ${communityId} THEN
+             RAISE EXCEPTION 'forced announcement audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      triggerInstalled = true;
+
+      const publish = () => apiRequest(owner, `/communities/${communityId}/announcements`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, body }),
+      });
+      const failed = await publish();
+      assert.equal(failed.status, 500, JSON.stringify(failed));
+      const announcementRows = () => pool.query<{ id: number }>(
+        "SELECT id FROM irc_server_announcements WHERE community_id = $1 AND title = $2",
+        [communityId, title],
+      );
+      const notificationRows = () => pool.query<{ user_id: string; type: string; entity_id: string }>(
+        `SELECT user_id, type, entity_id FROM irc_notifications
+         WHERE community_id = $1 AND (
+           (type = 'community_announcement' AND body = $2)
+           OR (type = 'administrative_action' AND body = $3)
+         ) ORDER BY type, user_id`,
+        [communityId, `${title}: ${body}`, `published community announcement: ${title}`],
+      );
+      const auditRows = () => pool.query(
+        `SELECT id FROM irc_admin_audit_logs
+         WHERE community_id = $1 AND action = 'published_community_announcement' AND details = $2`,
+        [communityId, title],
+      );
+      assert.deepEqual((await announcementRows()).rows, []);
+      assert.deepEqual((await notificationRows()).rows, []);
+      assert.deepEqual((await auditRows()).rows, []);
+
+      await pool.query(`DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs`);
+      triggerInstalled = false;
+      const retried = await publish();
+      assert.equal(retried.status, 201, JSON.stringify(retried));
+      const announcementId = (retried.body as { id: number }).id;
+      assert.deepEqual((await announcementRows()).rows, [{ id: announcementId }]);
+      assert.deepEqual((await notificationRows()).rows, [
+        { user_id: owner.userId, type: "administrative_action", entity_id: String(communityId) },
+        { user_id: member.userId, type: "community_announcement", entity_id: String(announcementId) },
+        { user_id: owner.userId, type: "community_announcement", entity_id: String(announcementId) },
+      ].sort((a, b) => a.type.localeCompare(b.type) || a.user_id.localeCompare(b.user_id)));
+      assert.equal((await auditRows()).rowCount, 1);
+    } finally {
+      if (triggerInstalled) await pool.query(`DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs`);
+      await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_notifications WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE community_id = $1", [communityId]);
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("rejects malformed and expired Clerk credentials before creating profiles", async () => {
     const requests: Array<[string, RequestInit?]> = [
       ["/admin/status"],
