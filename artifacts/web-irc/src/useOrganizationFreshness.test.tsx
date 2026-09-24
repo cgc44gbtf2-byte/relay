@@ -7,10 +7,10 @@ import {
   type OrganizationPage,
 } from "./useOrganizationFreshness";
 
-type Page = OrganizationPage & {
+type Page = Omit<OrganizationPage, "invitations"> & {
   community: { id: number; name: string };
   settingsDraft: string;
-  invitations: Array<{ id: number }>;
+  invitations: Array<{ id: number; emailDeliveryStatus?: string }>;
 };
 
 const page = (id: number, suffix: string): Page => ({
@@ -52,7 +52,7 @@ describe("organization freshness", () => {
     const merged = mergeOrganizationPages(current, [fresh]);
 
     expect(merged.settingsDraft).toBe("unsaved local value");
-    expect(merged.invitations).toEqual([{ id: 99 }, { id: 100 }]);
+    expect(merged.invitations).toEqual([{ id: 99 }]);
     expect(merged.departments[0]).toMatchObject({ managerId: "dept-manager-2" });
     expect(merged.teams[0]).toMatchObject({ managerId: "team-manager-2" });
     expect(merged.employees[0]).toMatchObject({ departmentId: 2, locationId: 2, teamIds: [2] });
@@ -83,7 +83,24 @@ describe("organization freshness", () => {
 
     expect(merged.employees).toHaveLength(175);
     expect(merged.employees.at(-1)).toEqual({ userId: "fresh-174" });
-    expect(merged.invitations).toBe(current.invitations);
+    expect(merged.invitations).toEqual(first.invitations);
+  });
+
+  it("refreshes delivery outcomes across every loaded invitation page", async () => {
+    const current = page(12, "1");
+    current.invitations = Array.from({ length: 175 }, (_, id) => ({ id }));
+    const first = page(12, "2");
+    first.invitations = current.invitations.slice(0, 100);
+    const second = page(12, "3");
+    second.invitations = current.invitations.slice(100).map((item) => ({ ...item, emailDeliveryStatus: "bounced" }));
+    const request = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const pages = await fetchOrganizationPages<Page>(12, current, request);
+    expect(request.mock.calls[1][0]).toContain("invitationsOffset=100");
+    expect(request.mock.calls[1][0]).toContain("invitationsLimit=75");
+    const merged = mergeOrganizationPages(current, pages);
+    expect(merged.invitations).toHaveLength(175);
+    expect(merged.invitations.at(-1)).toMatchObject({ id: 174, emailDeliveryStatus: "bounced" });
+    expect(merged.settingsDraft).toBe(current.settingsDraft);
   });
 
   it("ignores stale workspace responses and does not overlap polls", async () => {

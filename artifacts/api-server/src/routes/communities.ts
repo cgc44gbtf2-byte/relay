@@ -3,6 +3,7 @@ import { clerkClient } from "@clerk/express";
 import { and, asc, count, desc, eq, exists, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { sendInvitationEmail } from "../lib/invitation-email";
+import { finishInvitationSend } from "../lib/invitation-delivery";
 import {
   blocksTable,
   adminAuditLogsTable,
@@ -296,6 +297,10 @@ function pageParam(req: AuthenticatedRequest, name: string): { limit: number; of
 }
 
 const detailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"] as const;
+function safeInvitation(invitation: typeof workspaceInvitationsTable.$inferSelect) {
+  const { tokenHash: _token, emailAttemptId: _attempt, emailProviderId: _provider, ...safe } = invitation;
+  return safe;
+}
 function validPageQuery(req: AuthenticatedRequest, names: readonly string[]): boolean {
   for (const key of ["limit", "offset", ...names.flatMap((name) => [`${name}Limit`, `${name}Offset`])]) {
     const value = req.query[key];
@@ -972,7 +977,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     locations: locations.slice(0, locationPage.limit),
     teams: teams.slice(0, teamPage.limit),
     employees: directoryEmployees.slice(0, employeePage.limit),
-    invitations: invitations.slice(0, invitationPage.limit).map(({ tokenHash: _tokenHash, ...invitation }) => invitation),
+    invitations: invitations.slice(0, invitationPage.limit).map(safeInvitation),
     policies: policies.slice(0, policyPage.limit),
      tasks: tasks.slice(0, taskPage.limit).map((task) => ({
       ...task,
@@ -2014,6 +2019,7 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
   }
   const rawToken = randomUUID();
   const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const attemptId = randomUUID();
   const [existingPending] = await db.select().from(workspaceInvitationsTable).where(and(
     eq(workspaceInvitationsTable.communityId, communityId),
     eq(workspaceInvitationsTable.email, email),
@@ -2027,6 +2033,10 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
       teamId,
       invitedBy: userId,
       tokenHash,
+      emailAttemptId: attemptId,
+      emailProviderId: null,
+      emailDeliveryStatus: "queued",
+      emailDeliveryUpdatedAt: new Date(),
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       revokedAt: null,
       status: "pending",
@@ -2040,11 +2050,16 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
       teamId,
       invitedBy: userId,
       tokenHash,
+      emailAttemptId: attemptId,
+      emailDeliveryStatus: "queued",
+      emailDeliveryUpdatedAt: new Date(),
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     }).returning();
   await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
-  const emailDelivery = await sendInvitationEmail({ email, communityId, token: rawToken });
-  res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken, emailDelivery });
+  const { providerId: _providerId, ...emailDelivery } = await sendInvitationEmail({ email, communityId, token: rawToken, attemptId });
+  await finishInvitationSend(invitation.id, attemptId, { ...emailDelivery, providerId: _providerId });
+  const [current] = await db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.id, invitation.id));
+  res.status(201).json({ ...safeInvitation(current), invitationToken: rawToken, emailDelivery });
 });
 
 router.post("/communities/:communityId/invitations/accept", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -2308,7 +2323,7 @@ router.post("/communities/:communityId/invitations/:invitationId/revoke", requir
     return;
   }
   await writeCommunityAudit(userId, "revoked_workspace_invitation", communityId, `invitation:${invitationId}`);
-  res.json({ ok: true, invitation: result.invitation });
+  res.json({ ok: true, invitation: safeInvitation(result.invitation) });
 });
 
 router.post("/communities/:communityId/invitations/:invitationId/resend", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -2321,6 +2336,7 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
   }
   const rawToken = randomUUID();
   const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const attemptId = randomUUID();
   const resent = await db.transaction(async (tx) => {
     const [existing] = await tx.select().from(workspaceInvitationsTable).where(and(
       eq(workspaceInvitationsTable.id, invitationId),
@@ -2331,6 +2347,10 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
     const [updated] = await tx.update(workspaceInvitationsTable).set({
       status: "pending",
       tokenHash,
+      emailAttemptId: attemptId,
+      emailProviderId: null,
+      emailDeliveryStatus: "queued",
+      emailDeliveryUpdatedAt: new Date(),
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       invitedBy: userId,
       revokedAt: null,
@@ -2346,8 +2366,10 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
     return;
   }
   await writeCommunityAudit(userId, "resent_workspace_invitation", communityId, resent.email);
-  const emailDelivery = await sendInvitationEmail({ email: resent.email, communityId, token: rawToken });
-  res.json({ ...resent.invitation, tokenHash: undefined, invitationToken: rawToken, emailDelivery });
+  const { providerId: _providerId, ...emailDelivery } = await sendInvitationEmail({ email: resent.email, communityId, token: rawToken, attemptId });
+  await finishInvitationSend(invitationId, attemptId, { ...emailDelivery, providerId: _providerId });
+  const [current] = await db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.id, invitationId));
+  res.json({ ...safeInvitation(current), invitationToken: rawToken, emailDelivery });
 });
 
 router.post("/communities/:communityId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

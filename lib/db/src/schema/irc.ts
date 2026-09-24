@@ -257,6 +257,10 @@ export const workspaceInvitationsTable = pgTable("irc_workspace_invitations", {
   status: text("status").notNull().default("pending"),
   invitedBy: text("invited_by").notNull().references(() => usersTable.clerkId),
   tokenHash: text("token_hash").notNull().unique(),
+  emailAttemptId: uuid("email_attempt_id"),
+  emailProviderId: text("email_provider_id"),
+  emailDeliveryStatus: text("email_delivery_status").notNull().default("not_configured"),
+  emailDeliveryUpdatedAt: timestamp("email_delivery_updated_at", { withTimezone: true }),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
@@ -264,6 +268,7 @@ export const workspaceInvitationsTable = pgTable("irc_workspace_invitations", {
 }, (table) => [
   index("irc_workspace_invitations_community_created_idx").on(table.communityId, table.createdAt, table.id),
   index("irc_workspace_invitations_community_email_status_idx").on(table.communityId, table.email, table.status),
+  uniqueIndex("irc_workspace_invitations_email_attempt_idx").on(table.emailAttemptId),
 ]);
 
 export const workspacePoliciesTable = pgTable("irc_workspace_policies", {

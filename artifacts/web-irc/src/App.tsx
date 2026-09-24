@@ -57,7 +57,7 @@ import { WorkspaceIndicator } from "./components/workspace-indicator";
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-import { invitationDeliveryMessage, type InvitationResponse } from "./lib/invitation-delivery";
+import { invitationDeliveryLabel, invitationDeliveryMessage, type InvitationResponse } from "./lib/invitation-delivery";
 
 function workspaceInvitationUrl(communityId: number, token: string): string {
   const query = new URLSearchParams({ communityId: String(communityId), token });
@@ -2583,7 +2583,7 @@ type CommunityDetail = {
   teams: Array<{ id: number; name: string; description: string; departmentId: number | null; locationId: number | null; managerId: string | null; status: string }>;
   employees: Array<{ userId: string; username: string; displayName: string; employeeNumber: string; jobTitle: string; employmentStatus: string; departmentId: number | null; locationId: number | null; managerId: string | null; teamIds: number[]; onboardedAt: string | null; offboardedAt: string | null; presenceStatus: string }>;
   teamMemberships: Array<{ teamId: number; userId: string; role: string; status: string; joinedAt: string; endedAt: string | null }>;
-  invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; acceptedAt?: string | null }>;
+  invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; acceptedAt?: string | null; emailDeliveryStatus?: string | null; emailDeliveryUpdatedAt?: string | null }>;
   policies: Array<{ id: number; title: string; body: string; version: number; status: string; effectiveAt: string; createdAt: string }>;
   tasks: Array<{
     id: number;
@@ -3581,8 +3581,8 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
             <p className="mt-2 text-[10px] leading-4 text-muted-foreground">The recipient must sign in with the verified email address that received the invitation.</p>
           </div>}
           <div className="mt-4 space-y-2 border-t border-border pt-4">
-            {detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2">
-              <div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>
+            {detail.invitations.map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2">
+              <div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p><p className={`mt-1 text-[10px] ${invitationDeliveryLabel(invitation.emailDeliveryStatus).failed ? "text-destructive" : "text-muted-foreground"}`} title={invitation.emailDeliveryUpdatedAt ? `Delivery updated ${new Date(invitation.emailDeliveryUpdatedAt).toLocaleString()}` : undefined}>{invitationDeliveryLabel(invitation.emailDeliveryStatus).text}</p></div>
               <div className="flex shrink-0 gap-2">
                 {invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}
                 {invitation.status === "pending" && <button type="button" disabled={working} onClick={() => void revokeInvitation(invitation.id)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">revoke</button>}

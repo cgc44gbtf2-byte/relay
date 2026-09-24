@@ -81,7 +81,7 @@ test("default sender uses authenticated Resend request with bounded timeout", as
 
 test("resend content uses the newly rotated token", async () => {
   const messages: string[] = [];
-  const send = async (body: Record<string, unknown>) => { messages.push(String(body.text)); return new Response(); };
+  const send = async (body: Record<string, unknown>) => { messages.push(String(body.text)); return new Response('{"id":"sent"}'); };
   await sendInvitationEmail(invitation, config, send);
   await sendInvitationEmail({ ...invitation, token: "replacement-token" }, config, send);
   assert.match(messages[1]!, /replacement-token/);

@@ -11,6 +11,7 @@ import {
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { corsOptions } from "./lib/cors";
+import resendWebhookRouter from "./routes/resend-webhook";
 
 const app: Express = express();
 
@@ -33,6 +34,8 @@ app.use(
     },
   }),
 );
+// Signature verification must receive the original bytes, before JSON or auth middleware.
+app.use("/api/webhooks/resend", express.raw({ type: "application/json", limit: "64kb" }), resendWebhookRouter);
 app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
 app.use(cors(corsOptions));
 app.use(

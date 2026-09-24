@@ -1,9 +1,11 @@
 export type InvitationEmailDelivery = {
   status: "sent" | "not_configured" | "failed";
   message: string;
+  /** Resend's opaque message identifier; never return this to the client. */
+  providerId?: string;
 };
 
-type InvitationEmail = { email: string; communityId: number; token: string };
+type InvitationEmail = { email: string; communityId: number; token: string; attemptId?: string };
 type SendEmail = (body: Record<string, unknown>, apiKey: string) => Promise<Response>;
 
 const sendThroughResend: SendEmail = async (body, apiKey) => {
@@ -47,6 +49,7 @@ export async function sendInvitationEmail(
     const response = await send({
       from,
       to: [invitation.email],
+      ...(invitation.attemptId ? { tags: [{ name: "invitation_attempt", value: invitation.attemptId }] } : {}),
       subject: "Your Relay workspace invitation",
       text: `You have been invited to a Relay workspace.\n\nAccept your invitation:\n${url.toString()}\n\nSign in with ${invitation.email} to accept. This private link expires in 7 days. If you did not expect this invitation, you can ignore this email.`,
     }, apiKey);
@@ -54,7 +57,11 @@ export async function sendInvitationEmail(
       await response.body?.cancel();
       throw new Error("Delivery failed");
     }
-    return { status: "sent", message: "Invitation email accepted for delivery. The private link is also available as a fallback." };
+    const body: unknown = await response.json();
+    const providerId = body && typeof body === "object" && "id" in body && typeof body.id === "string"
+      && /^[\w-]{1,128}$/.test(body.id) ? body.id : undefined;
+    if (!providerId) throw new Error("Missing provider id");
+    return { status: "sent", providerId, message: "Invitation email accepted for delivery. The private link is also available as a fallback." };
   } catch {
     // Do not log exceptions or response bodies: either may contain invitation tokens.
     return { status: "failed", message: "The invitation was saved, but email delivery could not be confirmed. Share the private link or try resending." };

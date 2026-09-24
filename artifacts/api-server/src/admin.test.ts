@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import assert from "node:assert/strict";
 import { after, before, describe, mock, test } from "node:test";
@@ -10,6 +10,7 @@ import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
 import { sendCommunitySubscriptionReminders } from "./lib/community-subscription-reminders";
+import { finishInvitationSend } from "./lib/invitation-delivery";
 import { ensurePermissionCatalog, hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
@@ -3573,6 +3574,79 @@ describe("admin access controls", () => {
           [workspaceIds],
         );
       }
+    }
+  });
+
+  test("verified invitation webhooks isolate attempts, resist replay, and win send-response races", async () => {
+    const priorSecret = process.env.RESEND_WEBHOOK_SECRET;
+    const secret = `whsec_${Buffer.from("integration webhook key").toString("base64")}`;
+    const attempt = randomUUID();
+    const workspace = await pool.query<{ id: number }>(
+      `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+       VALUES ('Webhook Workspace', $1, $2, 'paid_workspace', true) RETURNING id`,
+      [`webhook-${randomUUID()}`, adminSession.userId],
+    );
+    const communityId = workspace.rows[0]!.id;
+    try {
+      const invitation = await pool.query<{ id: number }>(
+        `INSERT INTO irc_workspace_invitations
+         (community_id, email, role, invited_by, token_hash, expires_at, email_attempt_id, email_delivery_status)
+         VALUES ($1, 'delivery@example.com', 'member', $2, $3, now() + interval '7 days', $4, 'queued') RETURNING id`,
+        [communityId, adminSession.userId, createHash("sha256").update(randomUUID()).digest("hex"), attempt],
+      );
+      const invitationId = invitation.rows[0]!.id;
+      const post = async (type: string, id = "provider-1", tag = attempt, createdAt = new Date().toISOString()) => {
+        const body = JSON.stringify({
+          type, created_at: createdAt,
+          data: { email_id: id, tags: { invitation_attempt: tag }, bounce: { diagnosticCode: ["private provider error"] } },
+        });
+        const eventId = `msg_${randomUUID()}`;
+        const timestamp = String(Math.floor(Date.now() / 1000));
+        const signature = `v1,${createHmac("sha256", "integration webhook key").update(`${eventId}.${timestamp}.${body}`).digest("base64")}`;
+        return unauthenticatedApiRequest("/webhooks/resend", {
+          method: "POST",
+          headers: { "content-type": "application/json", "svix-id": eventId, "svix-timestamp": timestamp, "svix-signature": signature },
+          body,
+        });
+      };
+      const status = async () => (await pool.query<{ email_delivery_status: string; email_provider_id: string | null }>(
+        "SELECT email_delivery_status, email_provider_id FROM irc_workspace_invitations WHERE id = $1", [invitationId],
+      )).rows[0]!;
+      delete process.env.RESEND_WEBHOOK_SECRET;
+      assert.equal((await post("email.bounced")).status, 503);
+      process.env.RESEND_WEBHOOK_SECRET = secret;
+      assert.equal((await unauthenticatedApiRequest("/webhooks/resend", {
+        method: "POST", headers: { "content-type": "application/json" }, body: '{"type":"email.bounced"}',
+      })).status, 401);
+      assert.equal((await post("email.bounced")).status, 200);
+      await finishInvitationSend(invitationId, attempt, { status: "sent", providerId: "provider-1" });
+      assert.equal((await status()).email_delivery_status, "bounced"); // webhook before send response
+      assert.equal((await post("email.delivered")).status, 200);
+      assert.equal((await status()).email_delivery_status, "bounced"); // out of order
+      assert.equal((await post("email.bounced")).status, 200); // replay
+      assert.equal((await status()).email_delivery_status, "bounced");
+      assert.equal((await post("email.complained", "other-provider")).status, 200);
+      assert.equal((await status()).email_delivery_status, "bounced"); // different email id
+      const newAttempt = randomUUID();
+      await pool.query(
+        "UPDATE irc_workspace_invitations SET email_attempt_id = $2, email_provider_id = null, email_delivery_status = 'queued' WHERE id = $1",
+        [invitationId, newAttempt],
+      );
+      assert.equal((await post("email.bounced")).status, 200);
+      assert.equal((await status()).email_delivery_status, "queued"); // old attempt
+      await finishInvitationSend(invitationId, attempt, { status: "failed" });
+      assert.equal((await status()).email_delivery_status, "queued"); // stale send response
+      const detail = await apiRequest(adminSession, `/communities/${communityId}?view=summary`);
+      assert.equal(detail.status, 200);
+      const items = (detail.body as { invitations: Array<Record<string, unknown>> }).invitations;
+      assert.equal(items[0]?.emailDeliveryStatus, "queued");
+      assert.ok(items[0]?.emailDeliveryUpdatedAt);
+      assert.equal("emailAttemptId" in items[0]!, false);
+      assert.equal("emailProviderId" in items[0]!, false);
+    } finally {
+      if (priorSecret === undefined) delete process.env.RESEND_WEBHOOK_SECRET;
+      else process.env.RESEND_WEBHOOK_SECRET = priorSecret;
+      await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
     }
   });
 

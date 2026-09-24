@@ -10,10 +10,11 @@ export type OrganizationPage = {
   locations: unknown[];
   teams: unknown[];
   teamMemberships: unknown[];
+  invitations: unknown[];
   pagination?: Record<string, { hasMore: boolean; limit?: number; offset?: number }>;
 };
 
-type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams">;
+type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams" | "invitations">;
 
 function pageQuery(lengths: OrganizationLengths, offset: number): string {
   const limit = (items: unknown[]) => offset === 0
@@ -23,8 +24,8 @@ function pageQuery(lengths: OrganizationLengths, offset: number): string {
     view: "summary",
     employeesLimit: String(limit(lengths.employees)),
     employeesOffset: String(offset),
-    invitationsLimit: "1",
-    invitationsOffset: "0",
+    invitationsLimit: String(limit(lengths.invitations)),
+    invitationsOffset: String(offset),
     tasksLimit: "1",
     tasksOffset: "0",
     channelsLimit: "1",
@@ -58,6 +59,7 @@ export async function fetchOrganizationPages<T extends OrganizationPage>(
     current.departments.length,
     current.locations.length,
     current.teams.length,
+    current.invitations.length,
   );
   const pages: T[] = [];
   for (let offset = 0; offset < loaded; offset += PAGE_SIZE) {
@@ -88,6 +90,7 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
     locations: combined("locations", locationPages),
     teams: combined("teams", teamPages),
     teamMemberships: combined("teamMemberships", employeePages),
+    invitations: combined("invitations", pageCount(current.invitations)),
     pagination: {
       ...current.pagination,
       employees: paginationFor("employees", current.employees) ?? current.pagination?.employees,
@@ -95,6 +98,7 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
       departments: paginationFor("departments", current.departments) ?? current.pagination?.departments,
       locations: paginationFor("locations", current.locations) ?? current.pagination?.locations,
       teams: paginationFor("teams", current.teams) ?? current.pagination?.teams,
+      invitations: paginationFor("invitations", current.invitations) ?? current.pagination?.invitations,
     },
   } as T;
 }
