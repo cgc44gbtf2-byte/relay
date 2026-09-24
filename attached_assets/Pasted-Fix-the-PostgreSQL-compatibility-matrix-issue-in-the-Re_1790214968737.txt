@@ -1,0 +1,45 @@
+Fix the PostgreSQL compatibility matrix issue in the Relay project.
+
+Current issue:
+
+* PostgreSQL 14/15/16 compatibility tests are configured.
+* The tests currently require a protected CI admin database URL.
+* Five PostgreSQL matrix tests are being skipped in the current workspace because that protected URL is unavailable.
+* Do not simply suppress, delete, or permanently skip these tests.
+
+Requirements:
+
+1. Inspect the existing PostgreSQL compatibility test configuration, CI workflows, test scripts, database utilities, and environment-variable requirements.
+2. Make the PostgreSQL 14/15/16 matrix executable in CI without exposing production credentials or requiring the Replit development database.
+3. Each PostgreSQL version must use an isolated disposable test database/environment.
+4. Prefer CI-managed PostgreSQL services/containers or another safe ephemeral database mechanism appropriate for the existing CI provider.
+5. Do not use the production database.
+6. Do not use the developer’s local/Replit database for compatibility testing.
+7. Do not hard-code credentials.
+8. Do not weaken authentication or authorization to make the tests pass.
+9. Keep the existing application database configuration unchanged unless a change is necessary for test isolation.
+10. Update the CI workflow so the matrix explicitly runs:
+
+* PostgreSQL 14
+* PostgreSQL 15
+* PostgreSQL 16
+
+11. Ensure the required DATABASE_URL/admin connection variables are generated or injected securely for each matrix job.
+12. If the existing tests require an admin database connection to create/drop test databases, configure that connection only inside the isolated CI environment.
+13. Make test cleanup automatic even when a test fails.
+14. Remove the current skip condition once the CI environment can execute the tests safely.
+15. Keep the tests deterministic and ensure matrix jobs cannot interfere with each other.
+16. Run all relevant local tests that can run without CI-only infrastructure.
+17. Validate the CI configuration syntactically and ensure the PostgreSQL matrix is discoverable by the CI runner.
+18. Do not claim PostgreSQL 14/15/16 compatibility is verified locally unless the tests actually execute successfully.
+19. If the current CI provider cannot provision PostgreSQL services, implement the safest supported alternative and document the required CI secrets/environment variables.
+20. At the end, provide:
+
+* files changed
+* why each change was made
+* which tests were previously skipped
+* how PostgreSQL 14/15/16 will now execute
+* which tests were actually run in this workspace
+* any remaining CI-only verification
+
+This is a release-readiness fix. Preserve Relay’s existing tenant isolation, authorization, migration, and database safety controls while making the compatibility matrix executable.
