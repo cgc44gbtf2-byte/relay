@@ -697,6 +697,108 @@ router.get("/communities/:communityId/tasks/:taskId", requireAuth, async (req: A
   res.json({ ...task, comments, attachments });
 });
 
+const organizationCollections = ["employees", "invitations", "assignments", "departments", "locations", "teams"] as const;
+
+router.get("/communities/:communityId/organization-snapshot", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  if (!Number.isSafeInteger(communityId) || communityId < 1 || !(await canAccessBusiness(userId, communityId))) {
+    res.status(404).json({ error: "Business workspace not found." });
+    return;
+  }
+  if (!validPageQuery(req, organizationCollections)) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
+    return;
+  }
+  const employeesPage = pageParam(req, "employees");
+  const invitationsPage = pageParam(req, "invitations");
+  const assignmentsPage = pageParam(req, "assignments");
+  const departmentsPage = pageParam(req, "departments");
+  const locationsPage = pageParam(req, "locations");
+  const teamsPage = pageParam(req, "teams");
+  const [members, assignments, departments, locations, teams, invitations] = await Promise.all([
+    db.select({
+      id: usersTable.clerkId, username: usersTable.username, displayName: usersTable.displayName,
+      presenceStatus: usersTable.status, status: usersTable.status, joinedAt: communityMembersTable.joinedAt,
+    }).from(communityMembersTable).innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+      .where(eq(communityMembersTable.communityId, communityId))
+      .orderBy(asc(usersTable.displayName), asc(communityMembersTable.userId))
+      .limit(employeesPage.limit + 1).offset(employeesPage.offset),
+    db.select().from(userRolesTable).where(eq(userRolesTable.communityId, communityId))
+      .orderBy(asc(userRolesTable.userId), asc(userRolesTable.id))
+      .limit(assignmentsPage.limit + 1).offset(assignmentsPage.offset),
+    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, communityId))
+      .orderBy(asc(departmentsTable.name), asc(departmentsTable.id))
+      .limit(departmentsPage.limit + 1).offset(departmentsPage.offset),
+    db.select().from(locationsTable).where(eq(locationsTable.communityId, communityId))
+      .orderBy(asc(locationsTable.name), asc(locationsTable.id))
+      .limit(locationsPage.limit + 1).offset(locationsPage.offset),
+    db.select().from(teamsTable).where(eq(teamsTable.communityId, communityId))
+      .orderBy(asc(teamsTable.name), asc(teamsTable.id))
+      .limit(teamsPage.limit + 1).offset(teamsPage.offset),
+    db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, communityId))
+      .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id))
+      .limit(invitationsPage.limit + 1).offset(invitationsPage.offset),
+  ]);
+  // The viewer's team memberships remain available even when their directory
+  // row falls on a later page, matching the workspace detail response.
+  const memberIds = [...new Set([...members.slice(0, employeesPage.limit).map((member) => member.id), userId])];
+  const [profiles, teamMemberships] = await Promise.all([
+    memberIds.length ? db.select({
+      userId: employeeProfilesTable.userId, employeeNumber: employeeProfilesTable.employeeNumber,
+      jobTitle: employeeProfilesTable.jobTitle, employmentStatus: employeeProfilesTable.employmentStatus,
+      departmentId: employeeProfilesTable.departmentId, locationId: employeeProfilesTable.locationId,
+      managerId: employeeProfilesTable.managerId, onboardedAt: employeeProfilesTable.onboardedAt,
+      offboardedAt: employeeProfilesTable.offboardedAt,
+    }).from(employeeProfilesTable).where(and(
+      eq(employeeProfilesTable.communityId, communityId), inArray(employeeProfilesTable.userId, memberIds),
+    )) : Promise.resolve([] as Array<Pick<typeof employeeProfilesTable.$inferSelect,
+      "userId" | "employeeNumber" | "jobTitle" | "employmentStatus" | "departmentId" | "locationId" | "managerId" | "onboardedAt" | "offboardedAt">>),
+    memberIds.length ? db.select({
+      teamId: teamMembersTable.teamId, userId: teamMembersTable.userId, role: teamMembersTable.role,
+      status: teamMembersTable.status, joinedAt: teamMembersTable.joinedAt, endedAt: teamMembersTable.endedAt,
+    }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+      .where(and(eq(teamsTable.communityId, communityId), inArray(teamMembersTable.userId, memberIds))) : Promise.resolve([] as Array<typeof teamMembersTable.$inferSelect>),
+  ]);
+  const profilesById = new Map(profiles.map((profile) => [profile.userId, profile]));
+  const snapshot = {
+    members: members.slice(0, employeesPage.limit),
+    employees: members.slice(0, employeesPage.limit).map((member) => {
+      const profile = profilesById.get(member.id);
+      return {
+        userId: member.id, username: member.username, displayName: member.displayName,
+        employeeNumber: profile?.employeeNumber ?? "", jobTitle: profile?.jobTitle ?? "",
+        employmentStatus: profile?.employmentStatus ?? "active", departmentId: profile?.departmentId ?? null,
+        locationId: profile?.locationId ?? null, managerId: profile?.managerId ?? null,
+        teamIds: teamMemberships.filter((item) => item.userId === member.id && item.status === "active").map((item) => item.teamId),
+        onboardedAt: profile?.onboardedAt ?? null, offboardedAt: profile?.offboardedAt ?? null,
+        presenceStatus: member.status,
+      };
+    }),
+    teamMemberships,
+    assignments: assignments.slice(0, assignmentsPage.limit).map((assignment) => ({ ...assignment, grantedBy: undefined })),
+    departments: departments.slice(0, departmentsPage.limit),
+    locations: locations.slice(0, locationsPage.limit),
+    teams: teams.slice(0, teamsPage.limit),
+    invitations: invitations.slice(0, invitationsPage.limit).map(safeInvitation),
+    pagination: {
+      employees: { ...employeesPage, hasMore: members.length > employeesPage.limit },
+      invitations: { ...invitationsPage, hasMore: invitations.length > invitationsPage.limit },
+      assignments: { ...assignmentsPage, hasMore: assignments.length > assignmentsPage.limit },
+      departments: { ...departmentsPage, hasMore: departments.length > departmentsPage.limit },
+      locations: { ...locationsPage, hasMore: locations.length > locationsPage.limit },
+      teams: { ...teamsPage, hasMore: teams.length > teamsPage.limit },
+    },
+  };
+  const etag = `"${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}"`;
+  res.set("Cache-Control", "private, no-cache").set("ETag", etag);
+  if (req.get("If-None-Match")?.split(",").some((value) => value.trim() === etag)) {
+    res.status(304).end();
+    return;
+  }
+  res.json(snapshot);
+});
+
 router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));

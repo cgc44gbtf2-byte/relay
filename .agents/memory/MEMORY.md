@@ -31,6 +31,7 @@
 - [Prettier external-file probes](prettier-external-file-probes.md) — keep temporary YAML validation fixtures inside the repository so Prettier CLI actually parses them.
 - [Completion rebase verification](completion-rebase-verification.md) — automatic concurrent-task integration can invalidate checks; compare pre-completion and reviewed trees.
 - [Organization freshness tradeoff](organization-freshness.md) — directory freshness should work without depending on the chat page's socket lifecycle.
+- [Organization snapshot validators](organization-snapshot-etags.md) — audit-only revisions miss presence and invitation delivery changes.
 - [Message notification intent](message-notification-intent.md) — preserve alert intent without depending on notification-table availability or mutable usernames.
 - [Pagination test prerequisites](pagination-test-prerequisites.md) — focused authenticated tests need shared role setup selected and ordered before dependent cases.
 - [Filtered pnpm test globs](filtered-pnpm-test-globs.md) — shell globs expand before pnpm changes workspace, so run package-local patterns in the package shell.

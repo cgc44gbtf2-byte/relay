@@ -394,6 +394,76 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+  /communities/{communityId}/organization-snapshot:
+    get:
+      operationId: getOrganizationSnapshot
+      tags: [communities]
+      summary: Get only the organization directory collections for a workspace
+      description: A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+      parameters:
+        - name: communityId
+          in: path
+          required: true
+          schema: { type: integer }
+        - $ref: "#/components/parameters/WorkspaceLimit"
+        - $ref: "#/components/parameters/WorkspaceOffset"
+        - name: employeesLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: employeesOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: invitationsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: invitationsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: assignmentsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: assignmentsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: departmentsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: departmentsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: locationsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: locationsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: teamsLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: teamsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: Organization page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationSnapshot" }
+        "304":
+          description: Organization page unchanged
+        "400":
+          description: Invalid pagination
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Workspace not found or inaccessible
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /communities/{communityId}/moderation-logs:
     get:
       operationId: listModerationLogs
@@ -948,6 +1018,21 @@ components:
         canManage: { type: boolean }
         pagination: { $ref: "#/components/schemas/PageInfo" }
         foldersPagination: { $ref: "#/components/schemas/PageInfo" }
+    OrganizationSnapshot:
+      type: object
+      required: [members, employees, assignments, departments, locations, teams, teamMemberships, invitations, pagination]
+      properties:
+        members: { type: array, items: { type: object } }
+        employees: { type: array, items: { type: object } }
+        assignments: { type: array, items: { type: object } }
+        departments: { type: array, items: { type: object } }
+        locations: { type: array, items: { type: object } }
+        teams: { type: array, items: { type: object } }
+        teamMemberships: { type: array, items: { type: object } }
+        invitations: { type: array, items: { type: object } }
+        pagination:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/PageInfo" }
     CommunityWorkspaceResponse:
       type: object
       required: [community, pagination]

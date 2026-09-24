@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { fetchOrganizationPages, mergeOrganizationPages, useOrganizationFreshness } from "./useOrganizationFreshness";
+import { fetchOrganizationPages, mergeOrganizationPages, requestOrganizationSnapshot, useOrganizationFreshness, type OrganizationPage } from "./useOrganizationFreshness";
 import {
   Bell,
   Activity,
@@ -4128,6 +4128,7 @@ function CommunityConsole() {
   requestedCommunityIdRef.current = requestedCommunityId;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const organizationSnapshotCache = useRef(new Map<string, { etag: string; page: OrganizationPage }>());
   const selectCommunity = (id: number) => {
     requestedCommunityIdRef.current = id;
     setSelectedId(id);
@@ -4180,7 +4181,8 @@ function CommunityConsole() {
     fetchFresh: async (id) => {
       const current = detail;
       if (!current || current.community.id !== id) return [];
-      return fetchOrganizationPages<CommunityDetail>(id, current, api);
+      return fetchOrganizationPages<OrganizationPage>(id, current,
+        (path) => requestOrganizationSnapshot(path, organizationSnapshotCache.current));
     },
     applyFresh: (id, pages) => {
       setDetail((current) => current && current.community.id === id

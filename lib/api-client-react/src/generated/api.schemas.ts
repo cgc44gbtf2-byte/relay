@@ -56,6 +56,36 @@ export interface DocumentListResponse {
   foldersPagination?: PageInfo;
 }
 
+export type OrganizationSnapshotMembersItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotEmployeesItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotAssignmentsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotDepartmentsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotLocationsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotTeamsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotTeamMembershipsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotInvitationsItem = { [key: string]: unknown };
+
+export type OrganizationSnapshotPagination = {[key: string]: PageInfo};
+
+export interface OrganizationSnapshot {
+  members: OrganizationSnapshotMembersItem[];
+  employees: OrganizationSnapshotEmployeesItem[];
+  assignments: OrganizationSnapshotAssignmentsItem[];
+  departments: OrganizationSnapshotDepartmentsItem[];
+  locations: OrganizationSnapshotLocationsItem[];
+  teams: OrganizationSnapshotTeamsItem[];
+  teamMemberships: OrganizationSnapshotTeamMembershipsItem[];
+  invitations: OrganizationSnapshotInvitationsItem[];
+  pagination: OrganizationSnapshotPagination;
+}
+
 export type CommunityWorkspaceResponseCommunity = { [key: string]: unknown };
 
 export type CommunityWorkspaceResponseMembersItem = { [key: string]: unknown };
@@ -593,6 +623,75 @@ announcementsLimit?: number;
  * @maximum 2147483647
  */
 announcementsOffset?: number;
+};
+
+export type GetOrganizationSnapshotParams = {
+/**
+ * Default limit for workspace collections; values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+limit?: WorkspaceLimitParameter;
+/**
+ * Default offset for workspace collections.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: WorkspaceOffsetParameter;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+employeesLimit?: number;
+/**
+ * @minimum 0
+ */
+employeesOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+invitationsLimit?: number;
+/**
+ * @minimum 0
+ */
+invitationsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+assignmentsLimit?: number;
+/**
+ * @minimum 0
+ */
+assignmentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+departmentsLimit?: number;
+/**
+ * @minimum 0
+ */
+departmentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+locationsLimit?: number;
+/**
+ * @minimum 0
+ */
+locationsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+teamsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamsOffset?: number;
 };
 
 export type ListModerationLogsParams = {

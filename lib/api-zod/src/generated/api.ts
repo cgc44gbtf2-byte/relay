@@ -513,6 +513,107 @@ export const GetCommunityWorkspaceResponse = zod.object({
 
 
 /**
+ * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+ * @summary Get only the organization directory collections for a workspace
+ */
+export const GetOrganizationSnapshotParams = zod.object({
+  "communityId": zod.coerce.number().int()
+})
+
+export const getOrganizationSnapshotQueryLimitDefault = 100;
+export const getOrganizationSnapshotQueryLimitMax = 2147483647;
+
+export const getOrganizationSnapshotQueryOffsetDefault = 0;
+export const getOrganizationSnapshotQueryOffsetMin = 0;
+export const getOrganizationSnapshotQueryOffsetMax = 2147483647;
+
+export const getOrganizationSnapshotQueryEmployeesLimitMax = 100;
+
+export const getOrganizationSnapshotQueryEmployeesOffsetMin = 0;
+
+export const getOrganizationSnapshotQueryInvitationsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryInvitationsOffsetMin = 0;
+
+export const getOrganizationSnapshotQueryAssignmentsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryAssignmentsOffsetMin = 0;
+
+export const getOrganizationSnapshotQueryDepartmentsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryDepartmentsOffsetMin = 0;
+
+export const getOrganizationSnapshotQueryLocationsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryLocationsOffsetMin = 0;
+
+export const getOrganizationSnapshotQueryTeamsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryTeamsOffsetMin = 0;
+
+
+
+export const GetOrganizationSnapshotQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryLimitMax).default(getOrganizationSnapshotQueryLimitDefault).describe('Default limit for workspace collections; values above 100 are capped.'),
+  "offset": zod.coerce.number().int().min(getOrganizationSnapshotQueryOffsetMin).max(getOrganizationSnapshotQueryOffsetMax).default(getOrganizationSnapshotQueryOffsetDefault).describe('Default offset for workspace collections.'),
+  "employeesLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryEmployeesLimitMax).optional(),
+  "employeesOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryEmployeesOffsetMin).optional(),
+  "invitationsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryInvitationsLimitMax).optional(),
+  "invitationsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryInvitationsOffsetMin).optional(),
+  "assignmentsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryAssignmentsLimitMax).optional(),
+  "assignmentsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryAssignmentsOffsetMin).optional(),
+  "departmentsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryDepartmentsLimitMax).optional(),
+  "departmentsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryDepartmentsOffsetMin).optional(),
+  "locationsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryLocationsLimitMax).optional(),
+  "locationsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryLocationsOffsetMin).optional(),
+  "teamsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryTeamsLimitMax).optional(),
+  "teamsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamsOffsetMin).optional()
+})
+
+export const GetOrganizationSnapshotHeader = zod.object({
+  "If-None-Match": zod.string().optional()
+})
+
+export const getOrganizationSnapshotResponsePaginationLimitMax = 100;
+
+export const getOrganizationSnapshotResponsePaginationOffsetMin = 0;
+
+
+
+export const GetOrganizationSnapshotResponse = zod.object({
+  "members": zod.array(zod.object({
+
+}).passthrough()),
+  "employees": zod.array(zod.object({
+
+}).passthrough()),
+  "assignments": zod.array(zod.object({
+
+}).passthrough()),
+  "departments": zod.array(zod.object({
+
+}).passthrough()),
+  "locations": zod.array(zod.object({
+
+}).passthrough()),
+  "teams": zod.array(zod.object({
+
+}).passthrough()),
+  "teamMemberships": zod.array(zod.object({
+
+}).passthrough()),
+  "invitations": zod.array(zod.object({
+
+}).passthrough()),
+  "pagination": zod.record(zod.string(), zod.object({
+  "limit": zod.number().int().min(1).max(getOrganizationSnapshotResponsePaginationLimitMax),
+  "offset": zod.number().int().min(getOrganizationSnapshotResponsePaginationOffsetMin),
+  "hasMore": zod.boolean()
+}))
+})
+
+
+/**
  * @summary List recent moderation actions
  */
 export const ListModerationLogsParams = zod.object({

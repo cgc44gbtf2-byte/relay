@@ -34,6 +34,7 @@ import type {
   GetAdminOverviewParams,
   GetCommunityWorkspaceParams,
   GetIrcStateParams,
+  GetOrganizationSnapshotParams,
   HealthStatus,
   IrcJoinInput,
   IrcMessage,
@@ -69,6 +70,7 @@ import type {
   OnboardingProgress,
   OnboardingProgressInput,
   OnboardingState,
+  OrganizationSnapshot,
   RetireAdminCustomRole200,
   SearchMessages200Item,
   SearchMessagesParams,
@@ -1277,6 +1279,96 @@ export function useGetCommunityWorkspace<TData = Awaited<ReturnType<typeof getCo
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetCommunityWorkspaceQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetOrganizationSnapshotUrl = (communityId: number,
+    params?: GetOrganizationSnapshotParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/organization-snapshot?${stringifiedParams}` : `/api/communities/${communityId}/organization-snapshot`
+}
+
+/**
+ * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+ * @summary Get only the organization directory collections for a workspace
+ */
+export const getOrganizationSnapshot = async (communityId: number,
+    params?: GetOrganizationSnapshotParams, options?: Parameters<typeof customFetch>[1]): Promise<OrganizationSnapshot> => {
+
+  return customFetch<OrganizationSnapshot>(getGetOrganizationSnapshotUrl(communityId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetOrganizationSnapshotQueryKey = (communityId: number,
+    params?: GetOrganizationSnapshotParams,) => {
+    return [
+    `/api/communities/${communityId}/organization-snapshot`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetOrganizationSnapshotQueryOptions = <TData = Awaited<ReturnType<typeof getOrganizationSnapshot>>, TError = ErrorType<void | ErrorResponse>>(communityId: number,
+    params?: GetOrganizationSnapshotParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOrganizationSnapshot>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOrganizationSnapshotQueryKey(communityId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOrganizationSnapshot>>> = ({ signal }) => getOrganizationSnapshot(communityId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOrganizationSnapshot>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetOrganizationSnapshotQueryResult = NonNullable<Awaited<ReturnType<typeof getOrganizationSnapshot>>>
+export type GetOrganizationSnapshotQueryError = ErrorType<void | ErrorResponse>
+
+
+/**
+ * @summary Get only the organization directory collections for a workspace
+ */
+
+export function useGetOrganizationSnapshot<TData = Awaited<ReturnType<typeof getOrganizationSnapshot>>, TError = ErrorType<void | ErrorResponse>>(
+ communityId: number,
+    params?: GetOrganizationSnapshotParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOrganizationSnapshot>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetOrganizationSnapshotQueryOptions(communityId,params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

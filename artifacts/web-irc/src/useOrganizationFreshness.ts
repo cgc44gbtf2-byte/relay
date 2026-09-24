@@ -14,6 +14,25 @@ export type OrganizationPage = {
   pagination?: Record<string, { hasMore: boolean; limit?: number; offset?: number }>;
 };
 
+export async function requestOrganizationSnapshot(
+  path: string,
+  cache: Map<string, { etag: string; page: OrganizationPage }>,
+  request: typeof fetch = fetch,
+): Promise<OrganizationPage> {
+  const cached = cache.get(path);
+  const response = await request(`/api${path}`, {
+    credentials: "include",
+    cache: "no-store",
+    headers: cached ? { "If-None-Match": cached.etag } : {},
+  });
+  if (response.status === 304 && cached) return cached.page;
+  const page = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(page.error ?? "Could not refresh the organization directory.");
+  const etag = response.headers.get("ETag");
+  if (etag) cache.set(path, { etag, page });
+  return page as OrganizationPage;
+}
+
 type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams" | "invitations">;
 
 function pageQuery(lengths: OrganizationLengths, offset: number): string {
@@ -21,17 +40,10 @@ function pageQuery(lengths: OrganizationLengths, offset: number): string {
     ? PAGE_SIZE
     : Math.min(PAGE_SIZE, Math.max(1, items.length - offset));
   const params = new URLSearchParams({
-    view: "summary",
     employeesLimit: String(limit(lengths.employees)),
     employeesOffset: String(offset),
     invitationsLimit: String(limit(lengths.invitations)),
     invitationsOffset: String(offset),
-    tasksLimit: "1",
-    tasksOffset: "0",
-    channelsLimit: "1",
-    channelsOffset: "0",
-    categoriesLimit: "1",
-    categoriesOffset: "0",
     assignmentsLimit: String(limit(lengths.assignments)),
     assignmentsOffset: String(offset),
     departmentsLimit: String(limit(lengths.departments)),
@@ -40,8 +52,6 @@ function pageQuery(lengths: OrganizationLengths, offset: number): string {
     locationsOffset: String(offset),
     teamsLimit: String(limit(lengths.teams)),
     teamsOffset: String(offset),
-    policiesLimit: "1",
-    policiesOffset: "0",
   });
   return params.toString();
 }
@@ -64,12 +74,12 @@ export async function fetchOrganizationPages<T extends OrganizationPage>(
   const pages: T[] = [];
   for (let offset = 0; offset < loaded; offset += PAGE_SIZE) {
     // Sequential requests keep a refresh bounded and avoid a request burst.
-    pages.push(await request(`/communities/${workspaceId}?${pageQuery(current, offset)}`));
+    pages.push(await request(`/communities/${workspaceId}/organization-snapshot?${pageQuery(current, offset)}`));
   }
   return pages;
 }
 
-export function mergeOrganizationPages<T extends OrganizationPage>(current: T, pages: T[]): T {
+export function mergeOrganizationPages<T extends OrganizationPage>(current: T, pages: OrganizationPage[]): T {
   if (pages.length === 0) return current;
   const pageCount = (items: unknown[]) => Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const combined = <K extends keyof OrganizationPage>(key: K, count: number) =>
@@ -81,6 +91,7 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
   const departmentPages = pageCount(current.departments);
   const locationPages = pageCount(current.locations);
   const teamPages = pageCount(current.teams);
+  const membershipKeys = new Set<string>();
   return {
     ...current,
     members: combined("members", employeePages),
@@ -89,7 +100,13 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
     departments: combined("departments", departmentPages),
     locations: combined("locations", locationPages),
     teams: combined("teams", teamPages),
-    teamMemberships: combined("teamMemberships", employeePages),
+    teamMemberships: combined("teamMemberships", employeePages).filter((membership) => {
+      const item = membership as { teamId: number; userId: string };
+      const key = `${item.teamId}:${item.userId}`;
+      if (membershipKeys.has(key)) return false;
+      membershipKeys.add(key);
+      return true;
+    }),
     invitations: combined("invitations", pageCount(current.invitations)),
     pagination: {
       ...current.pagination,

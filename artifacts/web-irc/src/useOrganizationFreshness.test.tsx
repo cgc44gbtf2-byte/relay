@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchOrganizationPages,
   mergeOrganizationPages,
+  requestOrganizationSnapshot,
   useOrganizationFreshness,
   type OrganizationPage,
 } from "./useOrganizationFreshness";
@@ -66,9 +67,24 @@ describe("organization freshness", () => {
     await fetchOrganizationPages(12, current, request);
 
     expect(request).toHaveBeenCalledTimes(2);
-    expect(request.mock.calls.every(([path]) => path.startsWith("/communities/12?"))).toBe(true);
+    expect(request.mock.calls.every(([path]) => path.startsWith("/communities/12/organization-snapshot?"))).toBe(true);
+    expect(request.mock.calls.every(([path]) => !/tasks|announcements|policies|channels|categories|view=summary/.test(path))).toBe(true);
     expect(request.mock.calls[1][0]).toContain("employeesOffset=100");
     expect(request.mock.calls[1][0]).toContain("employeesLimit=75");
+  });
+
+  it("sends a conditional request and reuses the authorized page when unchanged", async () => {
+    const cache = new Map<string, { etag: string; page: OrganizationPage }>();
+    const snapshot = page(12, "1");
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200, headers: { ETag: '"first"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    const path = "/communities/12/organization-snapshot?employeesLimit=100";
+    expect(await requestOrganizationSnapshot(path, cache, request)).toEqual(snapshot);
+    expect(await requestOrganizationSnapshot(path, cache, request)).toEqual(snapshot);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][1].headers).toEqual({ "If-None-Match": '"first"' });
+    expect(request.mock.calls[1][1].credentials).toBe("include");
   });
 
   it("keeps the loaded row depth when replacing paginated organization data", () => {
