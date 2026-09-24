@@ -24,12 +24,6 @@ const expectedEnv = new Map([
     "TEST_DATABASE_URL",
     "postgresql://postgres@127.0.0.1:5432/web_irc_cleanup",
   ],
-  ["CLERK_SECRET_KEY", "${{ secrets.CLERK_TEST_SECRET_KEY }}"],
-  ["CLERK_PUBLISHABLE_KEY", "${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}"],
-  [
-    "TEAM_NOTIFICATION_WEBHOOK_URL",
-    "${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}",
-  ],
 ]);
 
 assert.match(
@@ -40,7 +34,7 @@ assert.match(
 assert.deepEqual(
   envEntries,
   expectedEnv,
-  "scheduled cleanup must use only the disposable database and test Clerk secrets",
+  "scheduled cleanup job-level env must contain only the disposable database; credentials belong on the cleanup step",
 );
 assert.match(
   job,
@@ -80,8 +74,8 @@ validateCleanupSteps(job);
 console.log(`Validated scheduled cleanup environment in ${workflowPath}`);
 
 function validateCleanupSteps(job) {
-  // Job-scoped credentials reach every step. Fail closed on additions or
-  // changes to executable content, not just on unfamiliar display names.
+  // Only the cleanup command may receive credentials. Exact definitions also
+  // reject setup-step env/with injections and changes to executable content.
   const approvedSteps = [
     `- name: Check out repository
   uses: actions/checkout@v4`,
@@ -99,6 +93,10 @@ function validateCleanupSteps(job) {
     `- name: Create disposable test schema
   run: env -u DATABASE_URL pnpm --filter @workspace/db run push:test`,
     `- name: Remove abandoned test users
+  env:
+    CLERK_SECRET_KEY: \${{ secrets.CLERK_TEST_SECRET_KEY }}
+    CLERK_PUBLISHABLE_KEY: \${{ secrets.CLERK_TEST_PUBLISHABLE_KEY }}
+    TEAM_NOTIFICATION_WEBHOOK_URL: \${{ secrets.TEAM_NOTIFICATION_WEBHOOK_URL }}
   run: >-
     env -u DATABASE_URL
     pnpm --filter @workspace/api-server run cleanup:test-users:scheduled`,
@@ -176,6 +174,10 @@ function parseEnvEntries(envBlock) {
     assert.ok(
       match,
       `scheduled cleanup contains an invalid env entry: ${line}`,
+    );
+    assert.ok(
+      !entries.has(match[1]),
+      `scheduled cleanup contains a duplicate env entry: ${match[1]}`,
     );
     entries.set(match[1], match[2] ?? "");
   }

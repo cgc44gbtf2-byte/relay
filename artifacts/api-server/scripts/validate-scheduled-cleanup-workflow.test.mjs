@@ -61,7 +61,7 @@ test("accepts the existing scheduled cleanup workflow", async () => {
   assert.equal(result.code, 0, result.output);
 });
 
-test("rejects an unrelated step inheriting cleanup credentials", async () => {
+test("rejects an unrelated step in the cleanup job", async () => {
   const result = await runValidator(unrelatedStepFixturePath);
   assert.notEqual(result.code, 0, result.output);
   assert.match(
@@ -111,6 +111,86 @@ test("rejects blank lines that split the folded cleanup command", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+const cleanupCredentials = [
+  ["CLERK_SECRET_KEY", "CLERK_TEST_SECRET_KEY"],
+  ["CLERK_PUBLISHABLE_KEY", "CLERK_TEST_PUBLISHABLE_KEY"],
+  ["TEAM_NOTIFICATION_WEBHOOK_URL", "TEAM_NOTIFICATION_WEBHOOK_URL"],
+];
+const setupStepNames = [
+  "Check out repository",
+  "Set up pnpm",
+  "Set up Node.js",
+  "Install dependencies",
+  "Create disposable test schema",
+];
+
+for (const [key, secret] of cleanupCredentials) {
+  const entry = `${key}: \${{ secrets.${secret} }}`;
+
+  test(`rejects ${key} exposed at job scope`, async () => {
+    await assertRejectedMutation(
+      (job) => job.replace(/^    env:\n/m, `    env:\n      ${entry}\n`),
+      /job-level env must contain only the disposable database/,
+    );
+  });
+
+  for (const stepName of setupStepNames) {
+    test(`rejects ${key} exposed to ${stepName}`, async () => {
+      await assertRejectedMutation(
+        (job) => job.replace(
+          `      - name: ${stepName}\n`,
+          `      - name: ${stepName}\n        env:\n          ${entry}\n`,
+        ),
+        /unapproved credential-bearing step/,
+      );
+    });
+  }
+
+  test(`requires ${key} on the cleanup command itself`, async () => {
+    await assertRejectedMutation(
+      (job) => job.replace(`          ${entry}\n`, ""),
+      /unapproved credential-bearing step: - name: Remove abandoned test users/,
+    );
+  });
+
+  test(`requires the approved secret binding for ${key}`, async () => {
+    await assertRejectedMutation(
+      (job) => job.replace(entry, `${key}: incorrect-value`),
+      /unapproved credential-bearing step: - name: Remove abandoned test users/,
+    );
+  });
+}
+
+test("rejects arbitrary secrets aliased into job env", async () => {
+  await assertRejectedMutation(
+    (job) => job.replace(
+      /^    env:\n/m,
+      "    env:\n      OTHER_TOKEN: ${{ secrets.OTHER_TOKEN }}\n",
+    ),
+    /job-level env must contain only the disposable database/,
+  );
+});
+
+async function assertRejectedMutation(mutate, expectedError) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cleanup-workflow-"));
+  try {
+    const source = await readFile(ciWorkflowPath, "utf8");
+    const header = "  cleanup-abandoned-test-users:";
+    const jobStart = source.indexOf(header);
+    assert.notEqual(jobStart, -1);
+    const job = source.slice(jobStart);
+    const mutated = mutate(job);
+    assert.notEqual(mutated, job, "mutation must change the cleanup job");
+    const workflowPath = path.join(directory, "ci.yml");
+    await writeFile(workflowPath, source.slice(0, jobStart) + mutated);
+    const result = await runValidator(workflowPath);
+    assert.notEqual(result.code, 0, result.output);
+    assert.match(result.output, expectedError);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 function runValidator(workflowPath) {
   return new Promise((resolve, reject) => {
