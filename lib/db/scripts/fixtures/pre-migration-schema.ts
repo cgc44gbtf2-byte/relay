@@ -71,6 +71,26 @@ export const communitiesTable = pgTable(
   ],
 );
 
+export const communityUpgradeRequestsTable = pgTable("irc_community_upgrade_requests", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  displayName: text("display_name").notNull(),
+  status: text("status").notNull().default("pending"),
+  priceCents: integer("price_cents").notNull().default(1999),
+  currency: text("currency").notNull().default("USD"),
+  paymentReference: text("payment_reference"),
+  reviewedBy: text("reviewed_by").references(() => usersTable.clerkId, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("irc_community_upgrade_one_pending_idx").on(table.userId)
+    .where(sql`${table.status} = 'pending'`),
+  uniqueIndex("irc_community_upgrade_payment_reference_idx").on(table.paymentReference)
+    .where(sql`${table.paymentReference} IS NOT NULL`),
+  index("irc_community_upgrade_user_status_idx").on(table.userId, table.status),
+]);
+
 export const permissionDefinitionsTable = pgTable(
   "irc_permission_definitions",
   {
