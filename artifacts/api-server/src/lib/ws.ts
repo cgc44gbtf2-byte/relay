@@ -16,11 +16,11 @@ type Client = {
   typingWindowStartedAt: number;
   typingFrameCount: number;
   lastTypingAt: number;
-  sessionCheck: ReturnType<typeof setInterval>;
 };
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
 type ChannelReader = typeof channelForRead;
 type ChannelAccessChecker = typeof canReadChannel;
+type SessionReader = (sessionId: string) => Promise<{ userId: string; status: string }>;
 
 const TICKET_LIFETIME_MS = 60_000;
 const TICKET_CLEANUP_INTERVAL_MS = 60_000;
@@ -29,6 +29,9 @@ const CHANNEL_LIST_ACCESS_CONCURRENCY = 8;
 
 export class Hub {
   private clients = new Set<Client>();
+  private sessionClients = new Map<string, Set<Client>>();
+  private sessionCheckTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private sessionChecksInFlight = new Set<string>();
   private channelClients = new Map<number, Set<Client>>();
   private tickets = new Map<string, Ticket>();
   private presenceWrites = new Map<string, Promise<void>>();
@@ -38,6 +41,8 @@ export class Hub {
   constructor(
     private readonly readChannel: ChannelReader = channelForRead,
     private readonly userCanReadChannel: ChannelAccessChecker = canReadChannel,
+    private readonly readSession: SessionReader = (sessionId) =>
+      clerkClient.sessions.getSession(sessionId),
   ) {
     this.ticketCleanupTimer = setInterval(
       () => this.cleanupExpiredTickets(),
@@ -98,7 +103,8 @@ export class Hub {
   dispose(): void {
     clearInterval(this.ticketCleanupTimer);
     clearInterval(this.subscriptionCheckTimer);
-    for (const client of this.clients) clearInterval(client.sessionCheck);
+    for (const timer of this.sessionCheckTimers.values()) clearInterval(timer);
+    this.sessionCheckTimers.clear();
   }
 
   broadcastChannel(channelId: number, event: unknown, excludedUserId?: string): void {
@@ -194,12 +200,17 @@ export class Hub {
   }
 
   async revalidateSession(sessionId: string): Promise<void> {
-    const clients = [...this.clients].filter((client) => client.sessionId === sessionId);
-    if (clients.length === 0) return;
+    if (
+      !this.sessionClients.get(sessionId)?.size ||
+      this.sessionChecksInFlight.has(sessionId)
+    ) {
+      return;
+    }
 
+    this.sessionChecksInFlight.add(sessionId);
     try {
-      const session = await clerkClient.sessions.getSession(sessionId);
-      for (const client of clients) {
+      const session = await this.readSession(sessionId);
+      for (const client of this.sessionClients.get(sessionId) ?? []) {
         if (
           session.userId !== client.userId ||
           session.status !== "active"
@@ -208,10 +219,36 @@ export class Hub {
         }
       }
     } catch {
-      for (const client of clients) {
+      for (const client of this.sessionClients.get(sessionId) ?? []) {
         client.socket.close(1008, "Session could not be revalidated.");
       }
+    } finally {
+      this.sessionChecksInFlight.delete(sessionId);
     }
+  }
+
+  private registerClient(client: Client): void {
+    this.clients.add(client);
+    const sessionClients = this.sessionClients.get(client.sessionId) ?? new Set<Client>();
+    sessionClients.add(client);
+    this.sessionClients.set(client.sessionId, sessionClients);
+
+    if (!this.sessionCheckTimers.has(client.sessionId)) {
+      const timer = setInterval(() => void this.revalidateSession(client.sessionId), 60_000);
+      this.sessionCheckTimers.set(client.sessionId, timer);
+    }
+  }
+
+  private unregisterClient(client: Client): void {
+    this.clients.delete(client);
+    const sessionClients = this.sessionClients.get(client.sessionId);
+    sessionClients?.delete(client);
+    if (sessionClients?.size) return;
+
+    this.sessionClients.delete(client.sessionId);
+    const timer = this.sessionCheckTimers.get(client.sessionId);
+    if (timer !== undefined) clearInterval(timer);
+    this.sessionCheckTimers.delete(client.sessionId);
   }
 
   private hasConnectedUser(userId: string): boolean {
@@ -296,12 +333,8 @@ export class Hub {
         typingWindowStartedAt: Date.now(),
         typingFrameCount: 0,
         lastTypingAt: 0,
-        sessionCheck: setInterval(
-          () => void this.revalidateSession(ticket.sessionId),
-          60_000,
-        ),
       } satisfies Client;
-      this.clients.add(client);
+      this.registerClient(client);
       this.updatePresence(ticket.userId);
       ws.on("message", (raw) => {
         try {
@@ -367,8 +400,7 @@ export class Hub {
         }
       });
       ws.on("close", () => {
-        clearInterval(client.sessionCheck);
-        this.clients.delete(client);
+        this.unregisterClient(client);
         for (const channelId of client.channelIds) {
           this.removeChannelSubscription(client, channelId);
         }

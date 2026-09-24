@@ -8,7 +8,9 @@ type FakeSocket = {
   OPEN: number;
   readyState: number;
   events: unknown[];
+  closeCalls: Array<{ code?: number; reason?: string }>;
   send: (payload: string) => void;
+  close: (code?: number, reason?: string) => void;
 };
 
 function socket(): FakeSocket {
@@ -16,17 +18,22 @@ function socket(): FakeSocket {
     OPEN: 1,
     readyState: 1,
     events: [],
+    closeCalls: [],
     send(payload) {
       value.events.push(JSON.parse(payload));
+    },
+    close(code, reason) {
+      value.closeCalls.push({ code, reason });
     },
   };
   return value;
 }
 
-function client(userId: string, fakeSocket: FakeSocket) {
+function client(userId: string, fakeSocket: FakeSocket, sessionId = "session") {
   return {
     socket: fakeSocket,
     userId,
+    sessionId,
     channelIds: new Set<number>(),
     channelGenerations: new Map<number, number>(),
   };
@@ -236,6 +243,61 @@ describe("websocket multi-connection presence", () => {
 
     internals.clients.delete(second);
     assert.equal(internals.hasConnectedUser("same-user"), false);
+    hub.dispose();
+  });
+});
+
+describe("websocket session revalidation", () => {
+  test("shares checks by session and closes only sockets for an inactive session", async () => {
+    const requests: string[] = [];
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const hub = new Hub(undefined, undefined, async (sessionId) => {
+      requests.push(sessionId);
+      if (sessionId === "session-one") await lookupGate;
+      return {
+        userId: "same-user",
+        status: sessionId === "session-one" ? "revoked" : "active",
+      };
+    });
+    const internals = hub as any;
+    const firstSessionSocket = socket();
+    const secondSessionSocket = socket();
+    const otherSessionSocket = socket();
+    const firstSessionClient = client("same-user", firstSessionSocket, "session-one");
+    const secondSessionClient = client("same-user", secondSessionSocket, "session-one");
+
+    internals.registerClient(firstSessionClient);
+    internals.registerClient(secondSessionClient);
+    internals.registerClient(client("same-user", otherSessionSocket, "session-two"));
+
+    assert.equal(internals.sessionCheckTimers.size, 2);
+    assert.equal(internals.sessionClients.get("session-one").size, 2);
+
+    const firstCheck = hub.revalidateSession("session-one");
+    const overlappingCheck = hub.revalidateSession("session-one");
+    assert.deepEqual(requests, ["session-one"]);
+    releaseLookup();
+    await Promise.all([firstCheck, overlappingCheck]);
+    await hub.revalidateSession("session-two");
+
+    assert.deepEqual(requests, ["session-one", "session-two"]);
+    assert.deepEqual(firstSessionSocket.closeCalls, [
+      { code: 1008, reason: "Session is no longer active." },
+    ]);
+    assert.deepEqual(secondSessionSocket.closeCalls, [
+      { code: 1008, reason: "Session is no longer active." },
+    ]);
+    assert.deepEqual(otherSessionSocket.closeCalls, []);
+
+    internals.unregisterClient(firstSessionClient);
+    assert.equal(internals.sessionCheckTimers.has("session-one"), true);
+    internals.unregisterClient(secondSessionClient);
+    assert.equal(internals.sessionClients.has("session-one"), false);
+    assert.equal(internals.sessionCheckTimers.has("session-one"), false);
+    assert.equal(internals.sessionCheckTimers.size, 1);
     hub.dispose();
   });
 });
