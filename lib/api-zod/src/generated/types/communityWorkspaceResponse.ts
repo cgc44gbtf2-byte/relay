@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CommunityWorkspaceResponseAnnouncementsItem } from './communityWorkspaceResponseAnnouncementsItem';
 import type { CommunityWorkspaceResponseAssignmentsItem } from './communityWorkspaceResponseAssignmentsItem';
 import type { CommunityWorkspaceResponseCategoriesItem } from './communityWorkspaceResponseCategoriesItem';
 import type { CommunityWorkspaceResponseChannelsItem } from './communityWorkspaceResponseChannelsItem';
@@ -32,5 +33,6 @@ export interface CommunityWorkspaceResponse {
   employees?: CommunityWorkspaceResponseEmployeesItem[];
   invitations?: CommunityWorkspaceResponseInvitationsItem[];
   tasks?: CommunityWorkspaceResponseTasksItem[];
+  announcements?: CommunityWorkspaceResponseAnnouncementsItem[];
   pagination: CommunityWorkspaceResponsePagination;
 }

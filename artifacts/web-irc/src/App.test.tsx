@@ -22,7 +22,141 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
+
+describe("IRC collection pagination", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("loads every page of a collection, including records beyond the first 100", async () => {
+    const first = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(first), { headers: { "X-Has-More": "true", "X-Next-Offset": "100" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 101 }]), { headers: { "X-Has-More": "false" } }));
+    vi.stubGlobal("fetch", fetch);
+    const result = await pagedApi<{ id: number }>("/channels");
+    expect(result).toHaveLength(101);
+    expect(result.at(-1)).toEqual({ id: 101 });
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/channels", "/api/channels?limit=100&offset=100"]);
+  });
+
+  it("rejects a later-page failure rather than showing an incomplete collection", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 1 }]), { headers: { "X-Has-More": "true", "X-Next-Offset": "1" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Next page unavailable" }), { status: 503 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(pagedApi<{ id: number }>("/categories")).rejects.toThrow("Next page unavailable");
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/categories", "/api/categories?limit=100&offset=1"]);
+  });
+});
+
+describe("admin and developer collection pagination", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(["/admin/users?q=page", "/admin/role-assignments", "/developer/releases"])(
+    "loads all 101 records from %s",
+    async (path) => {
+      const fetch = vi.fn((input: RequestInfo | URL) => {
+        const url = new URL(String(input), "http://localhost");
+        const offset = Number(url.searchParams.get("offset"));
+        return jsonResponse(Array.from({ length: Math.max(0, Math.min(100, 101 - offset)) }, (_, index) => ({ id: offset + index + 1 })));
+      });
+      vi.stubGlobal("fetch", fetch);
+      const rows = await allCollectionPages<{ id: number }>(path);
+      expect(rows).toHaveLength(101);
+      expect(rows.at(-1)?.id).toBe(101);
+      expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+        `/api${path}${path.includes("?") ? "&" : "?"}limit=100&offset=0`,
+        `/api${path}${path.includes("?") ? "&" : "?"}limit=100&offset=100`,
+      ]);
+    },
+  );
+
+  it("does not accept partial collections when an admin or developer page fails", async () => {
+    for (const path of ["/admin/users", "/developer/releases"]) {
+      const fetch = vi.fn((input: RequestInfo | URL) =>
+        String(input).includes("offset=100")
+          ? jsonResponse({ error: "Second page unavailable" }, 503)
+          : jsonResponse(Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }))));
+      vi.stubGlobal("fetch", fetch);
+      await expect(allCollectionPages(path)).rejects.toThrow("Second page unavailable");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("merges independent admin overview collections through their last pages", async () => {
+    const fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const offset = Number(url.searchParams.get("channelOffset") ?? 0);
+      return jsonResponse({
+        stats: { users: 1 },
+        activity: [{ id: 1 }],
+        channels: Array.from({ length: Math.max(0, Math.min(50, 101 - offset)) }, (_, index) => ({ id: offset + index + 1 })),
+        categories: Array.from({ length: Math.max(0, Math.min(50, 51 - offset)) }, (_, index) => ({ id: offset + index + 1 })),
+        collectionPagination: {
+          channels: { hasMore: offset + 50 <= 101 },
+          categories: { hasMore: offset + 50 <= 51 },
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const overview = await loadAdminOverview<{ channels: Array<{ id: number }>; categories: Array<{ id: number }>; activity: Array<{ id: number }>; collectionPagination: { channels: { hasMore: boolean }; categories: { hasMore: boolean } } }>("/admin/overview?activityLimit=1");
+    expect(overview.channels).toHaveLength(101);
+    expect(overview.categories).toHaveLength(51);
+    expect(overview.activity).toEqual([{ id: 1 }]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/admin/overview?activityLimit=1",
+      "/api/admin/overview?activityLimit=1&channelOffset=50&categoryOffset=50",
+      "/api/admin/overview?activityLimit=1&channelOffset=100&categoryOffset=100",
+    ]);
+  });
+
+  it("propagates an overview second-page error", async () => {
+    const fetch = vi.fn((input: RequestInfo | URL) =>
+      String(input).includes("channelOffset=50")
+        ? jsonResponse({ error: "Overview page unavailable" }, 503)
+        : jsonResponse({ channels: [{ id: 1 }], categories: [], collectionPagination: { channels: { hasMore: true }, categories: { hasMore: false } } }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(loadAdminOverview("/admin/overview")).rejects.toThrow("Overview page unavailable");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("workspace detail pagination", () => {
+  it("advances independent page offsets and preserves finished collection metadata", () => {
+    type Detail = Parameters<typeof appendWorkspaceDetailPage>[0];
+    const collections = {
+      members: [{ id: "one" }], employees: [{ userId: "one" }], teamMemberships: [{ teamId: 1, userId: "one" }],
+      channels: [{ id: 2 }], categories: [], assignments: [], invitations: [], tasks: [],
+      departments: [], locations: [], teams: [], policies: [], announcements: [{ id: 20 }],
+    };
+    const pagination = Object.fromEntries(
+      ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"]
+        .map((key) => [key, { limit: key === "announcements" ? 20 : 100, offset: 0, hasMore: ["employees", "channels", "announcements"].includes(key) }]),
+    ) as Detail["pagination"];
+    const current = { ...collections, pagination } as unknown as Detail;
+    const query = new URLSearchParams(workspaceDetailPageQuery(current));
+    expect(query.get("employeesOffset")).toBe("100");
+    expect(query.get("channelsOffset")).toBe("100");
+    expect(query.get("announcementsOffset")).toBe("20");
+    expect(query.get("announcementsLimit")).toBe("100");
+    expect(query.get("tasksLimit")).toBe("1");
+    const page = {
+      ...collections, members: [{ id: "two" }], employees: [{ userId: "two" }],
+      teamMemberships: [{ teamId: 1, userId: "one" }, { teamId: 2, userId: "two" }],
+      channels: [{ id: 3 }], announcements: [{ id: 19 }],
+      pagination: Object.fromEntries(Object.entries(pagination ?? {}).map(([key, value]) =>
+        [key, { ...value, offset: 100, hasMore: false }],
+      )) as Detail["pagination"],
+    } as unknown as Detail;
+    const merged = appendWorkspaceDetailPage(current, page);
+    expect(merged.members.map((item) => item.id)).toEqual(["one", "two"]);
+    expect(merged.teamMemberships).toHaveLength(2);
+    expect(merged.channels.map((item) => item.id)).toEqual([2, 3]);
+    expect(merged.announcements.map((item) => item.id)).toEqual([20, 19]);
+    expect(merged.pagination?.tasks.offset).toBe(0);
+    expect(merged.pagination?.announcements.hasMore).toBe(false);
+  });
+});
 
 type Channel = {
   id: number;
@@ -1470,7 +1604,7 @@ describe("frontend route and document error hardening", () => {
           networkStatusLabel: "secret",
         });
       }
-      if (url === "/api/developer/releases") {
+      if (url.startsWith("/api/developer/releases?")) {
         return jsonResponse({ error: "Developer access denied" }, 403);
       }
       return jsonResponse({});

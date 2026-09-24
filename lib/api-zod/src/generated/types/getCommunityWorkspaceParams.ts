@@ -5,8 +5,22 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { WorkspaceLimitParameter } from './workspaceLimitParameter';
+import type { WorkspaceOffsetParameter } from './workspaceOffsetParameter';
 
 export type GetCommunityWorkspaceParams = {
+/**
+ * Default limit for workspace collections; values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+limit?: WorkspaceLimitParameter;
+/**
+ * Default offset for workspace collections.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: WorkspaceOffsetParameter;
 /**
  * @minimum 1
  * @maximum 100
@@ -97,4 +111,15 @@ policiesLimit?: number;
  * @minimum 0
  */
 policiesOffset?: number;
+/**
+ * Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+announcementsLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+announcementsOffset?: number;
 };

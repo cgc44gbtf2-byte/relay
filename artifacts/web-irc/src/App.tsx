@@ -192,20 +192,31 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await apiResponse<T>(path, init)).data;
 }
 
-async function pagedApi<T>(path: string): Promise<T[]> {
+export async function allCollectionPages<T>(path: string): Promise<T[]> {
+  const items: T[] = [];
+  const pageSize = 100;
+  for (let offset = 0; offset <= 2_147_483_647; offset += pageSize) {
+    const separator = path.includes("?") ? "&" : "?";
+    const page = await api<T[]>(`${path}${separator}limit=${pageSize}&offset=${offset}`);
+    items.push(...page);
+    if (page.length < pageSize) return items;
+  }
+  throw new Error("Collection exceeds the supported pagination range.");
+}
+
+export async function pagedApi<T>(path: string): Promise<T[]> {
   const results: T[] = [];
   let offset = 0;
-  for (let page = 0; page < 1_000; page += 1) {
+  while (true) {
     const { data, response } = await apiResponse<T[]>(
-      page === 0 ? path : `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
+      offset === 0 ? path : `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
     );
     results.push(...data);
     if (response.headers.get("X-Has-More") !== "true") return results;
     const nextOffset = Number(response.headers.get("X-Next-Offset"));
-    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) return results;
+    if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) throw new Error("Invalid collection pagination response.");
     offset = nextOffset;
   }
-  return results;
 }
 
 async function notificationPage<T>(path: string): Promise<{ data: T[]; hasMore: boolean; nextOffset: number | null }> {
@@ -578,7 +589,7 @@ function ChatApp() {
 
   const refreshChannels = async (): Promise<Channel[]> => {
     if (channelRefreshRef.current) return channelRefreshRef.current;
-    const request = api<Channel[]>("/channels").then((list) => {
+    const request = pagedApi<Channel>("/channels").then((list) => {
       setChannels(list);
       setChannelRefreshError("");
       return list;
@@ -639,7 +650,7 @@ function ChatApp() {
     }
   };
   const refreshChannelOrganization = async (): Promise<Channel[]> => {
-    const [list] = await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
+    const [list] = await Promise.all([refreshChannels(), pagedApi<Category>("/categories").then(setCategories)]);
     return list;
   };
   refreshChannelOrganizationRef.current = refreshChannelOrganization;
@@ -682,8 +693,8 @@ function ChatApp() {
     setBootstrapError("");
     Promise.allSettled([
       api<Profile>("/me"),
-      api<Channel[]>("/channels"),
-      api<Category[]>("/categories"),
+      pagedApi<Channel>("/channels"),
+      pagedApi<Category>("/categories"),
       api<Notification[]>("/notifications?limit=100&offset=0"),
     ]).then(([meResult, channelsResult, categoriesResult, notificationsResult]) => {
       if (cancelled) return;
@@ -894,7 +905,7 @@ function ChatApp() {
       };
     }
     const timer = window.setTimeout(() => {
-      api<Profile[]>(`/users/search?q=${encodeURIComponent(query)}`)
+      pagedApi<Profile>(`/users/search?q=${encodeURIComponent(query)}`)
         .then((results) => {
           if (userSearchRequestRef.current === requestId) setUserResults(results);
         })
@@ -1128,7 +1139,7 @@ function ChatApp() {
   const searchHistory = async (event: FormEvent) => {
     event.preventDefault();
     if (search.trim().length < 2) return;
-    setSearchResults(await api<ChatMessage[]>(`/search/messages?q=${encodeURIComponent(search)}`));
+    setSearchResults(await pagedApi<ChatMessage>(`/search/messages?q=${encodeURIComponent(search)}`));
     setPanel("search");
   };
   const openNotificationMessage = (message: LinkedNotificationMessage) => {
@@ -1186,7 +1197,7 @@ function ChatApp() {
     setMoveSpaceOpen(true);
     setMoveSpaceWorking(true);
     try {
-      setPublicSpaces(await api<Array<{ id: number; name: string }>>(`/channels/${channelId}/public-spaces`));
+      setPublicSpaces(await pagedApi<{ id: number; name: string }>(`/channels/${channelId}/public-spaces`));
     } catch (error) {
       setMoveSpaceError(error instanceof Error ? error.message : "Could not load public spaces.");
     } finally {
@@ -1457,7 +1468,7 @@ function AdminDashboard() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
-  const loadOverview = () => api<AdminOverview>("/admin/overview").then(setOverview).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load admin overview"));
+  const loadOverview = () => loadAdminOverview<AdminOverview>("/admin/overview").then(setOverview).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load admin overview"));
   useEffect(() => {
     api<AdminStatus>("/admin/status").then(setStatus).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load admin status")).finally(() => setLoading(false));
   }, []);
@@ -1494,6 +1505,7 @@ type ConsoleOverview = {
   users: Array<{ id: string; username: string; displayName: string; role: string; status: string; accountStatus: "active" | "suspended"; createdAt: string; lastSeenAt: string }>;
   channels: Array<{ id: number; name: string; topic: string; memberCount: number; communityId: number | null; categoryId: number | null; communityName: string | null; createdAt: string }>;
   categories: Array<{ id: number; name: string; description: string; communityId: number | null; communityName: string | null; communityOwnerId: string | null }>;
+  collectionPagination?: { channels: { hasMore: boolean }; categories: { hasMore: boolean } };
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
   activityPagination: {
@@ -1506,6 +1518,23 @@ type ConsoleOverview = {
     newerHasMore: boolean;
   };
 };
+export async function loadAdminOverview<T extends { channels: unknown[]; categories?: unknown[]; collectionPagination?: { channels: { hasMore: boolean }; categories: { hasMore: boolean } } }>(path: string): Promise<T> {
+  const result = await api<T>(path);
+  let channels = result.channels;
+  let categories = result.categories ?? [];
+  let moreChannels = result.collectionPagination?.channels.hasMore ?? false;
+  let moreCategories = result.collectionPagination?.categories.hasMore ?? false;
+  for (let offset = 50; moreChannels || moreCategories; offset += 50) {
+    if (offset > 2_147_483_647) throw new Error("Overview exceeds the supported pagination range.");
+    const separator = path.includes("?") ? "&" : "?";
+    const page = await api<T>(`${path}${separator}channelOffset=${offset}&categoryOffset=${offset}`);
+    channels = [...channels, ...page.channels];
+    categories = [...categories, ...(page.categories ?? [])];
+    moreChannels = page.collectionPagination?.channels.hasMore ?? false;
+    moreCategories = page.collectionPagination?.categories.hasMore ?? false;
+  }
+  return { ...result, channels, ...(result.categories ? { categories } : {}) };
+}
 type AdminAssignment = {
   id: number;
   userId: string;
@@ -2050,7 +2079,7 @@ function AdminConsole() {
       if (requestedActivityFilters.startDate) activityParams.set("activityStartDate", requestedActivityFilters.startDate);
       if (requestedActivityFilters.endDate) activityParams.set("activityEndDate", requestedActivityFilters.endDate);
       const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
-      const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
+      const [nextOverview, nextHealth] = await Promise.all([loadAdminOverview<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
       if (requestId !== overviewLoadRef.current) return;
       setLoadedActivityFilters(requestedActivityFilters);
       const existingIds = new Set(overview?.activity.map((item) => item.id) ?? []);
@@ -2104,9 +2133,28 @@ function AdminConsole() {
   const loadRoleData = async () => {
     try {
       const [assignments, options, catalog] = await Promise.all([
-        api<AdminAssignment[]>("/admin/role-assignments"),
-        api<AdminScopeOptions>("/admin/scope-options"),
-        api<CustomRoleCatalog>("/admin/custom-roles"),
+        allCollectionPages<AdminAssignment>("/admin/role-assignments"),
+        (async () => {
+          const combined: AdminScopeOptions = { communities: [], categories: [], channels: [], departments: [] };
+          for (let offset = 0; offset <= 2_147_483_647; offset += 100) {
+            const page = await api<AdminScopeOptions>(`/admin/scope-options?limit=100&offset=${offset}`);
+            combined.communities.push(...page.communities);
+            combined.categories.push(...page.categories);
+            combined.channels.push(...page.channels);
+            combined.departments.push(...page.departments);
+            if (Object.values(page).every((items) => items.length < 100)) return combined;
+          }
+          throw new Error("Scope options exceed the supported pagination range.");
+        })(),
+        (async () => {
+          const catalog = await api<CustomRoleCatalog>("/admin/custom-roles?limit=100");
+          for (let offset = 100; catalog.roles.length === offset; offset += 100) {
+            const page = await api<CustomRoleCatalog>(`/admin/custom-roles?limit=100&offset=${offset}`);
+            catalog.roles.push(...page.roles);
+            if (page.roles.length < 100) break;
+          }
+          return catalog;
+        })(),
       ]);
       setRoleAssignments(assignments);
       setScopeOptions(options);
@@ -2126,9 +2174,11 @@ function AdminConsole() {
     if (roleFilter !== "all") params.set("role", roleFilter);
     if (statusFilter !== "all") params.set("status", statusFilter);
     if (accountStatusFilter !== "all") params.set("accountStatus", accountStatusFilter);
-    api<ConsoleOverview["users"] | { users: ConsoleOverview["users"] }>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`)
-      .then((result) => { setDirectory(Array.isArray(result) ? result : result.users); setDirectoryLoaded(true); })
-      .catch(() => { setDirectory([]); setDirectoryLoaded(true); });
+    let cancelled = false;
+    allCollectionPages<ConsoleOverview["users"][number]>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`)
+      .then((result) => { if (!cancelled) { setDirectory(result); setDirectoryLoaded(true); } })
+      .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load accounts"); });
+    return () => { cancelled = true; };
   }, [status?.isAdmin, section, query, roleFilter, statusFilter, accountStatusFilter]);
   useEffect(() => {
     if (!status?.isAdmin || section !== "activity") return;
@@ -2457,8 +2507,38 @@ type CommunityDetail = {
   canManage: boolean;
   canManageOrganization: boolean;
   isOwner: boolean;
-  pagination?: { employees: { hasMore: boolean }; invitations: { hasMore: boolean }; tasks: { hasMore: boolean }; channels: { hasMore: boolean; offset: number; limit: number }; categories: { hasMore: boolean }; assignments: { hasMore: boolean }; departments: { hasMore: boolean }; locations: { hasMore: boolean }; teams: { hasMore: boolean }; policies: { hasMore: boolean } };
+  pagination?: Record<WorkspaceDetailCollection, { hasMore: boolean; offset: number; limit: number }>;
 };
+const workspaceDetailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"] as const;
+type WorkspaceDetailCollection = typeof workspaceDetailCollections[number];
+
+export function workspaceDetailPageQuery(detail?: CommunityDetail): string {
+  const query = new URLSearchParams({ view: "summary" });
+  for (const key of workspaceDetailCollections) {
+    const page = detail?.pagination?.[key];
+    // Inactive collections still get a cheap page because the detail response
+    // retains its existing shape; do not advance their pagination metadata.
+    query.set(`${key}Limit`, String(!detail ? key === "announcements" ? 20 : 100 : page?.hasMore ? 100 : 1));
+    query.set(`${key}Offset`, String(detail && page?.hasMore ? page.offset + page.limit : 0));
+  }
+  return query.toString();
+}
+
+export function appendWorkspaceDetailPage(current: CommunityDetail, page: CommunityDetail): CommunityDetail {
+  const next = { ...current, pagination: { ...current.pagination } } as CommunityDetail;
+  for (const key of workspaceDetailCollections) {
+    if (!current.pagination?.[key]?.hasMore) continue;
+    next[key] = [...current[key], ...page[key]] as never;
+    if (next.pagination && page.pagination?.[key]) next.pagination[key] = page.pagination[key];
+  }
+  if (current.pagination?.employees?.hasMore) {
+    next.members = [...current.members, ...page.members];
+    next.teamMemberships = [...current.teamMemberships, ...page.teamMemberships.filter(
+      (membership) => !current.teamMemberships.some((existing) => existing.teamId === membership.teamId && existing.userId === membership.userId),
+    )];
+  }
+  return next;
+}
 type OwnerConfirmation = {
   kind: "remove-member" | "delete-account" | "delete-channel" | "delete-workspace";
   id?: string | number;
@@ -3435,7 +3515,7 @@ function DeveloperConsole() {
 
   const loadReleases = async () => {
     try {
-      const nextReleases = await api<DeveloperRelease[]>("/developer/releases");
+      const nextReleases = await allCollectionPages<DeveloperRelease>("/developer/releases");
       setReleases(nextReleases);
     } catch (reason) {
       setReleases([]);
@@ -3450,7 +3530,7 @@ function DeveloperConsole() {
       if (!nextStatus.isAdmin) return;
       const [nextConfig, nextReleases] = await Promise.allSettled([
         api<AppConfig>("/developer/settings"),
-        api<DeveloperRelease[]>("/developer/releases"),
+        allCollectionPages<DeveloperRelease>("/developer/releases"),
       ]);
       if (
         (nextConfig.status === "rejected" && isForbiddenError(nextConfig.reason))
@@ -3950,7 +4030,7 @@ function CommunityConsole() {
   const loadCommunities = async () => {
     const [nextPermissions, nextCommunities, me] = await Promise.all([
       api<PermissionSnapshot>("/permissions/me"),
-      api<CommunitySummary[]>("/communities"),
+      pagedApi<CommunitySummary>("/communities"),
       api<Profile>("/me"),
     ]);
     setPermissions(nextPermissions);
@@ -3969,7 +4049,7 @@ function CommunityConsole() {
     // Reject it before it can invalidate the active workspace's request.
     if (selectedIdRef.current !== id) return;
     const generation = ++detailRequestGeneration.current;
-    const next = await api<CommunityDetail>(`/communities/${id}?view=summary&employeesLimit=100&employeesOffset=0&invitationsLimit=100&invitationsOffset=0&tasksLimit=100&tasksOffset=0&channelsLimit=100&channelsOffset=0&categoriesLimit=100&categoriesOffset=0&assignmentsLimit=100&assignmentsOffset=0&departmentsLimit=100&departmentsOffset=0&locationsLimit=100&locationsOffset=0&teamsLimit=100&teamsOffset=0&policiesLimit=100&policiesOffset=0`);
+    const next = await api<CommunityDetail>(`/communities/${id}?${workspaceDetailPageQuery()}`);
     if (generation !== detailRequestGeneration.current || selectedIdRef.current !== id) return;
     // The legacy detail shape remains unchanged, while large workspaces are
     // reassembled explicitly here so existing panels still see every record.
@@ -4004,31 +4084,16 @@ function CommunityConsole() {
     if (!detail) return;
     if (loadingMoreDetail) return;
     const id = detail.community.id;
-    const employeeOffset = detail.employees.length;
-    const invitationOffset = detail.invitations.length;
-    const taskOffset = detail.tasks.length;
+    const generation = detailRequestGeneration.current;
     setLoadingMoreDetail(true);
     setLoadMoreDetailError("");
     try {
-      const page = await api<CommunityDetail>(`/communities/${id}?view=summary&employeesLimit=${detail.pagination?.employees?.hasMore ? 100 : 1}&employeesOffset=${employeeOffset}&invitationsLimit=${detail.pagination?.invitations?.hasMore ? 100 : 1}&invitationsOffset=${invitationOffset}&tasksLimit=${detail.pagination?.tasks?.hasMore ? 100 : 1}&tasksOffset=${taskOffset}&channelsLimit=${detail.pagination?.channels?.hasMore ? 100 : 1}&channelsOffset=${detail.pagination?.channels ? detail.pagination.channels.offset + detail.pagination.channels.limit : detail.channels.length}&categoriesLimit=${detail.pagination?.categories?.hasMore ? 100 : 1}&categoriesOffset=${detail.categories.length}&assignmentsLimit=${detail.pagination?.assignments?.hasMore ? 100 : 1}&assignmentsOffset=${detail.assignments.length}&departmentsLimit=${detail.pagination?.departments?.hasMore ? 100 : 1}&departmentsOffset=${detail.departments.length}&locationsLimit=${detail.pagination?.locations?.hasMore ? 100 : 1}&locationsOffset=${detail.locations.length}&teamsLimit=${detail.pagination?.teams?.hasMore ? 100 : 1}&teamsOffset=${detail.teams.length}&policiesLimit=${detail.pagination?.policies?.hasMore ? 100 : 1}&policiesOffset=${detail.policies.length}`);
-      if (selectedId !== id) return;
-      setDetail((current) => current && current.community.id === id ? {
-        ...current,
-        members: [...current.members, ...(current.pagination?.employees?.hasMore ? page.members : [])],
-        employees: [...current.employees, ...(current.pagination?.employees?.hasMore ? page.employees : [])],
-        invitations: [...current.invitations, ...(current.pagination?.invitations?.hasMore ? page.invitations : [])],
-        tasks: [...current.tasks, ...(current.pagination?.tasks?.hasMore ? page.tasks : [])],
-        channels: [...current.channels, ...(current.pagination?.channels?.hasMore ? page.channels : [])],
-        categories: [...current.categories, ...(current.pagination?.categories?.hasMore ? page.categories : [])],
-        assignments: [...current.assignments, ...(current.pagination?.assignments?.hasMore ? page.assignments : [])],
-        departments: [...current.departments, ...(current.pagination?.departments?.hasMore ? page.departments : [])],
-        locations: [...current.locations, ...(current.pagination?.locations?.hasMore ? page.locations : [])],
-        teams: [...current.teams, ...(current.pagination?.teams?.hasMore ? page.teams : [])],
-        policies: [...current.policies, ...(current.pagination?.policies?.hasMore ? page.policies : [])],
-        pagination: page.pagination,
-      } : current);
+      const page = await api<CommunityDetail>(`/communities/${id}?${workspaceDetailPageQuery(detail)}`);
+      if (selectedIdRef.current !== id || generation !== detailRequestGeneration.current) return;
+      setDetail((current) => current && current.community.id === id && current === detail
+        ? appendWorkspaceDetailPage(current, page) : current);
     } catch (reason) {
-      if (selectedId === id) setLoadMoreDetailError(reason instanceof Error ? reason.message : "Could not load more workspace records");
+      if (selectedIdRef.current === id && generation === detailRequestGeneration.current) setLoadMoreDetailError(reason instanceof Error ? reason.message : "Could not load more workspace records");
     } finally {
       setLoadingMoreDetail(false);
     }

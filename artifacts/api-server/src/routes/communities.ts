@@ -295,6 +295,18 @@ function pageParam(req: AuthenticatedRequest, name: string): { limit: number; of
   };
 }
 
+const detailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"] as const;
+function validPageQuery(req: AuthenticatedRequest, names: readonly string[]): boolean {
+  for (const key of ["limit", "offset", ...names.flatMap((name) => [`${name}Limit`, `${name}Offset`])]) {
+    const value = req.query[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number > 2_147_483_647 || (key.endsWith("Limit") || key === "limit") && number === 0) return false;
+  }
+  return true;
+}
+
 function slugify(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
@@ -483,20 +495,26 @@ router.post("/onboarding/:communityId/progress", requireAuth, async (req: Authen
 
 router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  if (!validPageQuery(req, ["communities"])) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
+    return;
+  }
   await ensureProfile(userId);
+  const page = pageParam(req, "communities");
   const communities = await db.select().from(communitiesTable)
     .where(eq(communitiesTable.plan, "paid_workspace"))
-    .orderBy(asc(communitiesTable.name));
+    .orderBy(asc(communitiesTable.name), asc(communitiesTable.id))
+    .limit(page.limit + 1).offset(page.offset);
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
-    .where(eq(communityMembersTable.userId, userId));
+    .where(and(eq(communityMembersTable.userId, userId), inArray(communityMembersTable.communityId, communities.slice(0, page.limit).map((item) => item.id))));
   const memberIds = new Set(memberships.map((membership) => membership.communityId));
   const permissionMap = await permissionsForCommunities(
     userId,
-    communities.map((community) => community.id),
+    communities.slice(0, page.limit).map((community) => community.id),
     ["manage_community", "view_business"],
   );
-  const result = communities.map((community) => {
+  const result = communities.slice(0, page.limit).map((community) => {
     const joined = memberIds.has(community.id);
     const permissions = permissionMap.get(community.id);
     const canManage = permissions?.has("manage_community") ?? false;
@@ -508,6 +526,8 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
     ) return null;
     return { ...community, joined, canManage };
   }).filter((community): community is NonNullable<typeof community> => community !== null);
+  res.set("X-Has-More", String(communities.length > page.limit));
+  res.set("X-Next-Offset", String(page.offset + page.limit));
   res.json(result);
 });
 
@@ -685,6 +705,10 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     res.status(404).json({ error: "Business workspace not found." });
     return;
   }
+  if (!validPageQuery(req, detailCollections)) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
+    return;
+  }
   await activateDueAnnouncements(community.id);
   const employeePage = pageParam(req, "employees");
   const invitationPage = pageParam(req, "invitations");
@@ -696,10 +720,50 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const locationPage = pageParam(req, "locations");
   const teamPage = pageParam(req, "teams");
   const policyPage = pageParam(req, "policies");
+  // Preserve the historic 20-item first announcement page.
+  const announcementPage = {
+    limit: req.query.announcementsLimit === undefined && req.query.limit === undefined ? 20 : pageParam(req, "announcements").limit,
+    offset: pageParam(req, "announcements").offset,
+  };
   const [viewerMembership] = await db.select({ userId: communityMembersTable.userId })
     .from(communityMembersTable)
     .where(and(eq(communityMembersTable.communityId, community.id), eq(communityMembersTable.userId, userId)))
     .limit(1);
+  const canManage = await communityPermission(userId, community.id, "manage_community");
+  const viewerIsMember = Boolean(viewerMembership);
+  const announcementVisibility = canManage ? eq(serverAnnouncementsTable.communityId, community.id) : and(
+    eq(serverAnnouncementsTable.communityId, community.id),
+    eq(serverAnnouncementsTable.status, "published"),
+    or(sql`${serverAnnouncementsTable.scheduledAt} IS NULL`, lte(serverAnnouncementsTable.scheduledAt, new Date())),
+    or(sql`${serverAnnouncementsTable.expiresAt} IS NULL`, sql`${serverAnnouncementsTable.expiresAt} > ${new Date()}`),
+    or(
+      eq(serverAnnouncementsTable.audienceType, "company"),
+      and(eq(serverAnnouncementsTable.audienceType, "individual"), eq(serverAnnouncementsTable.recipientId, userId)),
+      and(eq(serverAnnouncementsTable.audienceType, "department"), exists(
+        db.select({ id: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(
+          eq(employeeProfilesTable.communityId, community.id), eq(employeeProfilesTable.userId, userId),
+          eq(employeeProfilesTable.departmentId, serverAnnouncementsTable.departmentId),
+        )),
+      )),
+      and(eq(serverAnnouncementsTable.audienceType, "location"), exists(
+        db.select({ id: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(
+          eq(employeeProfilesTable.communityId, community.id), eq(employeeProfilesTable.userId, userId),
+          eq(employeeProfilesTable.locationId, serverAnnouncementsTable.locationId),
+        )),
+      )),
+      and(eq(serverAnnouncementsTable.audienceType, "team"), exists(
+        db.select({ id: teamMembersTable.teamId }).from(teamMembersTable)
+          .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(
+            eq(teamMembersTable.teamId, serverAnnouncementsTable.teamId),
+            eq(teamMembersTable.userId, userId), eq(teamMembersTable.status, "active"),
+            eq(teamsTable.communityId, community.id),
+          )),
+      )),
+    ),
+  );
+  const channelVisibility = viewerIsMember || canManage
+    ? eq(channelsTable.communityId, community.id)
+    : and(eq(channelsTable.communityId, community.id), eq(channelsTable.isPrivate, false));
   const pagedTasks = await db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id))
     .orderBy(desc(workspaceTasksTable.updatedAt), desc(workspaceTasksTable.id))
     .limit(taskPage.limit + 1).offset(taskPage.offset);
@@ -721,9 +785,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const selectedMemberIds = [...new Set([...pagedMembers.map((member) => member.id), userId])];
   const returnedAnnouncementIds = (await db.select({ id: serverAnnouncementsTable.id })
     .from(serverAnnouncementsTable)
-    .where(eq(serverAnnouncementsTable.communityId, community.id))
+    .where(announcementVisibility)
     .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
-    .limit(20)).map((row) => row.id);
+    .limit(announcementPage.limit).offset(announcementPage.offset)).map((row) => row.id);
   const taskCommentsQuery = summaryView
     ? Promise.resolve([] as Array<{
       id: number;
@@ -770,7 +834,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
        .where(selectedTaskIds.length ? inArray(workspaceTaskAttachmentsTable.taskId, selectedTaskIds) : sql`false`);
   const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
      Promise.resolve(pagedMembers),
-    db.select().from(channelsTable).where(eq(channelsTable.communityId, community.id)).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
+    db.select().from(channelsTable).where(channelVisibility).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
     db.select().from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(categoryPage.limit + 1).offset(categoryPage.offset),
     db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)).orderBy(asc(userRolesTable.userId), asc(userRolesTable.id)).limit(assignmentPage.limit + 1).offset(assignmentPage.offset),
      db.select({
@@ -790,9 +854,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       author: usersTable.displayName,
     }).from(serverAnnouncementsTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
-      .where(eq(serverAnnouncementsTable.communityId, community.id))
+       .where(announcementVisibility)
        .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
-      .limit(20),
+       .limit(announcementPage.limit + 1).offset(announcementPage.offset),
     db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(departmentPage.limit + 1).offset(departmentPage.offset),
     db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name), asc(locationsTable.id)).limit(locationPage.limit + 1).offset(locationPage.offset),
     db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name), asc(teamsTable.id)).limit(teamPage.limit + 1).offset(teamPage.offset),
@@ -860,10 +924,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
    ]);
    const announcementReadCountById = new Map(announcementReadCounts.map((row) => [row.announcementId, Number(row.total)]));
    const announcementAckCountById = new Map(announcementAckCounts.map((row) => [row.announcementId, Number(row.total)]));
-   const canManage = await communityPermission(userId, community.id, "manage_community");
   const canManageOrganization = await requireOrganizationManager(userId, community.id);
-   const viewerIsMember = Boolean(viewerMembership);
-  const visibleChannels = channels.filter((channel) => !channel.isPrivate || viewerIsMember || canManage);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
   const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
   for (const membership of teamMemberships) {
@@ -891,28 +952,13 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       presenceStatus: member.status,
     };
   });
-  const currentEmployee = employees.find((employee) => employee.userId === userId);
-  const now = new Date();
-  const visibleAnnouncements = announcements.filter((announcement) => canManage
-    || (
-      announcement.status === "published"
-      && (!announcement.scheduledAt || announcement.scheduledAt <= now)
-      && (!announcement.expiresAt || announcement.expiresAt > now)
-      && (
-        announcement.audienceType === "company"
-        || (announcement.audienceType === "department" && announcement.departmentId === currentEmployee?.departmentId)
-        || (announcement.audienceType === "location" && announcement.locationId === currentEmployee?.locationId)
-        || (announcement.audienceType === "team" && teamMemberships.some((item) => item.teamId === announcement.teamId && item.userId === userId))
-        || (announcement.audienceType === "individual" && announcement.recipientId === userId)
-      )
-    ));
   res.json({
     community,
     members: members.slice(0, employeePage.limit),
-    channels: visibleChannels.slice(0, channelPage.limit).map((channel) => ({ ...channel, passwordHash: undefined })),
+    channels: channels.slice(0, channelPage.limit).map((channel) => ({ ...channel, passwordHash: undefined })),
     categories: categories.slice(0, categoryPage.limit),
     assignments: assignments.slice(0, assignmentPage.limit).map((assignment) => ({ ...assignment, grantedBy: undefined })),
-    announcements: visibleAnnouncements.map((announcement) => ({
+    announcements: announcements.slice(0, announcementPage.limit).map((announcement) => ({
       ...announcement,
       readAt: announcementReceipts.find((receipt) => receipt.announcementId === announcement.id && receipt.userId === userId)?.readAt ?? null,
       acknowledgedAt: announcementAcks.find((ack) => ack.announcementId === announcement.id && ack.userId === userId)?.acknowledgedAt ?? null,
@@ -948,6 +994,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
        locations: { limit: locationPage.limit, offset: locationPage.offset, hasMore: locations.length > locationPage.limit },
        teams: { limit: teamPage.limit, offset: teamPage.offset, hasMore: teams.length > teamPage.limit },
        policies: { limit: policyPage.limit, offset: policyPage.offset, hasMore: policies.length > policyPage.limit },
+        announcements: { limit: announcementPage.limit, offset: announcementPage.offset, hasMore: announcements.length > announcementPage.limit },
      },
   });
 });
@@ -1056,6 +1103,10 @@ router.get("/communities/:communityId/activity", requireAuth, async (req: Authen
   const resource = typeof req.query.resource === "string" && req.query.resource.trim() ? req.query.resource.trim().slice(0, 120) : null;
   const from = typeof req.query.from === "string" && req.query.from.trim() ? new Date(`${req.query.from}T00:00:00.000Z`) : null;
   const to = typeof req.query.to === "string" && req.query.to.trim() ? new Date(`${req.query.to}T23:59:59.999Z`) : null;
+  if (!validPageQuery(req, ["audit"])) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
+    return;
+  }
   const activityPage = pageParam(req, "audit");
   if (
     (departmentId !== null && !Number.isInteger(departmentId))
@@ -2438,6 +2489,10 @@ router.get("/communities/:communityId/documents", requireAuth, async (req: Authe
   const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
   const folderId = typeof req.query.folderId === "string" && req.query.folderId ? Number(req.query.folderId) : null;
   const category = typeof req.query.category === "string" && req.query.category.trim() ? req.query.category.trim() : null;
+  if (!validPageQuery(req, ["documents", "folders"])) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
+    return;
+  }
   const documentPage = pageParam(req, "documents");
   const folderPage = pageParam(req, "folders");
   const manager = await communityPermission(userId, communityId, "manage_community");
@@ -3661,6 +3716,10 @@ router.get("/communities/:communityId/moderation-logs", requireAuth, async (req:
   const communityId = Number(param(req, "communityId"));
   if (!Number.isInteger(communityId) || !(await communityPermission(userId, communityId, "view_moderation_logs"))) {
     res.status(403).json({ error: "Moderation-log access required." });
+    return;
+  }
+  if (!validPageQuery(req, ["moderation"])) {
+    res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
     return;
   }
   const moderationPage = pageParam(req, "moderation");

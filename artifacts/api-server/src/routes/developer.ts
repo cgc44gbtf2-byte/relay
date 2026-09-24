@@ -12,6 +12,8 @@ import {
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 
 const router: IRouter = Router();
+const RELEASE_PAGE_SIZE = 50;
+const MAX_RELEASE_PAGE_SIZE = 100;
 
 const DEFAULT_SETTINGS = {
   siteName: "relay",
@@ -115,7 +117,21 @@ router.get("/developer/releases", requireAuth, async (req: AuthenticatedRequest,
     res.status(403).json({ error: "Developer access required." });
     return;
   }
-  res.json(await db.select().from(developerReleasesTable).orderBy(desc(developerReleasesTable.createdAt)));
+  const parse = (value: unknown, fallback: number, min: number, max: number) => {
+    if (value === undefined) return fallback;
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= min && number <= max ? number : null;
+  };
+  const limit = parse(req.query.limit, RELEASE_PAGE_SIZE, 1, MAX_RELEASE_PAGE_SIZE);
+  const offset = parse(req.query.offset, 0, 0, 2_147_483_647);
+  if (limit === null || offset === null) {
+    res.status(400).json({ error: "limit must be between 1 and 100, and offset must be between 0 and 2147483647." });
+    return;
+  }
+  res.json(await db.select().from(developerReleasesTable)
+    .orderBy(desc(developerReleasesTable.createdAt), desc(developerReleasesTable.id))
+    .limit(limit).offset(offset));
 });
 
 router.post("/developer/releases", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

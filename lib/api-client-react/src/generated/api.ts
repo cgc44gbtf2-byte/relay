@@ -36,8 +36,29 @@ import type {
   IrcMessage,
   IrcMessageInput,
   IrcState,
+  ListAdminCustomRolesParams,
+  ListAdminRoleAssignments200Item,
+  ListAdminRoleAssignmentsParams,
+  ListAdminScopeOptions200,
+  ListAdminScopeOptionsParams,
+  ListAdminUsers200Item,
+  ListAdminUsersParams,
+  ListAnnouncements200Item,
+  ListAnnouncementsParams,
+  ListCategories200Item,
+  ListCategoriesParams,
+  ListChannelPublicSpaces200Item,
+  ListChannelPublicSpacesParams,
+  ListChannels200Item,
+  ListChannelsParams,
+  ListCommunities200Item,
+  ListCommunitiesParams,
   ListCommunityActivityParams,
   ListCommunityDocumentsParams,
+  ListDeveloperReleases200Item,
+  ListDeveloperReleasesParams,
+  ListDmThreads200Item,
+  ListDmThreadsParams,
   ListModerationLogsParams,
   ListNotificationsParams,
   ModerationAction,
@@ -46,6 +67,10 @@ import type {
   OnboardingProgressInput,
   OnboardingState,
   RetireAdminCustomRole200,
+  SearchMessages200Item,
+  SearchMessagesParams,
+  SearchUsers200Item,
+  SearchUsersParams,
   StreamIrcEventsParams
 } from './api.schemas';
 
@@ -76,20 +101,28 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export const getListAdminCustomRolesUrl = () => {
+export const getListAdminCustomRolesUrl = (params?: ListAdminCustomRolesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/admin/custom-roles`
+  return stringifiedParams.length > 0 ? `/api/admin/custom-roles?${stringifiedParams}` : `/api/admin/custom-roles`
 }
 
 /**
+ * Only roles are paged; the grantable permissions catalog is unchanged.
  * @summary List custom role definitions and grantable permissions
  */
-export const listAdminCustomRoles = async ( options?: Parameters<typeof customFetch>[1]): Promise<CustomRoleCatalog> => {
+export const listAdminCustomRoles = async (params?: ListAdminCustomRolesParams, options?: Parameters<typeof customFetch>[1]): Promise<CustomRoleCatalog> => {
 
-  return customFetch<CustomRoleCatalog>(getListAdminCustomRolesUrl(),
+  return customFetch<CustomRoleCatalog>(getListAdminCustomRolesUrl(params),
   {
     ...options,
     method: 'GET'
@@ -102,23 +135,23 @@ export const listAdminCustomRoles = async ( options?: Parameters<typeof customFe
 
 
 
-export const getListAdminCustomRolesQueryKey = () => {
+export const getListAdminCustomRolesQueryKey = (params?: ListAdminCustomRolesParams,) => {
     return [
-    `/api/admin/custom-roles`
+    `/api/admin/custom-roles`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getListAdminCustomRolesQueryOptions = <TData = Awaited<ReturnType<typeof listAdminCustomRoles>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getListAdminCustomRolesQueryOptions = <TData = Awaited<ReturnType<typeof listAdminCustomRoles>>, TError = ErrorType<unknown>>(params?: ListAdminCustomRolesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getListAdminCustomRolesQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getListAdminCustomRolesQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminCustomRoles>>> = ({ signal }) => listAdminCustomRoles({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminCustomRoles>>> = ({ signal }) => listAdminCustomRoles(params, { signal, ...requestOptions });
 
 
 
@@ -136,11 +169,11 @@ export type ListAdminCustomRolesQueryError = ErrorType<unknown>
  */
 
 export function useListAdminCustomRoles<TData = Awaited<ReturnType<typeof listAdminCustomRoles>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: ListAdminCustomRolesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminCustomRoles>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getListAdminCustomRolesQueryOptions(options)
+  const queryOptions = getListAdminCustomRolesQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -1078,6 +1111,91 @@ export function useListNotifications<TData = Awaited<ReturnType<typeof listNotif
 
 
 
+export const getListCommunitiesUrl = (params?: ListCommunitiesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities?${stringifiedParams}` : `/api/communities`
+}
+
+/**
+ * The JSON response remains an array. The named community parameters override the general limit and offset.
+ * @summary List accessible paid workspaces
+ */
+export const listCommunities = async (params?: ListCommunitiesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListCommunities200Item[]> => {
+
+  return customFetch<ListCommunities200Item[]>(getListCommunitiesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCommunitiesQueryKey = (params?: ListCommunitiesParams,) => {
+    return [
+    `/api/communities`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCommunitiesQueryOptions = <TData = Awaited<ReturnType<typeof listCommunities>>, TError = ErrorType<ErrorResponse>>(params?: ListCommunitiesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCommunitiesQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCommunities>>> = ({ signal }) => listCommunities(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCommunities>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCommunitiesQueryResult = NonNullable<Awaited<ReturnType<typeof listCommunities>>>
+export type ListCommunitiesQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary List accessible paid workspaces
+ */
+
+export function useListCommunities<TData = Awaited<ReturnType<typeof listCommunities>>, TError = ErrorType<ErrorResponse>>(
+ params?: ListCommunitiesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCommunitiesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getGetCommunityWorkspaceUrl = (communityId: number,
     params?: GetCommunityWorkspaceParams,) => {
   const normalizedParams = new URLSearchParams();
@@ -1095,6 +1213,7 @@ export const getGetCommunityWorkspaceUrl = (communityId: number,
 }
 
 /**
+ * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
  * @summary Get workspace data and bounded collection pages
  */
 export const getCommunityWorkspace = async (communityId: number,
@@ -1121,7 +1240,7 @@ export const getGetCommunityWorkspaceQueryKey = (communityId: number,
     }
 
 
-export const getGetCommunityWorkspaceQueryOptions = <TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<unknown>>(communityId: number,
+export const getGetCommunityWorkspaceQueryOptions = <TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<ErrorResponse>>(communityId: number,
     params?: GetCommunityWorkspaceParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityWorkspace>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
@@ -1141,14 +1260,14 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
 }
 
 export type GetCommunityWorkspaceQueryResult = NonNullable<Awaited<ReturnType<typeof getCommunityWorkspace>>>
-export type GetCommunityWorkspaceQueryError = ErrorType<unknown>
+export type GetCommunityWorkspaceQueryError = ErrorType<ErrorResponse>
 
 
 /**
  * @summary Get workspace data and bounded collection pages
  */
 
-export function useGetCommunityWorkspace<TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<unknown>>(
+export function useGetCommunityWorkspace<TData = Awaited<ReturnType<typeof getCommunityWorkspace>>, TError = ErrorType<ErrorResponse>>(
  communityId: number,
     params?: GetCommunityWorkspaceParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityWorkspace>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
@@ -1450,6 +1569,7 @@ export const getGetAdminOverviewUrl = (params?: GetAdminOverviewParams,) => {
 }
 
 /**
+ * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
  * @summary Get administrative statistics and activity
  */
 export const getAdminOverview = async (params?: GetAdminOverviewParams, options?: Parameters<typeof customFetch>[1]): Promise<AdminOverview> => {
@@ -1511,3 +1631,941 @@ export function useGetAdminOverview<TData = Awaited<ReturnType<typeof getAdminOv
 
   return withQueryKey(query, queryOptions.queryKey);
 }
+
+
+
+
+
+
+
+export const getListAdminUsersUrl = (params?: ListAdminUsersParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/admin/users?${stringifiedParams}` : `/api/admin/users`
+}
+
+/**
+ * @summary List admin-visible users
+ */
+export const listAdminUsers = async (params?: ListAdminUsersParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminUsers200Item[]> => {
+
+  return customFetch<ListAdminUsers200Item[]>(getListAdminUsersUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListAdminUsersQueryKey = (params?: ListAdminUsersParams,) => {
+    return [
+    `/api/admin/users`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListAdminUsersQueryOptions = <TData = Awaited<ReturnType<typeof listAdminUsers>>, TError = ErrorType<unknown>>(params?: ListAdminUsersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminUsers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListAdminUsersQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminUsers>>> = ({ signal }) => listAdminUsers(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAdminUsers>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListAdminUsersQueryResult = NonNullable<Awaited<ReturnType<typeof listAdminUsers>>>
+export type ListAdminUsersQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List admin-visible users
+ */
+
+export function useListAdminUsers<TData = Awaited<ReturnType<typeof listAdminUsers>>, TError = ErrorType<unknown>>(
+ params?: ListAdminUsersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminUsers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListAdminUsersQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListAdminRoleAssignmentsUrl = (params?: ListAdminRoleAssignmentsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/admin/role-assignments?${stringifiedParams}` : `/api/admin/role-assignments`
+}
+
+/**
+ * @summary List role assignments
+ */
+export const listAdminRoleAssignments = async (params?: ListAdminRoleAssignmentsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminRoleAssignments200Item[]> => {
+
+  return customFetch<ListAdminRoleAssignments200Item[]>(getListAdminRoleAssignmentsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListAdminRoleAssignmentsQueryKey = (params?: ListAdminRoleAssignmentsParams,) => {
+    return [
+    `/api/admin/role-assignments`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListAdminRoleAssignmentsQueryOptions = <TData = Awaited<ReturnType<typeof listAdminRoleAssignments>>, TError = ErrorType<unknown>>(params?: ListAdminRoleAssignmentsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminRoleAssignments>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListAdminRoleAssignmentsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminRoleAssignments>>> = ({ signal }) => listAdminRoleAssignments(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAdminRoleAssignments>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListAdminRoleAssignmentsQueryResult = NonNullable<Awaited<ReturnType<typeof listAdminRoleAssignments>>>
+export type ListAdminRoleAssignmentsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List role assignments
+ */
+
+export function useListAdminRoleAssignments<TData = Awaited<ReturnType<typeof listAdminRoleAssignments>>, TError = ErrorType<unknown>>(
+ params?: ListAdminRoleAssignmentsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminRoleAssignments>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListAdminRoleAssignmentsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListAdminScopeOptionsUrl = (params?: ListAdminScopeOptionsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/admin/scope-options?${stringifiedParams}` : `/api/admin/scope-options`
+}
+
+/**
+ * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+ * @summary List role scope options
+ */
+export const listAdminScopeOptions = async (params?: ListAdminScopeOptionsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminScopeOptions200> => {
+
+  return customFetch<ListAdminScopeOptions200>(getListAdminScopeOptionsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListAdminScopeOptionsQueryKey = (params?: ListAdminScopeOptionsParams,) => {
+    return [
+    `/api/admin/scope-options`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListAdminScopeOptionsQueryOptions = <TData = Awaited<ReturnType<typeof listAdminScopeOptions>>, TError = ErrorType<unknown>>(params?: ListAdminScopeOptionsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminScopeOptions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListAdminScopeOptionsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAdminScopeOptions>>> = ({ signal }) => listAdminScopeOptions(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAdminScopeOptions>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListAdminScopeOptionsQueryResult = NonNullable<Awaited<ReturnType<typeof listAdminScopeOptions>>>
+export type ListAdminScopeOptionsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List role scope options
+ */
+
+export function useListAdminScopeOptions<TData = Awaited<ReturnType<typeof listAdminScopeOptions>>, TError = ErrorType<unknown>>(
+ params?: ListAdminScopeOptionsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAdminScopeOptions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListAdminScopeOptionsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListDeveloperReleasesUrl = (params?: ListDeveloperReleasesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/developer/releases?${stringifiedParams}` : `/api/developer/releases`
+}
+
+/**
+ * @summary List developer releases
+ */
+export const listDeveloperReleases = async (params?: ListDeveloperReleasesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListDeveloperReleases200Item[]> => {
+
+  return customFetch<ListDeveloperReleases200Item[]>(getListDeveloperReleasesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListDeveloperReleasesQueryKey = (params?: ListDeveloperReleasesParams,) => {
+    return [
+    `/api/developer/releases`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListDeveloperReleasesQueryOptions = <TData = Awaited<ReturnType<typeof listDeveloperReleases>>, TError = ErrorType<unknown>>(params?: ListDeveloperReleasesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listDeveloperReleases>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListDeveloperReleasesQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listDeveloperReleases>>> = ({ signal }) => listDeveloperReleases(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listDeveloperReleases>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListDeveloperReleasesQueryResult = NonNullable<Awaited<ReturnType<typeof listDeveloperReleases>>>
+export type ListDeveloperReleasesQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List developer releases
+ */
+
+export function useListDeveloperReleases<TData = Awaited<ReturnType<typeof listDeveloperReleases>>, TError = ErrorType<unknown>>(
+ params?: ListDeveloperReleasesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listDeveloperReleases>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListDeveloperReleasesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListChannelsUrl = (params?: ListChannelsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/channels?${stringifiedParams}` : `/api/channels`
+}
+
+/**
+ * @summary List visible channels
+ */
+export const listChannels = async (params?: ListChannelsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListChannels200Item[]> => {
+
+  return customFetch<ListChannels200Item[]>(getListChannelsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListChannelsQueryKey = (params?: ListChannelsParams,) => {
+    return [
+    `/api/channels`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListChannelsQueryOptions = <TData = Awaited<ReturnType<typeof listChannels>>, TError = ErrorType<unknown>>(params?: ListChannelsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listChannels>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListChannelsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listChannels>>> = ({ signal }) => listChannels(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listChannels>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListChannelsQueryResult = NonNullable<Awaited<ReturnType<typeof listChannels>>>
+export type ListChannelsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List visible channels
+ */
+
+export function useListChannels<TData = Awaited<ReturnType<typeof listChannels>>, TError = ErrorType<unknown>>(
+ params?: ListChannelsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listChannels>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListChannelsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListChannelPublicSpacesUrl = (channelId: number,
+    params?: ListChannelPublicSpacesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/channels/${channelId}/public-spaces?${stringifiedParams}` : `/api/channels/${channelId}/public-spaces`
+}
+
+/**
+ * Returns an array of eligible owned public communities, excluding the channel's current community.
+ * @summary List public spaces available to the channel owner
+ */
+export const listChannelPublicSpaces = async (channelId: number,
+    params?: ListChannelPublicSpacesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListChannelPublicSpaces200Item[]> => {
+
+  return customFetch<ListChannelPublicSpaces200Item[]>(getListChannelPublicSpacesUrl(channelId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListChannelPublicSpacesQueryKey = (channelId: number,
+    params?: ListChannelPublicSpacesParams,) => {
+    return [
+    `/api/channels/${channelId}/public-spaces`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListChannelPublicSpacesQueryOptions = <TData = Awaited<ReturnType<typeof listChannelPublicSpaces>>, TError = ErrorType<unknown>>(channelId: number,
+    params?: ListChannelPublicSpacesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listChannelPublicSpaces>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListChannelPublicSpacesQueryKey(channelId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listChannelPublicSpaces>>> = ({ signal }) => listChannelPublicSpaces(channelId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: channelId !== null && channelId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listChannelPublicSpaces>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListChannelPublicSpacesQueryResult = NonNullable<Awaited<ReturnType<typeof listChannelPublicSpaces>>>
+export type ListChannelPublicSpacesQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List public spaces available to the channel owner
+ */
+
+export function useListChannelPublicSpaces<TData = Awaited<ReturnType<typeof listChannelPublicSpaces>>, TError = ErrorType<unknown>>(
+ channelId: number,
+    params?: ListChannelPublicSpacesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listChannelPublicSpaces>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListChannelPublicSpacesQueryOptions(channelId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListCategoriesUrl = (params?: ListCategoriesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/categories?${stringifiedParams}` : `/api/categories`
+}
+
+/**
+ * @summary List visible categories
+ */
+export const listCategories = async (params?: ListCategoriesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListCategories200Item[]> => {
+
+  return customFetch<ListCategories200Item[]>(getListCategoriesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCategoriesQueryKey = (params?: ListCategoriesParams,) => {
+    return [
+    `/api/categories`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCategoriesQueryOptions = <TData = Awaited<ReturnType<typeof listCategories>>, TError = ErrorType<unknown>>(params?: ListCategoriesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCategories>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCategoriesQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCategories>>> = ({ signal }) => listCategories(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCategories>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCategoriesQueryResult = NonNullable<Awaited<ReturnType<typeof listCategories>>>
+export type ListCategoriesQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List visible categories
+ */
+
+export function useListCategories<TData = Awaited<ReturnType<typeof listCategories>>, TError = ErrorType<unknown>>(
+ params?: ListCategoriesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCategories>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCategoriesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getSearchUsersUrl = (params?: SearchUsersParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/users/search?${stringifiedParams}` : `/api/users/search`
+}
+
+/**
+ * @summary Search visible users
+ */
+export const searchUsers = async (params?: SearchUsersParams, options?: Parameters<typeof customFetch>[1]): Promise<SearchUsers200Item[]> => {
+
+  return customFetch<SearchUsers200Item[]>(getSearchUsersUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getSearchUsersQueryKey = (params?: SearchUsersParams,) => {
+    return [
+    `/api/users/search`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getSearchUsersQueryOptions = <TData = Awaited<ReturnType<typeof searchUsers>>, TError = ErrorType<unknown>>(params?: SearchUsersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof searchUsers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getSearchUsersQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof searchUsers>>> = ({ signal }) => searchUsers(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof searchUsers>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type SearchUsersQueryResult = NonNullable<Awaited<ReturnType<typeof searchUsers>>>
+export type SearchUsersQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Search visible users
+ */
+
+export function useSearchUsers<TData = Awaited<ReturnType<typeof searchUsers>>, TError = ErrorType<unknown>>(
+ params?: SearchUsersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof searchUsers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getSearchUsersQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListDmThreadsUrl = (params?: ListDmThreadsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dm/threads?${stringifiedParams}` : `/api/dm/threads`
+}
+
+/**
+ * @summary List visible direct-message threads
+ */
+export const listDmThreads = async (params?: ListDmThreadsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListDmThreads200Item[]> => {
+
+  return customFetch<ListDmThreads200Item[]>(getListDmThreadsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListDmThreadsQueryKey = (params?: ListDmThreadsParams,) => {
+    return [
+    `/api/dm/threads`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListDmThreadsQueryOptions = <TData = Awaited<ReturnType<typeof listDmThreads>>, TError = ErrorType<unknown>>(params?: ListDmThreadsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listDmThreads>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListDmThreadsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listDmThreads>>> = ({ signal }) => listDmThreads(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listDmThreads>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListDmThreadsQueryResult = NonNullable<Awaited<ReturnType<typeof listDmThreads>>>
+export type ListDmThreadsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List visible direct-message threads
+ */
+
+export function useListDmThreads<TData = Awaited<ReturnType<typeof listDmThreads>>, TError = ErrorType<unknown>>(
+ params?: ListDmThreadsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listDmThreads>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListDmThreadsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getSearchMessagesUrl = (params?: SearchMessagesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/search/messages?${stringifiedParams}` : `/api/search/messages`
+}
+
+/**
+ * @summary Search visible messages
+ */
+export const searchMessages = async (params?: SearchMessagesParams, options?: Parameters<typeof customFetch>[1]): Promise<SearchMessages200Item[]> => {
+
+  return customFetch<SearchMessages200Item[]>(getSearchMessagesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getSearchMessagesQueryKey = (params?: SearchMessagesParams,) => {
+    return [
+    `/api/search/messages`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getSearchMessagesQueryOptions = <TData = Awaited<ReturnType<typeof searchMessages>>, TError = ErrorType<unknown>>(params?: SearchMessagesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof searchMessages>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getSearchMessagesQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof searchMessages>>> = ({ signal }) => searchMessages(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof searchMessages>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type SearchMessagesQueryResult = NonNullable<Awaited<ReturnType<typeof searchMessages>>>
+export type SearchMessagesQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Search visible messages
+ */
+
+export function useSearchMessages<TData = Awaited<ReturnType<typeof searchMessages>>, TError = ErrorType<unknown>>(
+ params?: SearchMessagesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof searchMessages>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getSearchMessagesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListAnnouncementsUrl = (params?: ListAnnouncementsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/announcements?${stringifiedParams}` : `/api/announcements`
+}
+
+/**
+ * @summary List visible announcements
+ */
+export const listAnnouncements = async (params?: ListAnnouncementsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAnnouncements200Item[]> => {
+
+  return customFetch<ListAnnouncements200Item[]>(getListAnnouncementsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListAnnouncementsQueryKey = (params?: ListAnnouncementsParams,) => {
+    return [
+    `/api/announcements`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListAnnouncementsQueryOptions = <TData = Awaited<ReturnType<typeof listAnnouncements>>, TError = ErrorType<unknown>>(params?: ListAnnouncementsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAnnouncements>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListAnnouncementsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listAnnouncements>>> = ({ signal }) => listAnnouncements(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAnnouncements>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListAnnouncementsQueryResult = NonNullable<Awaited<ReturnType<typeof listAnnouncements>>>
+export type ListAnnouncementsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List visible announcements
+ */
+
+export function useListAnnouncements<TData = Awaited<ReturnType<typeof listAnnouncements>>, TError = ErrorType<unknown>>(
+ params?: ListAnnouncementsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listAnnouncements>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListAnnouncementsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+

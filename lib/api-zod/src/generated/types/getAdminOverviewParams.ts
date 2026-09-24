@@ -9,6 +9,26 @@
 export type GetAdminOverviewParams = {
 /**
  * @minimum 1
+ * @maximum 100
+ */
+channelLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+channelOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+categoryLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+categoryOffset?: number;
+/**
+ * @minimum 1
  * @maximum 50
  */
 activityLimit?: number;

@@ -7,8 +7,10 @@ import {
   count,
   desc,
   eq,
+  gt,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -50,6 +52,7 @@ import { logger } from "../lib/logger";
 import { isValidQuery } from "../lib/validation";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
 import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
+import { parseCollectionPage, visibleListPage } from "../lib/visible-list-page";
 
 const router: IRouter = Router();
 router.use("/channels/:channelId", requireAuth, async (req: AuthenticatedRequest, res, next): Promise<void> => {
@@ -104,6 +107,15 @@ function listPage(req: AuthenticatedRequest): { limit: number; offset: number } 
       : MAX_LIST_PAGE_SIZE,
     offset: Number.isSafeInteger(requestedOffset) && requestedOffset >= 0 ? requestedOffset : 0,
   };
+}
+
+function validatedListPage(req: AuthenticatedRequest, res: Response): { limit: number; offset: number } | null {
+  const page = parseCollectionPage(req.query, MAX_LIST_PAGE_SIZE);
+  if (!page) {
+    res.status(400).json({ error: `Invalid pagination: limit must be 1–${MAX_LIST_PAGE_SIZE} and offset must be a nonnegative safe integer.` });
+    return null;
+  }
+  return page;
 }
 
 function setListPageHeaders(res: Response, hasMore: boolean, nextOffset: number): void {
@@ -417,73 +429,17 @@ router.patch("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise
 
 router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  const page = validatedListPage(req, res);
+  if (!page) return;
   await ensureProfile(userId);
   await ensureDefaults(userId);
-  const [allChannels, joined, allCategories, pending] = await Promise.all([
-    db.select().from(channelsTable).orderBy(asc(channelsTable.name)),
-    db
-      .select({ channelId: channelMembersTable.channelId })
-      .from(channelMembersTable)
-      .where(eq(channelMembersTable.userId, userId)),
-    db.select().from(categoriesTable).orderBy(asc(categoriesTable.name)),
-    db
-      .select({ channelId: channelJoinRequestsTable.channelId })
-      .from(channelJoinRequestsTable)
-      .where(and(
-        eq(channelJoinRequestsTable.userId, userId),
-        eq(channelJoinRequestsTable.status, "pending"),
-      )),
-  ]);
-  const joinedIds = new Set(joined.map((item) => item.channelId));
-  const communityIds = [
-    ...new Set([
-      ...allChannels.flatMap((channel) =>
-        channel.communityId === null ? [] : [channel.communityId],
-      ),
-      ...allCategories.flatMap((category) =>
-        category.communityId === null ? [] : [category.communityId],
-      ),
-    ]),
-  ];
-  const [communities, memberships] = communityIds.length
-    ? await Promise.all([
-      db
-        .select({
-          id: communitiesTable.id,
-          name: communitiesTable.name,
-          isPrivate: communitiesTable.isPrivate,
-          plan: communitiesTable.plan,
-          ownerId: communitiesTable.ownerId,
-        })
-        .from(communitiesTable)
-        .where(inArray(communitiesTable.id, communityIds)),
-      db
-        .select({ communityId: communityMembersTable.communityId })
-        .from(communityMembersTable)
-        .where(and(
-          eq(communityMembersTable.userId, userId),
-          inArray(communityMembersTable.communityId, communityIds),
-        )),
-    ])
-    : [[], []];
-  const activeSubscriberOwners = new Set<string>();
-  await Promise.all([...new Set(communities.filter((community) => community.plan === "subscriber_community")
-    .map((community) => community.ownerId))].map(async (ownerId) => {
-    if (await subscriberPaidThrough(ownerId)) activeSubscriberOwners.add(ownerId);
-  }));
-  const availableCommunities = communities.filter((community) =>
-    community.plan !== "subscriber_community" || activeSubscriberOwners.has(community.ownerId));
-  const availableCommunityIds = new Set(availableCommunities.map((community) => community.id));
-  const communityPrivacy = new Map(
-    availableCommunities.map((community) => [community.id, community.isPrivate]),
-  );
-  const communityNames = new Map(availableCommunities.map((community) => [community.id, community.name]));
-  const publicCommunityIds = new Set(availableCommunities
-    .filter((community) => !community.isPrivate && ["free_community", "purchased_community", "subscriber_community"].includes(community.plan))
-    .map((community) => community.id));
-  const membershipIds = new Set(
-    memberships.map((membership) => membership.communityId),
-  );
+  const joinedIds = new Set<number>();
+  const communityPrivacy = new Map<number, boolean>();
+  const communityNames = new Map<number, string>();
+  const publicCommunityIds = new Set<number>();
+  const availableCommunityIds = new Set<number>();
+  const membershipIds = new Set<number>();
+  const pendingIds = new Set<number>();
   const permissionAccess = new Map<number, Promise<boolean>>();
   const hasPrivateCommunityAccess = (communityId: number): Promise<boolean> => {
     if (membershipIds.has(communityId)) return Promise.resolve(true);
@@ -496,18 +452,44 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     permissionAccess.set(communityId, access);
     return access;
   };
-  const visibleChannels = await Promise.all(allChannels.map(async (channel) => {
-    if (channel.communityId !== null && !availableCommunityIds.has(channel.communityId)) return null;
-    if (
-      channel.communityId !== null
-      && communityPrivacy.get(channel.communityId) !== false
-      && !(await hasPrivateCommunityAccess(channel.communityId))
-    ) {
-      return null;
-    }
-    return !channel.isPrivate || joinedIds.has(channel.id) ? channel : null;
-  }));
-  const channels = visibleChannels.filter((channel): channel is typeof allChannels[number] => channel !== null);
+  const { rows: channels, hasMore } = await visibleListPage<typeof channelsTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
+    (after) => db.select().from(channelsTable)
+      .where(after ? or(gt(channelsTable.name, after.name), and(eq(channelsTable.name, after.name), gt(channelsTable.id, after.id))) : undefined)
+      .orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(MAX_LIST_PAGE_SIZE),
+    async (batch) => {
+      const ids = batch.map((channel) => channel.id);
+      const communityIds = [...new Set(batch.flatMap((channel) => channel.communityId === null ? [] : [channel.communityId]))];
+      const [joined, pending, communities, memberships] = await Promise.all([
+        db.select({ channelId: channelMembersTable.channelId }).from(channelMembersTable)
+          .where(and(eq(channelMembersTable.userId, userId), inArray(channelMembersTable.channelId, ids))),
+        db.select({ channelId: channelJoinRequestsTable.channelId }).from(channelJoinRequestsTable)
+          .where(and(eq(channelJoinRequestsTable.userId, userId), eq(channelJoinRequestsTable.status, "pending"), inArray(channelJoinRequestsTable.channelId, ids))),
+        db.select({ id: communitiesTable.id, name: communitiesTable.name, isPrivate: communitiesTable.isPrivate, plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
+          .from(communitiesTable).where(inArray(communitiesTable.id, communityIds.length ? communityIds : [-1])),
+        db.select({ communityId: communityMembersTable.communityId }).from(communityMembersTable)
+          .where(and(eq(communityMembersTable.userId, userId), inArray(communityMembersTable.communityId, communityIds.length ? communityIds : [-1]))),
+      ]);
+      joined.forEach((item) => joinedIds.add(item.channelId));
+      pending.forEach((item) => pendingIds.add(item.channelId));
+      memberships.forEach((item) => membershipIds.add(item.communityId));
+      const activeSubscriberOwners = new Set<string>();
+      await Promise.all([...new Set(communities.filter((community) => community.plan === "subscriber_community").map((community) => community.ownerId))].map(async (ownerId) => {
+        if (await subscriberPaidThrough(ownerId)) activeSubscriberOwners.add(ownerId);
+      }));
+      for (const community of communities) {
+        if (community.plan === "subscriber_community" && !activeSubscriberOwners.has(community.ownerId)) continue;
+        availableCommunityIds.add(community.id);
+        communityPrivacy.set(community.id, community.isPrivate);
+        communityNames.set(community.id, community.name);
+        if (!community.isPrivate && ["free_community", "purchased_community", "subscriber_community"].includes(community.plan)) publicCommunityIds.add(community.id);
+      }
+      const visible = await Promise.all(batch.map(async (channel) => {
+        if (channel.communityId !== null && !availableCommunityIds.has(channel.communityId)) return null;
+        if (channel.communityId !== null && communityPrivacy.get(channel.communityId) !== false && !(await hasPrivateCommunityAccess(channel.communityId))) return null;
+        return !channel.isPrivate || joinedIds.has(channel.id) ? channel : null;
+      }));
+      return visible.filter((channel): channel is typeof batch[number] => channel !== null);
+    });
   const counts = channels.length
     ? await db
       .select({
@@ -521,6 +503,8 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   const countMap = new Map(
     counts.map(({ channelId, memberCount }) => [channelId, Number(memberCount)]),
   );
+  const categoryIds = [...new Set(channels.flatMap((channel) => channel.categoryId === null ? [] : [channel.categoryId]))];
+  const allCategories = categoryIds.length ? await db.select().from(categoriesTable).where(inArray(categoriesTable.id, categoryIds)) : [];
   const visibleCategories = await Promise.all(allCategories.map(async (category) => {
     if (category.communityId === null) return category;
     if (!availableCommunityIds.has(category.communityId)) return null;
@@ -531,7 +515,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   }));
   const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
-  const pendingIds = new Set(pending.map((request) => request.channelId));
+  setListPageHeaders(res, hasMore, page.offset + channels.length);
   res.json(channels.map((channel) => ({
     ...channel,
     communityName: channel.communityId === null ? "Public network" : communityNames.get(channel.communityId) ?? null,
@@ -553,31 +537,29 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
 
 router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const allCategories = await db.select().from(categoriesTable).orderBy(asc(categoriesTable.name));
-  const communityIds = [
-    ...new Set(
-      allCategories.flatMap((category) =>
-        category.communityId === null ? [] : [category.communityId],
-      ),
-    ),
-  ];
-  const permissions = await permissionsForCommunities(
-    userId,
-    communityIds,
-    ["view_business", "manage_community"],
-  );
-  const categoryCommunities = communityIds.length ? await db.select({
-    id: communitiesTable.id, plan: communitiesTable.plan, ownerId: communitiesTable.ownerId,
-  }).from(communitiesTable).where(inArray(communitiesTable.id, communityIds)) : [];
-  const availableCategoryCommunities = new Set((await Promise.all(categoryCommunities.map(async (community) =>
-    await isPublicCommunityAvailable(community) ? community.id : null))).filter((id): id is number => id !== null));
-  const categories = allCategories.filter((category) => {
-    if (category.communityId === null) return true;
-    if (!availableCategoryCommunities.has(category.communityId)) return false;
-    const communityPermissions = permissions.get(category.communityId);
-    return communityPermissions?.has("view_business")
-      || communityPermissions?.has("manage_community");
-  });
+  const page = validatedListPage(req, res);
+  if (!page) return;
+  const { rows: categories, hasMore } = await visibleListPage<typeof categoriesTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
+    (after) => db.select().from(categoriesTable)
+      .where(after ? or(gt(categoriesTable.name, after.name), and(eq(categoriesTable.name, after.name), gt(categoriesTable.id, after.id))) : undefined)
+      .orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(MAX_LIST_PAGE_SIZE),
+    async (batch) => {
+      const communityIds = [...new Set(batch.flatMap((category) => category.communityId === null ? [] : [category.communityId]))];
+      const [permissions, categoryCommunities] = await Promise.all([
+        permissionsForCommunities(userId, communityIds, ["view_business", "manage_community"]),
+        communityIds.length ? db.select({ id: communitiesTable.id, plan: communitiesTable.plan, ownerId: communitiesTable.ownerId })
+          .from(communitiesTable).where(inArray(communitiesTable.id, communityIds)) : Promise.resolve([]),
+      ]);
+      const available = new Set((await Promise.all(categoryCommunities.map(async (community) =>
+        await isPublicCommunityAvailable(community) ? community.id : null))).filter((id): id is number => id !== null));
+      return batch.filter((category) => {
+        if (category.communityId === null) return true;
+        if (!available.has(category.communityId)) return false;
+        const access = permissions.get(category.communityId);
+        return Boolean(access?.has("view_business") || access?.has("manage_community"));
+      });
+    });
+  setListPageHeaders(res, hasMore, page.offset + categories.length);
   res.json(categories);
 });
 
@@ -1277,6 +1259,8 @@ router.post("/channels/:channelId/file-messages", requireAuth, async (req: Authe
 
 router.get("/channels/:channelId/public-spaces", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  const page = validatedListPage(req, res);
+  if (!page) return;
   const channelId = Number(param(req, "channelId"));
   if (!Number.isSafeInteger(channelId) || channelId < 1) {
     res.status(404).json(channelNotFoundError);
@@ -1298,12 +1282,17 @@ router.get("/channels/:channelId/public-spaces", requireAuth, async (req: Authen
     res.status(400).json({ error: "Only channels in public communities or the public network can move between public spaces." });
     return;
   }
+  const active = Boolean(await subscriberPaidThrough(userId));
   const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name, plan: communitiesTable.plan })
     .from(communitiesTable)
-    .where(and(eq(communitiesTable.ownerId, userId), inArray(communitiesTable.plan, ["free_community", "purchased_community", "subscriber_community"]),
-      eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active")));
-  const active = Boolean(await subscriberPaidThrough(userId));
-  res.json(owned.filter((community) => community.id !== channel.communityId && (community.plan !== "subscriber_community" || active)));
+    .where(and(eq(communitiesTable.ownerId, userId),
+      inArray(communitiesTable.plan, active ? ["free_community", "purchased_community", "subscriber_community"] : ["free_community", "purchased_community"]),
+      channel.communityId === null ? undefined : sql`${communitiesTable.id} <> ${channel.communityId}`,
+      eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active")))
+    .orderBy(asc(communitiesTable.name), asc(communitiesTable.id))
+    .limit(page.limit + 1).offset(page.offset);
+  setListPageHeaders(res, owned.length > page.limit, page.offset + page.limit);
+  res.json(owned.slice(0, page.limit));
 });
 
 router.patch("/channels/:channelId/public-space", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1880,6 +1869,8 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
 router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   if (!enforceRateLimit(req, res, userSearchLimiter, "Too many user search requests.")) return;
   const userId = getUserId(req);
+  const page = validatedListPage(req, res);
+  if (!page) return;
   const rawQuery = req.query.q;
   const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
   if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
@@ -1893,7 +1884,10 @@ router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res):
   if (await hasPermission(userId, "manage_any_community")) {
     const users = await db.select().from(usersTable)
       .where(or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`)))
-      .limit(20);
+      .orderBy(asc(usersTable.clerkId)).limit(page.limit + 1).offset(page.offset);
+    const hasMore = users.length > page.limit;
+    if (hasMore) users.pop();
+    setListPageHeaders(res, hasMore, page.offset + users.length);
     res.json(users.map((user) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
     return;
   }
@@ -1911,7 +1905,10 @@ router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res):
       inArray(communityMembersTable.communityId, memberships.map((item) => item.communityId)),
       or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`)),
     ))
-    .limit(20);
+    .orderBy(asc(usersTable.clerkId)).limit(page.limit + 1).offset(page.offset);
+  const hasMore = users.length > page.limit;
+  if (hasMore) users.pop();
+  setListPageHeaders(res, hasMore, page.offset + users.length);
   res.json(users.map(({ user }) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
 });
 
@@ -1932,11 +1929,31 @@ function threadKey(a: string, b: string): string {
 
 router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const rows = await db
-    .selectDistinctOn([messagesTable.threadKey])
-    .from(messagesTable)
-    .where(or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId)))
-    .orderBy(asc(messagesTable.threadKey), desc(messagesTable.createdAt), desc(messagesTable.id));
+  const page = validatedListPage(req, res);
+  if (!page) return;
+  const rows: typeof messagesTable.$inferSelect[] = [];
+  let after: string | null = null;
+  let skipped = 0;
+  while (rows.length <= page.limit) {
+    const batch = await db.selectDistinctOn([messagesTable.threadKey]).from(messagesTable)
+      .where(and(or(eq(messagesTable.senderId, userId), eq(messagesTable.recipientId, userId)),
+        isNotNull(messagesTable.threadKey),
+        after === null ? undefined : gt(messagesTable.threadKey, after)))
+      .orderBy(asc(messagesTable.threadKey), desc(messagesTable.createdAt), desc(messagesTable.id))
+      .limit(MAX_LIST_PAGE_SIZE);
+    if (!batch.length) break;
+    after = batch[batch.length - 1].threadKey;
+    for (const row of batch) {
+      const peerId = row.threadKey?.split(":").find((id) => id !== userId);
+      if (!peerId || !(await sharesBusiness(userId, peerId))) continue;
+      if (skipped < page.offset) skipped += 1;
+      else rows.push(row);
+      if (rows.length > page.limit) break;
+    }
+    if (batch.length < MAX_LIST_PAGE_SIZE) break;
+  }
+  const hasMore = rows.length > page.limit;
+  if (hasMore) rows.pop();
   const peerIds = [...new Set(
     rows
       .map((row) => row.threadKey?.split(":").find((id) => id !== userId))
@@ -1960,10 +1977,11 @@ router.get("/dm/threads", requireAuth, async (req: AuthenticatedRequest, res): P
     const peerId = key?.split(":").find((id) => id !== userId);
     const peer = peerId ? peerById.get(peerId) : null;
     const lastMessage = viewById.get(row.id);
-    if (key && peerId && peer && lastMessage && await sharesBusiness(userId, peerId)) {
+    if (key && peerId && peer && lastMessage) {
       threads.push({ key, peer, lastMessage });
     }
   }
+  setListPageHeaders(res, hasMore, page.offset + rows.length);
   res.json(threads);
 });
 
@@ -2029,6 +2047,8 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
 router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   if (!enforceRateLimit(req, res, messageSearchLimiter, "Too many message search requests.")) return;
   const userId = getUserId(req);
+  const page = validatedListPage(req, res);
+  if (!page) return;
   const rawQuery = req.query.q;
   const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
   if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
@@ -2052,7 +2072,10 @@ router.get("/search/messages", requireAuth, async (req: AuthenticatedRequest, re
   const rows = await db.select().from(messagesTable).where(and(
     ilike(messagesTable.body, `%${q}%`),
     messageScope,
-  )).orderBy(desc(messagesTable.createdAt)).limit(100);
+  )).orderBy(desc(messagesTable.createdAt), desc(messagesTable.id)).limit(page.limit + 1).offset(page.offset);
+  const hasMore = rows.length > page.limit;
+  if (hasMore) rows.pop();
+  setListPageHeaders(res, hasMore, page.offset + rows.length);
   res.json(await messageViews(rows, userId));
 });
 
@@ -2108,6 +2131,8 @@ router.get("/notifications/:id/detail", requireAuth, async (req: AuthenticatedRe
 
 router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  const page = validatedListPage(req, res);
+  if (!page) return;
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
@@ -2148,8 +2173,11 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
       eq(serverAnnouncementsTable.status, "published"),
       visibility,
     ))
-    .orderBy(desc(serverAnnouncementsTable.createdAt))
-    .limit(20);
+    .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
+    .limit(page.limit + 1).offset(page.offset);
+  const hasMore = announcements.length > page.limit;
+  if (hasMore) announcements.pop();
+  setListPageHeaders(res, hasMore, page.offset + announcements.length);
   res.json(announcements);
 });
 

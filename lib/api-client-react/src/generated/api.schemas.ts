@@ -79,6 +79,8 @@ export type CommunityWorkspaceResponseInvitationsItem = { [key: string]: unknown
 
 export type CommunityWorkspaceResponseTasksItem = { [key: string]: unknown };
 
+export type CommunityWorkspaceResponseAnnouncementsItem = { [key: string]: unknown };
+
 export type CommunityWorkspaceResponsePagination = {[key: string]: PageInfo};
 
 export interface CommunityWorkspaceResponse {
@@ -94,6 +96,7 @@ export interface CommunityWorkspaceResponse {
   employees?: CommunityWorkspaceResponseEmployeesItem[];
   invitations?: CommunityWorkspaceResponseInvitationsItem[];
   tasks?: CommunityWorkspaceResponseTasksItem[];
+  announcements?: CommunityWorkspaceResponseAnnouncementsItem[];
   pagination: CommunityWorkspaceResponsePagination;
 }
 
@@ -104,6 +107,11 @@ export type AdminOverviewUsersItem = { [key: string]: unknown };
 export type AdminOverviewChannelsItem = { [key: string]: unknown };
 
 export type AdminOverviewCategoriesItem = { [key: string]: unknown };
+
+export type AdminOverviewCollectionPagination = {
+  channels: PageInfo;
+  categories: PageInfo;
+};
 
 export type AdminOverviewRecentMessagesItem = { [key: string]: unknown };
 
@@ -140,6 +148,7 @@ export interface AdminOverview {
   users: AdminOverviewUsersItem[];
   channels: AdminOverviewChannelsItem[];
   categories: AdminOverviewCategoriesItem[];
+  collectionPagination: AdminOverviewCollectionPagination;
   recentMessages: AdminOverviewRecentMessagesItem[];
   activity: AdminOverviewActivityItem[];
   activityPagination: AdminActivityPagination;
@@ -353,6 +362,32 @@ export interface OnboardingProgress {
 }
 
 /**
+ * Number of records to return.
+ */
+export type CollectionLimitParameter = number;
+
+/**
+ * Number of records to skip.
+ */
+export type CollectionOffsetParameter = number;
+
+/**
+ * Default limit for workspace collections; values above 100 are capped.
+ */
+export type WorkspaceLimitParameter = number;
+
+/**
+ * Default offset for workspace collections.
+ */
+export type WorkspaceOffsetParameter = number;
+
+export type IrcLimitParameter = number;
+
+export type IrcOffsetParameter = number;
+
+export type SearchQueryParameter = string;
+
+/**
  * Maximum number of records to return. Values above 100 are capped.
  */
 export type PageLimitParameter = number;
@@ -361,6 +396,21 @@ export type PageLimitParameter = number;
  * Number of records to skip.
  */
 export type PageOffsetParameter = number;
+
+export type ListAdminCustomRolesParams = {
+/**
+ * Number of records to return.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: CollectionLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: CollectionOffsetParameter;
+};
 
 export type RetireAdminCustomRole200 = {
   ok: boolean;
@@ -395,7 +445,48 @@ offset?: PageOffsetParameter;
 archived?: boolean;
 };
 
+export type ListCommunitiesParams = {
+/**
+ * Default limit for workspace collections; values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+limit?: WorkspaceLimitParameter;
+/**
+ * Default offset for workspace collections.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: WorkspaceOffsetParameter;
+/**
+ * Overrides limit for the communities array; values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+communitiesLimit?: number;
+/**
+ * Overrides offset for the communities array.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+communitiesOffset?: number;
+};
+
+export type ListCommunities200Item = { [key: string]: unknown };
+
 export type GetCommunityWorkspaceParams = {
+/**
+ * Default limit for workspace collections; values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+limit?: WorkspaceLimitParameter;
+/**
+ * Default offset for workspace collections.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: WorkspaceOffsetParameter;
 /**
  * @minimum 1
  * @maximum 100
@@ -486,6 +577,17 @@ policiesLimit?: number;
  * @minimum 0
  */
 policiesOffset?: number;
+/**
+ * Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
+ * @minimum 1
+ * @maximum 2147483647
+ */
+announcementsLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+announcementsOffset?: number;
 };
 
 export type ListModerationLogsParams = {
@@ -551,6 +653,26 @@ foldersOffset?: number;
 export type GetAdminOverviewParams = {
 /**
  * @minimum 1
+ * @maximum 100
+ */
+channelLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+channelOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+categoryLimit?: number;
+/**
+ * @minimum 0
+ * @maximum 2147483647
+ */
+categoryOffset?: number;
+/**
+ * @minimum 1
  * @maximum 50
  */
 activityLimit?: number;
@@ -587,3 +709,225 @@ activityStartDate?: string;
  */
 activityEndDate?: string;
 };
+
+export type ListAdminUsersParams = {
+/**
+ * Number of records to return.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: CollectionLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: CollectionOffsetParameter;
+/**
+ * @maxLength 200
+ */
+q?: string;
+role?: string;
+status?: ListAdminUsersStatus;
+accountStatus?: ListAdminUsersAccountStatus;
+};
+
+export type ListAdminUsersStatus = typeof ListAdminUsersStatus[keyof typeof ListAdminUsersStatus];
+
+
+export const ListAdminUsersStatus = {
+  online: 'online',
+  offline: 'offline',
+} as const;
+
+export type ListAdminUsersAccountStatus = typeof ListAdminUsersAccountStatus[keyof typeof ListAdminUsersAccountStatus];
+
+
+export const ListAdminUsersAccountStatus = {
+  active: 'active',
+  suspended: 'suspended',
+} as const;
+
+export type ListAdminUsers200Item = { [key: string]: unknown };
+
+export type ListAdminRoleAssignmentsParams = {
+/**
+ * Number of records to return.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: CollectionLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: CollectionOffsetParameter;
+};
+
+export type ListAdminRoleAssignments200Item = { [key: string]: unknown };
+
+export type ListAdminScopeOptionsParams = {
+/**
+ * Number of records to return.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: CollectionLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: CollectionOffsetParameter;
+};
+
+export type ListAdminScopeOptions200CommunitiesItem = { [key: string]: unknown };
+
+export type ListAdminScopeOptions200CategoriesItem = { [key: string]: unknown };
+
+export type ListAdminScopeOptions200ChannelsItem = { [key: string]: unknown };
+
+export type ListAdminScopeOptions200DepartmentsItem = { [key: string]: unknown };
+
+export type ListAdminScopeOptions200 = {
+  communities: ListAdminScopeOptions200CommunitiesItem[];
+  categories: ListAdminScopeOptions200CategoriesItem[];
+  channels: ListAdminScopeOptions200ChannelsItem[];
+  departments: ListAdminScopeOptions200DepartmentsItem[];
+};
+
+export type ListDeveloperReleasesParams = {
+/**
+ * Number of records to return.
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: CollectionLimitParameter;
+/**
+ * Number of records to skip.
+ * @minimum 0
+ * @maximum 2147483647
+ */
+offset?: CollectionOffsetParameter;
+};
+
+export type ListDeveloperReleases200Item = { [key: string]: unknown };
+
+export type ListChannelsParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+};
+
+export type ListChannels200Item = { [key: string]: unknown };
+
+export type ListChannelPublicSpacesParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+};
+
+export type ListChannelPublicSpaces200Item = {
+  id: number;
+  name: string;
+  plan: string;
+};
+
+export type ListCategoriesParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+};
+
+export type ListCategories200Item = { [key: string]: unknown };
+
+export type SearchUsersParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+/**
+ * @maxLength 200
+ */
+q?: SearchQueryParameter;
+};
+
+export type SearchUsers200Item = { [key: string]: unknown };
+
+export type ListDmThreadsParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+};
+
+export type ListDmThreads200Item = { [key: string]: unknown };
+
+export type SearchMessagesParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+/**
+ * @maxLength 200
+ */
+q?: SearchQueryParameter;
+};
+
+export type SearchMessages200Item = { [key: string]: unknown };
+
+export type ListAnnouncementsParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: IrcLimitParameter;
+/**
+ * @minimum 0
+ * @maximum 9007199254740991
+ */
+offset?: IrcOffsetParameter;
+};
+
+export type ListAnnouncements200Item = { [key: string]: unknown };
+

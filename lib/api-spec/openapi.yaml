@@ -17,6 +17,10 @@ paths:
     get:
       operationId: listAdminCustomRoles
       summary: List custom role definitions and grantable permissions
+      description: Only roles are paged; the grantable permissions catalog is unchanged.
+      parameters:
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/CollectionOffset"
       responses:
         "200":
           description: Role catalog
@@ -262,16 +266,56 @@ paths:
             X-Next-Offset:
               description: Offset to use for the next page when X-Has-More is true.
               schema: { type: integer, minimum: 0 }
+  /communities:
+    get:
+      operationId: listCommunities
+      tags: [communities]
+      summary: List accessible paid workspaces
+      description: The JSON response remains an array. The named community parameters override the general limit and offset.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceLimit"
+        - $ref: "#/components/parameters/WorkspaceOffset"
+        - name: communitiesLimit
+          in: query
+          description: Overrides limit for the communities array; values above 100 are capped.
+          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        - name: communitiesOffset
+          in: query
+          description: Overrides offset for the communities array.
+          schema: { type: integer, minimum: 0, maximum: 2147483647 }
+      responses:
+        "200":
+          description: Page of paid workspaces
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More:
+              description: Whether another page of workspaces is available.
+              schema: { type: boolean }
+            X-Next-Offset:
+              description: Current offset plus the page limit (also sent on the final page).
+              schema: { type: integer, minimum: 0 }
+        "400":
+          description: Invalid pagination
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /communities/{communityId}:
     get:
       operationId: getCommunityWorkspace
       tags: [communities]
       summary: Get workspace data and bounded collection pages
+      description: Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
       parameters:
         - name: communityId
           in: path
           required: true
           schema: { type: integer }
+        - $ref: "#/components/parameters/WorkspaceLimit"
+        - $ref: "#/components/parameters/WorkspaceOffset"
         - name: employeesLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
@@ -332,12 +376,24 @@ paths:
         - name: policiesOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: announcementsLimit
+          in: query
+          description: Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
+          schema: { type: integer, minimum: 1, maximum: 2147483647 }
+        - name: announcementsOffset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 2147483647 }
       responses:
         "200":
           description: Workspace data
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CommunityWorkspaceResponse" }
+        "400":
+          description: Invalid pagination
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /communities/{communityId}/moderation-logs:
     get:
       operationId: listModerationLogs
@@ -450,7 +506,20 @@ paths:
       operationId: getAdminOverview
       tags: [admin]
       summary: Get administrative statistics and activity
+      description: Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
       parameters:
+        - name: channelLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: channelOffset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+        - name: categoryLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: categoryOffset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
         - name: activityLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
@@ -484,8 +553,268 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AdminOverview" }
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      tags: [admin]
+      summary: List admin-visible users
+      parameters:
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/CollectionOffset"
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: role
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [online, offline] }
+        - name: accountStatus
+          in: query
+          schema: { type: string, enum: [active, suspended] }
+      responses:
+        "200":
+          description: Page of users, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+  /admin/role-assignments:
+    get:
+      operationId: listAdminRoleAssignments
+      tags: [admin]
+      summary: List role assignments
+      parameters:
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/CollectionOffset"
+      responses:
+        "200":
+          description: Page of assignments, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+  /admin/scope-options:
+    get:
+      operationId: listAdminScopeOptions
+      tags: [admin]
+      summary: List role scope options
+      description: The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+      parameters:
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/CollectionOffset"
+      responses:
+        "200":
+          description: Paged scope option arrays
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [communities, categories, channels, departments]
+                properties:
+                  communities: { type: array, items: { type: object } }
+                  categories: { type: array, items: { type: object } }
+                  channels: { type: array, items: { type: object } }
+                  departments: { type: array, items: { type: object } }
+  /developer/releases:
+    get:
+      operationId: listDeveloperReleases
+      tags: [developer]
+      summary: List developer releases
+      parameters:
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/CollectionOffset"
+      responses:
+        "200":
+          description: Page of releases, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+  /channels:
+    get:
+      operationId: listChannels
+      tags: [irc]
+      summary: List visible channels
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+      responses:
+        "200":
+          description: Page of channels, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /channels/{channelId}/public-spaces:
+    get:
+      operationId: listChannelPublicSpaces
+      tags: [irc]
+      summary: List public spaces available to the channel owner
+      description: Returns an array of eligible owned public communities, excluding the channel's current community.
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+      responses:
+        "200":
+          description: Page of eligible public spaces, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, plan]
+                  properties:
+                    id: { type: integer }
+                    name: { type: string }
+                    plan: { type: string }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /categories:
+    get:
+      operationId: listCategories
+      tags: [irc]
+      summary: List visible categories
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+      responses:
+        "200":
+          description: Page of categories, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /users/search:
+    get:
+      operationId: searchUsers
+      tags: [irc]
+      summary: Search visible users
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+        - $ref: "#/components/parameters/SearchQuery"
+      responses:
+        "200":
+          description: Page of users, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /dm/threads:
+    get:
+      operationId: listDmThreads
+      tags: [irc]
+      summary: List visible direct-message threads
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+      responses:
+        "200":
+          description: Page of threads, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /search/messages:
+    get:
+      operationId: searchMessages
+      tags: [irc]
+      summary: Search visible messages
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+        - $ref: "#/components/parameters/SearchQuery"
+      responses:
+        "200":
+          description: Page of messages, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+  /announcements:
+    get:
+      operationId: listAnnouncements
+      tags: [irc]
+      summary: List visible announcements
+      parameters:
+        - $ref: "#/components/parameters/IrcLimit"
+        - $ref: "#/components/parameters/IrcOffset"
+      responses:
+        "200":
+          description: Page of announcements, as an array
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+          headers:
+            X-Has-More: { $ref: "#/components/headers/ListHasMore" }
+            X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
 components:
   parameters:
+    CollectionLimit:
+      name: limit
+      in: query
+      description: Number of records to return.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    CollectionOffset:
+      name: offset
+      in: query
+      description: Number of records to skip.
+      schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+    WorkspaceLimit:
+      name: limit
+      in: query
+      description: Default limit for workspace collections; values above 100 are capped.
+      schema: { type: integer, minimum: 1, maximum: 2147483647, default: 100 }
+    WorkspaceOffset:
+      name: offset
+      in: query
+      description: Default offset for workspace collections.
+      schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+    IrcLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+    IrcOffset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 9007199254740991, default: 0 }
+    SearchQuery:
+      name: q
+      in: query
+      schema: { type: string, maxLength: 200 }
     PageLimit:
       name: limit
       in: query
@@ -496,6 +825,13 @@ components:
       in: query
       description: Number of records to skip.
       schema: { type: integer, minimum: 0, default: 0 }
+  headers:
+    ListHasMore:
+      description: Whether another page of visible results exists (not sent for too-short search queries).
+      schema: { type: boolean }
+    ListNextOffset:
+      description: Offset for the next page when X-Has-More is true (omitted on the final page or for too-short search queries).
+      schema: { type: integer, minimum: 0 }
   schemas:
     Notification:
       type: object
@@ -551,6 +887,7 @@ components:
         employees: { type: array, items: { type: object } }
         invitations: { type: array, items: { type: object } }
         tasks: { type: array, items: { type: object } }
+        announcements: { type: array, items: { type: object } }
         pagination:
           type: object
           additionalProperties: { $ref: "#/components/schemas/PageInfo" }
@@ -563,12 +900,18 @@ components:
         hasMore: { type: boolean }
     AdminOverview:
       type: object
-      required: [stats, users, channels, categories, recentMessages, activity, activityPagination]
+      required: [stats, users, channels, categories, collectionPagination, recentMessages, activity, activityPagination]
       properties:
         stats: { type: object }
         users: { type: array, items: { type: object } }
         channels: { type: array, items: { type: object } }
         categories: { type: array, items: { type: object } }
+        collectionPagination:
+          type: object
+          required: [channels, categories]
+          properties:
+            channels: { $ref: "#/components/schemas/PageInfo" }
+            categories: { $ref: "#/components/schemas/PageInfo" }
         recentMessages: { type: array, items: { type: object } }
         activity: { type: array, items: { type: object } }
         activityPagination: { $ref: "#/components/schemas/AdminActivityPagination" }

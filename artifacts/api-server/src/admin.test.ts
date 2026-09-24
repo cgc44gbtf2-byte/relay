@@ -776,6 +776,66 @@ describe("free community onboarding", () => {
       assert.ok((workspaceListing.body as Array<{ id: number; plan: string }>).some(
         (community) => community.id === paidWorkspace.id && community.plan === "paid_workspace",
       ));
+      assert.equal((await apiRequest(owner, "/communities?limit=-1")).status, 400);
+      const workspacePage = await apiRequest(owner, "/communities?limit=1&offset=0");
+      assert.equal(workspacePage.status, 200);
+      assert.ok(Array.isArray(workspacePage.body));
+      assert.ok((workspacePage.body as unknown[]).length <= 1);
+      assert.equal((await apiRequest(owner, `/communities/${paidWorkspace.id}?announcementsLimit=0`)).status, 400);
+      assert.equal((await apiRequest(owner, `/communities/${paidWorkspace.id}/activity?auditOffset=-1`)).status, 400);
+      assert.equal((await apiRequest(owner, `/communities/${paidWorkspace.id}/documents?foldersLimit=nope`)).status, 400);
+      assert.equal((await apiRequest(owner, `/communities/${paidWorkspace.id}/moderation-logs?moderationLimit=0`)).status, 400);
+      const detailPage = await apiRequest(owner, `/communities/${paidWorkspace.id}?announcementsLimit=1`);
+      assert.equal(detailPage.status, 200);
+      assert.deepEqual((detailPage.body as { pagination: { announcements: { limit: number; offset: number; hasMore: boolean } } }).pagination.announcements, {
+        limit: 1, offset: 0, hasMore: false,
+      });
+
+      // Real high-count pages: stable tie breaking and no missing items at the
+      // boundary, including announcements hidden from an ordinary member.
+      const member = await createTestSession("workspace_pages_member");
+      assert.equal((await apiRequest(member, "/me")).status, 200);
+      await pool.query("INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')", [paidWorkspace.id, member.userId]);
+      await pool.query(
+        `INSERT INTO irc_channels (community_id, owner_id, name)
+         SELECT $1, $2, 'paged-' || lpad(n::text, 3, '0') FROM generate_series(1, 125) n`,
+        [paidWorkspace.id, owner.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_server_announcements (community_id, author_id, title, body, status, created_at)
+         SELECT $1, $2, 'paged-announcement-' || n, 'Body', CASE WHEN n > 25 THEN 'draft' ELSE 'published' END,
+                timestamp with time zone '2025-01-01' + n * interval '1 second'
+         FROM generate_series(1, 30) n`,
+        [paidWorkspace.id, owner.userId],
+      );
+      const foreignTeam = await pool.query<{ id: number }>(
+        "INSERT INTO irc_teams (community_id, name) VALUES ($1, 'other-workspace-team') RETURNING id",
+        [freeCommunity.id],
+      );
+      await pool.query("INSERT INTO irc_team_members (team_id, user_id) VALUES ($1, $2)", [foreignTeam.rows[0].id, member.userId]);
+      await pool.query(
+        `INSERT INTO irc_server_announcements (community_id, author_id, title, body, audience_type, team_id, created_at)
+         VALUES ($1, $2, 'cross-workspace-team', 'Private', 'team', $3, timestamp with time zone '2026-01-01')`,
+        [paidWorkspace.id, owner.userId, foreignTeam.rows[0].id],
+      );
+      const channelPages = await Promise.all([0, 100].map((offset) =>
+        apiRequest(owner, `/communities/${paidWorkspace.id}?view=summary&channelsLimit=100&channelsOffset=${offset}`)));
+      const channelIds = channelPages.flatMap((response) =>
+        (response.body as { channels: Array<{ id: number }> }).channels.map((channel) => channel.id));
+      assert.equal(channelPages[0].status, 200);
+      assert.equal(channelPages[1].status, 200);
+      assert.equal(channelIds.length, 128); // three default rooms + 125 additional rooms
+      assert.equal(new Set(channelIds).size, channelIds.length);
+      assert.equal((channelPages[0].body as { pagination: { channels: { hasMore: boolean } } }).pagination.channels.hasMore, true);
+      assert.equal((channelPages[1].body as { pagination: { channels: { hasMore: boolean } } }).pagination.channels.hasMore, false);
+      const announcementPages = await Promise.all([0, 20].map((offset) =>
+        apiRequest(member, `/communities/${paidWorkspace.id}?view=summary&announcementsLimit=20&announcementsOffset=${offset}`)));
+      assert.deepEqual(announcementPages.map((response) =>
+        (response.body as { announcements: Array<{ title: string }> }).announcements.length), [20, 5]);
+      assert.deepEqual(announcementPages.map((response) =>
+        (response.body as { pagination: { announcements: { hasMore: boolean } } }).pagination.announcements.hasMore), [true, false]);
+      assert.equal(new Set(announcementPages.flatMap((response) =>
+        (response.body as { announcements: Array<{ id: number }> }).announcements.map((item) => item.id))).size, 25);
 
       const onboardingAfterWorkspaceCreation = await apiRequest(owner, "/onboarding");
       assert.equal(onboardingAfterWorkspaceCreation.status, 200, JSON.stringify(onboardingAfterWorkspaceCreation));
@@ -786,6 +846,7 @@ describe("free community onboarding", () => {
         (community) => community.id !== paidWorkspace.id && community.plan !== "paid_workspace",
       ));
     } finally {
+      await pool.query("DELETE FROM irc_channels WHERE owner_id = $1 AND name LIKE 'paged-%'", [owner.userId]);
       await pool.query(
         "DELETE FROM irc_communities WHERE owner_id = $1",
         [owner.userId],
@@ -1424,6 +1485,124 @@ describe("admin access controls", () => {
     const status = await apiRequest(adminSession, "/admin/status");
     assert.equal(status.status, 200, JSON.stringify(status));
     assert.equal((status.body as { isAdmin?: unknown }).isAdmin, true);
+  });
+
+  test("validates collection page bounds and preserves release rows across stable pages", async () => {
+    const invalidPaths = [
+      "/admin/overview?channelLimit=101",
+      "/admin/overview?categoryOffset=-1",
+      "/admin/users?limit=0",
+      "/admin/role-assignments?offset=NaN",
+      "/admin/scope-options?limit=1&limit=2",
+      "/admin/custom-roles?limit=101",
+      "/developer/releases?offset=2147483648",
+      "/developer/releases?limit=101",
+    ];
+    for (const path of invalidPaths) {
+      const response = await apiRequest(adminSession, path);
+      assert.equal(response.status, 400, `${path}: ${JSON.stringify(response.body)}`);
+    }
+
+    const marker = `pagination_${randomUUID().replaceAll("-", "")}`;
+    try {
+      await pool.query(
+        `INSERT INTO irc_developer_releases (version, title, created_by, created_at)
+         SELECT $1 || '_' || series, $1, $2, '2024-02-01T00:00:00Z'
+         FROM generate_series(1, 101) AS series`,
+        [marker, adminSession.userId],
+      );
+      const seen = new Set<number>();
+      const matchingOrder: number[] = [];
+      let offset = 0;
+      while (true) {
+        const page = await apiRequest(adminSession, `/developer/releases?limit=37&offset=${offset}`);
+        assert.equal(page.status, 200, JSON.stringify(page.body));
+        const rows = page.body as Array<{ id: number; title: string }>;
+        for (const row of rows) {
+          assert.equal(seen.has(row.id), false, `duplicate release ${row.id}`);
+          seen.add(row.id);
+          if (row.title === marker) matchingOrder.push(row.id);
+        }
+        if (rows.length < 37) break;
+        offset += rows.length;
+      }
+      const matching = await pool.query<{ id: number }>("SELECT id FROM irc_developer_releases WHERE title = $1", [marker]);
+      assert.equal(matching.rows.length, 101);
+      for (const row of matching.rows) assert.ok(seen.has(row.id), `missing release ${row.id}`);
+      assert.deepEqual(matchingOrder, [...matchingOrder].sort((a, b) => b - a), "equal-timestamp releases must use id as a stable tie-breaker");
+    } finally {
+      await pool.query("DELETE FROM irc_developer_releases WHERE title = $1", [marker]);
+    }
+  });
+
+  test("bounds each admin collection without changing its response shape", async () => {
+    const overview = await apiRequest(adminSession, "/admin/overview?channelLimit=1&categoryLimit=1");
+    assert.equal(overview.status, 200, JSON.stringify(overview.body));
+    const body = overview.body as {
+      channels: Array<{ id: number }>;
+      categories: Array<{ id: number }>;
+      collectionPagination: {
+        channels: { limit: number; offset: number; hasMore: boolean };
+        categories: { limit: number; offset: number; hasMore: boolean };
+      };
+    };
+    assert.ok(body.channels.length <= 1);
+    assert.ok(body.categories.length <= 1);
+    assert.equal(body.collectionPagination.channels.limit, 1);
+    assert.equal(body.collectionPagination.categories.limit, 1);
+    if (body.channels.length) {
+      const next = await apiRequest(adminSession, "/admin/overview?channelLimit=1&channelOffset=1&categoryLimit=1");
+      assert.equal(next.status, 200);
+      assert.notEqual((next.body as typeof body).channels[0]?.id, body.channels[0]?.id);
+    }
+    for (const [path, extract] of [
+      ["/admin/users", (data: unknown) => data as Array<{ id: string | number }>],
+      ["/admin/role-assignments", (data: unknown) => data as Array<{ id: string | number }>],
+      ["/admin/scope-options", (data: unknown) => (data as { channels: Array<{ id: number }> }).channels],
+      ["/admin/custom-roles", (data: unknown) => (data as { roles: Array<{ key: string }> }).roles.map((role) => ({ id: role.key }))],
+    ] as const) {
+      const first = await apiRequest(adminSession, `${path}?limit=1`);
+      const second = await apiRequest(adminSession, `${path}?limit=1&offset=1`);
+      assert.equal(first.status, 200, path);
+      assert.equal(second.status, 200, path);
+      const firstRows = extract(first.body);
+      const secondRows = extract(second.body);
+      assert.ok(firstRows.length <= 1 && secondRows.length <= 1, path);
+      if (firstRows.length && secondRows.length) assert.notEqual(firstRows[0]?.id, secondRows[0]?.id, path);
+    }
+  });
+
+  test("admin directory pages preserve all users beyond the former 100-row cap", async () => {
+    const marker = `page_${randomUUID().replaceAll("-", "")}`;
+    try {
+      await pool.query(
+        `INSERT INTO irc_users (clerk_id, username, display_name, created_at)
+         SELECT $1 || '_' || series, $1 || '_' || series, $1, '2024-02-01T00:00:00Z'
+         FROM generate_series(1, 101) AS series`,
+        [marker],
+      );
+      const ids = new Set<string>();
+      const orderedIds: string[] = [];
+      for (let offset = 0; ; offset += 40) {
+        const response = await apiRequest(adminSession, `/admin/users?q=${marker}&limit=40&offset=${offset}`);
+        assert.equal(response.status, 200, JSON.stringify(response.body));
+        const rows = response.body as Array<{ id: string }>;
+        for (const row of rows) {
+          assert.equal(ids.has(row.id), false);
+          ids.add(row.id);
+          orderedIds.push(row.id);
+        }
+        if (rows.length < 40) break;
+      }
+      assert.equal(ids.size, 101);
+      const expected = await pool.query<{ clerk_id: string }>(
+        "SELECT clerk_id FROM irc_users WHERE display_name = $1 ORDER BY created_at DESC, clerk_id DESC",
+        [marker],
+      );
+      assert.deepEqual(orderedIds, expected.rows.map((row) => row.clerk_id), "equal-timestamp users must use id as a stable tie-breaker");
+    } finally {
+      await pool.query("DELETE FROM irc_users WHERE username LIKE $1", [`${marker}%`]);
+    }
   });
 
   test("sends one admin DM alert for a pending upgrade without granting a slot", async () => {

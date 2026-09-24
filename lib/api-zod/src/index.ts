@@ -4,6 +4,7 @@ export * from './generated/types';
 // identically named generated parameter types for these operations.
 export {
   GetCommunityWorkspaceParams,
+  ListChannelPublicSpacesParams,
   ListCommunityActivityParams,
   ListCommunityDocumentsParams,
   ListModerationLogsParams,

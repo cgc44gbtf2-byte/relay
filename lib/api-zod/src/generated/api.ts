@@ -9,8 +9,23 @@ import * as zod from 'zod';
 
 
 /**
+ * Only roles are paged; the grantable permissions catalog is unchanged.
  * @summary List custom role definitions and grantable permissions
  */
+export const listAdminCustomRolesQueryLimitDefault = 50;
+export const listAdminCustomRolesQueryLimitMax = 100;
+
+export const listAdminCustomRolesQueryOffsetDefault = 0;
+export const listAdminCustomRolesQueryOffsetMin = 0;
+export const listAdminCustomRolesQueryOffsetMax = 2147483647;
+
+
+
+export const ListAdminCustomRolesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listAdminCustomRolesQueryLimitMax).default(listAdminCustomRolesQueryLimitDefault).describe('Number of records to return.'),
+  "offset": zod.coerce.number().int().min(listAdminCustomRolesQueryOffsetMin).max(listAdminCustomRolesQueryOffsetMax).default(listAdminCustomRolesQueryOffsetDefault).describe('Number of records to skip.')
+})
+
 export const ListAdminCustomRolesResponse = zod.object({
   "roles": zod.array(zod.object({
   "key": zod.string(),
@@ -36,6 +51,8 @@ export const ListAdminCustomRolesResponse = zod.object({
 export const createAdminCustomRoleBodyLabelMax = 60;
 
 export const createAdminCustomRoleBodyDescriptionMax = 240;
+
+
 
 
 export const CreateAdminCustomRoleBody = zod.object({
@@ -68,6 +85,8 @@ export const UpdateAdminCustomRoleParams = zod.object({
 export const updateAdminCustomRoleBodyLabelMax = 60;
 
 export const updateAdminCustomRoleBodyDescriptionMax = 240;
+
+
 
 
 export const UpdateAdminCustomRoleBody = zod.object({
@@ -117,6 +136,7 @@ export const HealthCheckResponse = zod.object({
  */
 
 
+
 export const GetIrcStateQueryParams = zod.object({
   "channel": zod.coerce.string().min(1)
 })
@@ -145,6 +165,7 @@ export const GetIrcStateResponse = zod.object({
  */
 
 export const joinIrcChannelBodyNickMax = 24;
+
 
 
 export const JoinIrcChannelBody = zod.object({
@@ -180,6 +201,7 @@ export const sendIrcMessageBodyNickMax = 24;
 export const sendIrcMessageBodyTextMax = 500;
 
 
+
 export const SendIrcMessageBody = zod.object({
   "channel": zod.string().min(1),
   "nick": zod.string().min(1).max(sendIrcMessageBodyNickMax),
@@ -200,6 +222,7 @@ export const SendIrcMessageResponse = zod.object({
  * Opens a server-sent events stream for messages and presence changes in a channel.
  * @summary Stream IRC room events
  */
+
 
 
 export const StreamIrcEventsQueryParams = zod.object({
@@ -296,11 +319,50 @@ export const ListNotificationsResponse = zod.array(ListNotificationsResponseItem
 
 
 /**
+ * The JSON response remains an array. The named community parameters override the general limit and offset.
+ * @summary List accessible paid workspaces
+ */
+export const listCommunitiesQueryLimitDefault = 100;
+export const listCommunitiesQueryLimitMax = 2147483647;
+
+export const listCommunitiesQueryOffsetDefault = 0;
+export const listCommunitiesQueryOffsetMin = 0;
+export const listCommunitiesQueryOffsetMax = 2147483647;
+
+export const listCommunitiesQueryCommunitiesLimitMax = 2147483647;
+
+export const listCommunitiesQueryCommunitiesOffsetMin = 0;
+export const listCommunitiesQueryCommunitiesOffsetMax = 2147483647;
+
+
+
+export const ListCommunitiesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listCommunitiesQueryLimitMax).default(listCommunitiesQueryLimitDefault).describe('Default limit for workspace collections; values above 100 are capped.'),
+  "offset": zod.coerce.number().int().min(listCommunitiesQueryOffsetMin).max(listCommunitiesQueryOffsetMax).default(listCommunitiesQueryOffsetDefault).describe('Default offset for workspace collections.'),
+  "communitiesLimit": zod.coerce.number().int().min(1).max(listCommunitiesQueryCommunitiesLimitMax).optional().describe('Overrides limit for the communities array; values above 100 are capped.'),
+  "communitiesOffset": zod.coerce.number().int().min(listCommunitiesQueryCommunitiesOffsetMin).max(listCommunitiesQueryCommunitiesOffsetMax).optional().describe('Overrides offset for the communities array.')
+})
+
+export const ListCommunitiesResponseItem = zod.object({
+
+}).passthrough()
+export const ListCommunitiesResponse = zod.array(ListCommunitiesResponseItem)
+
+
+/**
+ * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
  * @summary Get workspace data and bounded collection pages
  */
 export const GetCommunityWorkspaceParams = zod.object({
   "communityId": zod.coerce.number().int()
 })
+
+export const getCommunityWorkspaceQueryLimitDefault = 100;
+export const getCommunityWorkspaceQueryLimitMax = 2147483647;
+
+export const getCommunityWorkspaceQueryOffsetDefault = 0;
+export const getCommunityWorkspaceQueryOffsetMin = 0;
+export const getCommunityWorkspaceQueryOffsetMax = 2147483647;
 
 export const getCommunityWorkspaceQueryEmployeesLimitDefault = 100;
 export const getCommunityWorkspaceQueryEmployeesLimitMax = 100;
@@ -362,8 +424,16 @@ export const getCommunityWorkspaceQueryPoliciesLimitMax = 100;
 export const getCommunityWorkspaceQueryPoliciesOffsetDefault = 0;
 export const getCommunityWorkspaceQueryPoliciesOffsetMin = 0;
 
+export const getCommunityWorkspaceQueryAnnouncementsLimitMax = 2147483647;
+
+export const getCommunityWorkspaceQueryAnnouncementsOffsetMin = 0;
+export const getCommunityWorkspaceQueryAnnouncementsOffsetMax = 2147483647;
+
+
 
 export const GetCommunityWorkspaceQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryLimitMax).default(getCommunityWorkspaceQueryLimitDefault).describe('Default limit for workspace collections; values above 100 are capped.'),
+  "offset": zod.coerce.number().int().min(getCommunityWorkspaceQueryOffsetMin).max(getCommunityWorkspaceQueryOffsetMax).default(getCommunityWorkspaceQueryOffsetDefault).describe('Default offset for workspace collections.'),
   "employeesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryEmployeesLimitMax).default(getCommunityWorkspaceQueryEmployeesLimitDefault),
   "employeesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryEmployeesOffsetMin).default(getCommunityWorkspaceQueryEmployeesOffsetDefault),
   "invitationsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryInvitationsLimitMax).default(getCommunityWorkspaceQueryInvitationsLimitDefault),
@@ -383,12 +453,15 @@ export const GetCommunityWorkspaceQueryParams = zod.object({
   "teamsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamsLimitMax).default(getCommunityWorkspaceQueryTeamsLimitDefault),
   "teamsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamsOffsetMin).default(getCommunityWorkspaceQueryTeamsOffsetDefault),
   "policiesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryPoliciesLimitMax).default(getCommunityWorkspaceQueryPoliciesLimitDefault),
-  "policiesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryPoliciesOffsetMin).default(getCommunityWorkspaceQueryPoliciesOffsetDefault)
+  "policiesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryPoliciesOffsetMin).default(getCommunityWorkspaceQueryPoliciesOffsetDefault),
+  "announcementsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryAnnouncementsLimitMax).optional().describe('Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.'),
+  "announcementsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryAnnouncementsOffsetMin).max(getCommunityWorkspaceQueryAnnouncementsOffsetMax).optional()
 })
 
 export const getCommunityWorkspaceResponsePaginationLimitMax = 100;
 
 export const getCommunityWorkspaceResponsePaginationOffsetMin = 0;
+
 
 
 export const GetCommunityWorkspaceResponse = zod.object({
@@ -428,6 +501,9 @@ export const GetCommunityWorkspaceResponse = zod.object({
   "tasks": zod.array(zod.object({
 
 }).passthrough()).optional(),
+  "announcements": zod.array(zod.object({
+
+}).passthrough()).optional(),
   "pagination": zod.record(zod.string(), zod.object({
   "limit": zod.number().int().min(1).max(getCommunityWorkspaceResponsePaginationLimitMax),
   "offset": zod.number().int().min(getCommunityWorkspaceResponsePaginationOffsetMin),
@@ -448,6 +524,7 @@ export const listModerationLogsQueryLimitMax = 100;
 
 export const listModerationLogsQueryOffsetDefault = 0;
 export const listModerationLogsQueryOffsetMin = 0;
+
 
 
 export const ListModerationLogsQueryParams = zod.object({
@@ -484,6 +561,7 @@ export const listCommunityActivityQueryAuditOffsetMin = 0;
 export const listCommunityActivityQueryResourceMax = 120;
 
 
+
 export const ListCommunityActivityQueryParams = zod.object({
   "auditLimit": zod.coerce.number().int().min(1).max(listCommunityActivityQueryAuditLimitMax).default(listCommunityActivityQueryAuditLimitDefault),
   "auditOffset": zod.coerce.number().int().min(listCommunityActivityQueryAuditOffsetMin).default(listCommunityActivityQueryAuditOffsetDefault),
@@ -499,6 +577,7 @@ export const ListCommunityActivityQueryParams = zod.object({
 export const listCommunityActivityResponsePaginationLimitMax = 100;
 
 export const listCommunityActivityResponsePaginationOffsetMin = 0;
+
 
 
 export const ListCommunityActivityResponse = zod.object({
@@ -523,6 +602,7 @@ export const ListCommunityActivityResponse = zod.object({
 })
 })
 
+
 /**
  * @summary List workspace documents and bounded document pages
  */
@@ -543,6 +623,7 @@ export const listCommunityDocumentsQueryFoldersOffsetDefault = 0;
 export const listCommunityDocumentsQueryFoldersOffsetMin = 0;
 
 
+
 export const ListCommunityDocumentsQueryParams = zod.object({
   "q": zod.coerce.string().optional(),
   "folderId": zod.coerce.number().int().optional(),
@@ -560,6 +641,7 @@ export const listCommunityDocumentsResponsePaginationOffsetMin = 0;
 export const listCommunityDocumentsResponseFoldersPaginationLimitMax = 100;
 
 export const listCommunityDocumentsResponseFoldersPaginationOffsetMin = 0;
+
 
 
 export const ListCommunityDocumentsResponse = zod.object({
@@ -584,8 +666,23 @@ export const ListCommunityDocumentsResponse = zod.object({
 
 
 /**
+ * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
  * @summary Get administrative statistics and activity
  */
+export const getAdminOverviewQueryChannelLimitDefault = 50;
+export const getAdminOverviewQueryChannelLimitMax = 100;
+
+export const getAdminOverviewQueryChannelOffsetDefault = 0;
+export const getAdminOverviewQueryChannelOffsetMin = 0;
+export const getAdminOverviewQueryChannelOffsetMax = 2147483647;
+
+export const getAdminOverviewQueryCategoryLimitDefault = 50;
+export const getAdminOverviewQueryCategoryLimitMax = 100;
+
+export const getAdminOverviewQueryCategoryOffsetDefault = 0;
+export const getAdminOverviewQueryCategoryOffsetMin = 0;
+export const getAdminOverviewQueryCategoryOffsetMax = 2147483647;
+
 export const getAdminOverviewQueryActivityLimitDefault = 20;
 export const getAdminOverviewQueryActivityLimitMax = 50;
 
@@ -602,7 +699,14 @@ export const getAdminOverviewQueryActivityActorMax = 200;
 export const getAdminOverviewQueryActivityActionMax = 200;
 
 export const getAdminOverviewQueryActivityStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const getAdminOverviewQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
 export const GetAdminOverviewQueryParams = zod.object({
+  "channelLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryChannelLimitMax).default(getAdminOverviewQueryChannelLimitDefault),
+  "channelOffset": zod.coerce.number().int().min(getAdminOverviewQueryChannelOffsetMin).max(getAdminOverviewQueryChannelOffsetMax).default(getAdminOverviewQueryChannelOffsetDefault),
+  "categoryLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryCategoryLimitMax).default(getAdminOverviewQueryCategoryLimitDefault),
+  "categoryOffset": zod.coerce.number().int().min(getAdminOverviewQueryCategoryOffsetMin).max(getAdminOverviewQueryCategoryOffsetMax).default(getAdminOverviewQueryCategoryOffsetDefault),
   "activityLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryActivityLimitMax).default(getAdminOverviewQueryActivityLimitDefault),
   "activityOffset": zod.coerce.number().int().min(getAdminOverviewQueryActivityOffsetMin).max(getAdminOverviewQueryActivityOffsetMax).default(getAdminOverviewQueryActivityOffsetDefault),
   "activityCursor": zod.coerce.string().max(getAdminOverviewQueryActivityCursorMax).optional(),
@@ -610,14 +714,23 @@ export const GetAdminOverviewQueryParams = zod.object({
   "activityActor": zod.coerce.string().max(getAdminOverviewQueryActivityActorMax).optional(),
   "activityAction": zod.coerce.string().max(getAdminOverviewQueryActivityActionMax).optional(),
   "activityStartDate": zod.coerce.string().regex(getAdminOverviewQueryActivityStartDateRegExp).optional().describe('Inclusive UTC calendar date for the earliest activity to return; must be YYYY-MM-DD.'),
-  "activityEndDate": zod.coerce.string().regex(new RegExp('^\\d{4}-\\d{2}-\\d{2}$')).optional().describe('Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.')
+  "activityEndDate": zod.coerce.string().regex(getAdminOverviewQueryActivityEndDateRegExp).optional().describe('Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.')
 })
+
+export const getAdminOverviewResponseCollectionPaginationChannelsLimitMax = 100;
+
+export const getAdminOverviewResponseCollectionPaginationChannelsOffsetMin = 0;
+
+export const getAdminOverviewResponseCollectionPaginationCategoriesLimitMax = 100;
+
+export const getAdminOverviewResponseCollectionPaginationCategoriesOffsetMin = 0;
 
 export const getAdminOverviewResponseActivityPaginationLimitMax = 50;
 
 export const getAdminOverviewResponseActivityPaginationOffsetMin = 0;
 
 export const getAdminOverviewResponseActivityPaginationNextOffsetMin = 0;
+
 
 
 export const GetAdminOverviewResponse = zod.object({
@@ -633,6 +746,18 @@ export const GetAdminOverviewResponse = zod.object({
   "categories": zod.array(zod.object({
 
 }).passthrough()),
+  "collectionPagination": zod.object({
+  "channels": zod.object({
+  "limit": zod.number().int().min(1).max(getAdminOverviewResponseCollectionPaginationChannelsLimitMax),
+  "offset": zod.number().int().min(getAdminOverviewResponseCollectionPaginationChannelsOffsetMin),
+  "hasMore": zod.boolean()
+}),
+  "categories": zod.object({
+  "limit": zod.number().int().min(1).max(getAdminOverviewResponseCollectionPaginationCategoriesLimitMax),
+  "offset": zod.number().int().min(getAdminOverviewResponseCollectionPaginationCategoriesOffsetMin),
+  "hasMore": zod.boolean()
+})
+}),
   "recentMessages": zod.array(zod.object({
 
 }).passthrough()),
@@ -650,4 +775,290 @@ export const GetAdminOverviewResponse = zod.object({
 })
 })
 
-export const getAdminOverviewQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+/**
+ * @summary List admin-visible users
+ */
+export const listAdminUsersQueryLimitDefault = 50;
+export const listAdminUsersQueryLimitMax = 100;
+
+export const listAdminUsersQueryOffsetDefault = 0;
+export const listAdminUsersQueryOffsetMin = 0;
+export const listAdminUsersQueryOffsetMax = 2147483647;
+
+export const listAdminUsersQueryQMax = 200;
+
+
+
+export const ListAdminUsersQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listAdminUsersQueryLimitMax).default(listAdminUsersQueryLimitDefault).describe('Number of records to return.'),
+  "offset": zod.coerce.number().int().min(listAdminUsersQueryOffsetMin).max(listAdminUsersQueryOffsetMax).default(listAdminUsersQueryOffsetDefault).describe('Number of records to skip.'),
+  "q": zod.coerce.string().max(listAdminUsersQueryQMax).optional(),
+  "role": zod.coerce.string().optional(),
+  "status": zod.enum(['online', 'offline']).optional(),
+  "accountStatus": zod.enum(['active', 'suspended']).optional()
+})
+
+export const ListAdminUsersResponseItem = zod.object({
+
+}).passthrough()
+export const ListAdminUsersResponse = zod.array(ListAdminUsersResponseItem)
+
+
+/**
+ * @summary List role assignments
+ */
+export const listAdminRoleAssignmentsQueryLimitDefault = 50;
+export const listAdminRoleAssignmentsQueryLimitMax = 100;
+
+export const listAdminRoleAssignmentsQueryOffsetDefault = 0;
+export const listAdminRoleAssignmentsQueryOffsetMin = 0;
+export const listAdminRoleAssignmentsQueryOffsetMax = 2147483647;
+
+
+
+export const ListAdminRoleAssignmentsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listAdminRoleAssignmentsQueryLimitMax).default(listAdminRoleAssignmentsQueryLimitDefault).describe('Number of records to return.'),
+  "offset": zod.coerce.number().int().min(listAdminRoleAssignmentsQueryOffsetMin).max(listAdminRoleAssignmentsQueryOffsetMax).default(listAdminRoleAssignmentsQueryOffsetDefault).describe('Number of records to skip.')
+})
+
+export const ListAdminRoleAssignmentsResponseItem = zod.object({
+
+}).passthrough()
+export const ListAdminRoleAssignmentsResponse = zod.array(ListAdminRoleAssignmentsResponseItem)
+
+
+/**
+ * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+ * @summary List role scope options
+ */
+export const listAdminScopeOptionsQueryLimitDefault = 50;
+export const listAdminScopeOptionsQueryLimitMax = 100;
+
+export const listAdminScopeOptionsQueryOffsetDefault = 0;
+export const listAdminScopeOptionsQueryOffsetMin = 0;
+export const listAdminScopeOptionsQueryOffsetMax = 2147483647;
+
+
+
+export const ListAdminScopeOptionsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listAdminScopeOptionsQueryLimitMax).default(listAdminScopeOptionsQueryLimitDefault).describe('Number of records to return.'),
+  "offset": zod.coerce.number().int().min(listAdminScopeOptionsQueryOffsetMin).max(listAdminScopeOptionsQueryOffsetMax).default(listAdminScopeOptionsQueryOffsetDefault).describe('Number of records to skip.')
+})
+
+export const ListAdminScopeOptionsResponse = zod.object({
+  "communities": zod.array(zod.object({
+
+}).passthrough()),
+  "categories": zod.array(zod.object({
+
+}).passthrough()),
+  "channels": zod.array(zod.object({
+
+}).passthrough()),
+  "departments": zod.array(zod.object({
+
+}).passthrough())
+})
+
+
+/**
+ * @summary List developer releases
+ */
+export const listDeveloperReleasesQueryLimitDefault = 50;
+export const listDeveloperReleasesQueryLimitMax = 100;
+
+export const listDeveloperReleasesQueryOffsetDefault = 0;
+export const listDeveloperReleasesQueryOffsetMin = 0;
+export const listDeveloperReleasesQueryOffsetMax = 2147483647;
+
+
+
+export const ListDeveloperReleasesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listDeveloperReleasesQueryLimitMax).default(listDeveloperReleasesQueryLimitDefault).describe('Number of records to return.'),
+  "offset": zod.coerce.number().int().min(listDeveloperReleasesQueryOffsetMin).max(listDeveloperReleasesQueryOffsetMax).default(listDeveloperReleasesQueryOffsetDefault).describe('Number of records to skip.')
+})
+
+export const ListDeveloperReleasesResponseItem = zod.object({
+
+}).passthrough()
+export const ListDeveloperReleasesResponse = zod.array(ListDeveloperReleasesResponseItem)
+
+
+/**
+ * @summary List visible channels
+ */
+export const listChannelsQueryLimitDefault = 100;
+export const listChannelsQueryLimitMax = 100;
+
+export const listChannelsQueryOffsetDefault = 0;
+export const listChannelsQueryOffsetMin = 0;
+export const listChannelsQueryOffsetMax = 9007199254740991;
+
+
+
+export const ListChannelsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listChannelsQueryLimitMax).default(listChannelsQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(listChannelsQueryOffsetMin).max(listChannelsQueryOffsetMax).default(listChannelsQueryOffsetDefault)
+})
+
+export const ListChannelsResponseItem = zod.object({
+
+}).passthrough()
+export const ListChannelsResponse = zod.array(ListChannelsResponseItem)
+
+
+/**
+ * Returns an array of eligible owned public communities, excluding the channel's current community.
+ * @summary List public spaces available to the channel owner
+ */
+
+
+
+export const ListChannelPublicSpacesParams = zod.object({
+  "channelId": zod.coerce.number().int().min(1)
+})
+
+export const listChannelPublicSpacesQueryLimitDefault = 100;
+export const listChannelPublicSpacesQueryLimitMax = 100;
+
+export const listChannelPublicSpacesQueryOffsetDefault = 0;
+export const listChannelPublicSpacesQueryOffsetMin = 0;
+export const listChannelPublicSpacesQueryOffsetMax = 9007199254740991;
+
+
+
+export const ListChannelPublicSpacesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listChannelPublicSpacesQueryLimitMax).default(listChannelPublicSpacesQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(listChannelPublicSpacesQueryOffsetMin).max(listChannelPublicSpacesQueryOffsetMax).default(listChannelPublicSpacesQueryOffsetDefault)
+})
+
+export const ListChannelPublicSpacesResponseItem = zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "plan": zod.string()
+})
+export const ListChannelPublicSpacesResponse = zod.array(ListChannelPublicSpacesResponseItem)
+
+
+/**
+ * @summary List visible categories
+ */
+export const listCategoriesQueryLimitDefault = 100;
+export const listCategoriesQueryLimitMax = 100;
+
+export const listCategoriesQueryOffsetDefault = 0;
+export const listCategoriesQueryOffsetMin = 0;
+export const listCategoriesQueryOffsetMax = 9007199254740991;
+
+
+
+export const ListCategoriesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listCategoriesQueryLimitMax).default(listCategoriesQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(listCategoriesQueryOffsetMin).max(listCategoriesQueryOffsetMax).default(listCategoriesQueryOffsetDefault)
+})
+
+export const ListCategoriesResponseItem = zod.object({
+
+}).passthrough()
+export const ListCategoriesResponse = zod.array(ListCategoriesResponseItem)
+
+
+/**
+ * @summary Search visible users
+ */
+export const searchUsersQueryLimitDefault = 100;
+export const searchUsersQueryLimitMax = 100;
+
+export const searchUsersQueryOffsetDefault = 0;
+export const searchUsersQueryOffsetMin = 0;
+export const searchUsersQueryOffsetMax = 9007199254740991;
+
+export const searchUsersQueryQMax = 200;
+
+
+
+export const SearchUsersQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(searchUsersQueryLimitMax).default(searchUsersQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(searchUsersQueryOffsetMin).max(searchUsersQueryOffsetMax).default(searchUsersQueryOffsetDefault),
+  "q": zod.coerce.string().max(searchUsersQueryQMax).optional()
+})
+
+export const SearchUsersResponseItem = zod.object({
+
+}).passthrough()
+export const SearchUsersResponse = zod.array(SearchUsersResponseItem)
+
+
+/**
+ * @summary List visible direct-message threads
+ */
+export const listDmThreadsQueryLimitDefault = 100;
+export const listDmThreadsQueryLimitMax = 100;
+
+export const listDmThreadsQueryOffsetDefault = 0;
+export const listDmThreadsQueryOffsetMin = 0;
+export const listDmThreadsQueryOffsetMax = 9007199254740991;
+
+
+
+export const ListDmThreadsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listDmThreadsQueryLimitMax).default(listDmThreadsQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(listDmThreadsQueryOffsetMin).max(listDmThreadsQueryOffsetMax).default(listDmThreadsQueryOffsetDefault)
+})
+
+export const ListDmThreadsResponseItem = zod.object({
+
+}).passthrough()
+export const ListDmThreadsResponse = zod.array(ListDmThreadsResponseItem)
+
+
+/**
+ * @summary Search visible messages
+ */
+export const searchMessagesQueryLimitDefault = 100;
+export const searchMessagesQueryLimitMax = 100;
+
+export const searchMessagesQueryOffsetDefault = 0;
+export const searchMessagesQueryOffsetMin = 0;
+export const searchMessagesQueryOffsetMax = 9007199254740991;
+
+export const searchMessagesQueryQMax = 200;
+
+
+
+export const SearchMessagesQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(searchMessagesQueryLimitMax).default(searchMessagesQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(searchMessagesQueryOffsetMin).max(searchMessagesQueryOffsetMax).default(searchMessagesQueryOffsetDefault),
+  "q": zod.coerce.string().max(searchMessagesQueryQMax).optional()
+})
+
+export const SearchMessagesResponseItem = zod.object({
+
+}).passthrough()
+export const SearchMessagesResponse = zod.array(SearchMessagesResponseItem)
+
+
+/**
+ * @summary List visible announcements
+ */
+export const listAnnouncementsQueryLimitDefault = 100;
+export const listAnnouncementsQueryLimitMax = 100;
+
+export const listAnnouncementsQueryOffsetDefault = 0;
+export const listAnnouncementsQueryOffsetMin = 0;
+export const listAnnouncementsQueryOffsetMax = 9007199254740991;
+
+
+
+export const ListAnnouncementsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listAnnouncementsQueryLimitMax).default(listAnnouncementsQueryLimitDefault),
+  "offset": zod.coerce.number().int().min(listAnnouncementsQueryOffsetMin).max(listAnnouncementsQueryOffsetMax).default(listAnnouncementsQueryOffsetDefault)
+})
+
+export const ListAnnouncementsResponseItem = zod.object({
+
+}).passthrough()
+export const ListAnnouncementsResponse = zod.array(ListAnnouncementsResponseItem)
+
+

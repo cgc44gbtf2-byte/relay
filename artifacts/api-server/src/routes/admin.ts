@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, asc, count, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   adminAuditLogsTable,
   categoriesTable,
@@ -36,6 +36,17 @@ const DEFAULT_ACTIVITY_LIMIT = 20;
 const MAX_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_OFFSET = 10_000;
 const MAX_ACTIVITY_CURSOR_LENGTH = 256;
+const COLLECTION_LIMIT = 50;
+const MAX_COLLECTION_LIMIT = 100;
+const MAX_COLLECTION_OFFSET = 2_147_483_647;
+function collectionPage(req: AuthenticatedRequest, prefix = "") {
+  const limit = parseActivityQueryInteger(req.query[prefix ? `${prefix}Limit` : "limit"], COLLECTION_LIMIT, MAX_COLLECTION_LIMIT, 1);
+  const offset = parseActivityQueryInteger(req.query[prefix ? `${prefix}Offset` : "offset"], 0, MAX_COLLECTION_OFFSET);
+  return limit === null || offset === null ? null : { limit, offset };
+}
+function invalidCollectionPage(res: import("express").Response): void {
+  res.status(400).json({ error: `limit must be between 1 and ${MAX_COLLECTION_LIMIT}, and offset must be between 0 and ${MAX_COLLECTION_OFFSET}.` });
+}
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 3; depth += 1) {
@@ -191,6 +202,9 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const channelPage = collectionPage(req, "channel");
+  const categoryPage = collectionPage(req, "category");
+  if (!channelPage || !categoryPage) { invalidCollectionPage(res); return; }
   const activityLimit = parseActivityQueryInteger(
     req.query.activityLimit,
     DEFAULT_ACTIVITY_LIMIT,
@@ -285,7 +299,9 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       .leftJoin(channelMembersTable, eq(channelMembersTable.channelId, channelsTable.id))
       .leftJoin(communitiesTable, eq(communitiesTable.id, channelsTable.communityId))
       .groupBy(channelsTable.id, communitiesTable.name)
-      .orderBy(asc(channelsTable.name)),
+      .orderBy(asc(channelsTable.name), asc(channelsTable.id))
+      .limit(channelPage.limit)
+      .offset(channelPage.offset),
     db
       .select({
         id: categoriesTable.id,
@@ -297,7 +313,9 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       })
       .from(categoriesTable)
       .leftJoin(communitiesTable, eq(communitiesTable.id, categoriesTable.communityId))
-      .orderBy(asc(categoriesTable.name)),
+      .orderBy(asc(categoriesTable.name), asc(categoriesTable.id))
+      .limit(categoryPage.limit)
+      .offset(categoryPage.offset),
     db
       .select({
         id: messagesTable.id,
@@ -378,6 +396,10 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     users,
     channels,
     categories,
+    collectionPagination: {
+      channels: { ...channelPage, hasMore: channels.length === channelPage.limit },
+      categories: { ...categoryPage, hasMore: categories.length === categoryPage.limit },
+    },
     recentMessages,
     activity: visibleActivity,
     activityPagination: {
@@ -426,16 +448,17 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const page = collectionPage(req);
+  if (!page) { invalidCollectionPage(res); return; }
   const rawQuery = req.query.q;
   const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
   if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
     res.status(400).json({ error: "User search must be 200 characters or fewer." });
     return;
   }
-  const requestedRole = typeof req.query.role === "string" ? req.query.role : "";
-  const role = req.body?.role;
+  const role = typeof req.query.role === "string" ? req.query.role : "";
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
-  const accountStatus = req.body?.accountStatus;
+  const accountStatus = req.query.accountStatus === "active" || req.query.accountStatus === "suspended" ? req.query.accountStatus : "";
   const filters = [
     query
       ? or(
@@ -460,8 +483,9 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     })
     .from(usersTable)
     .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(usersTable.createdAt))
-    .limit(100);
+    .orderBy(desc(usersTable.createdAt), desc(usersTable.clerkId))
+    .limit(page.limit)
+    .offset(page.offset);
   res.json(users);
 });
 
@@ -562,6 +586,8 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const page = collectionPage(req);
+  if (!page) { invalidCollectionPage(res); return; }
   const assignments = await db
     .select({
       id: userRolesTable.id,
@@ -586,7 +612,8 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
     .leftJoin(categoriesTable, eq(categoriesTable.id, userRolesTable.categoryId))
     .leftJoin(departmentsTable, eq(departmentsTable.id, userRolesTable.departmentId))
     .leftJoin(channelsTable, eq(channelsTable.id, userRolesTable.channelId))
-    .orderBy(desc(userRolesTable.createdAt));
+    .orderBy(desc(userRolesTable.createdAt), desc(userRolesTable.id))
+    .limit(page.limit).offset(page.offset);
   res.json(assignments);
 });
 
@@ -595,11 +622,13 @@ router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const page = collectionPage(req);
+  if (!page) { invalidCollectionPage(res); return; }
   const [communities, categories, channels, departments] = await Promise.all([
-    db.select({ id: communitiesTable.id, name: communitiesTable.name }).from(communitiesTable).orderBy(asc(communitiesTable.name)),
-    db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId }).from(categoriesTable).orderBy(asc(categoriesTable.name)),
-    db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).orderBy(asc(channelsTable.name)),
-    db.select({ id: departmentsTable.id, name: departmentsTable.name, communityId: departmentsTable.communityId }).from(departmentsTable).orderBy(asc(departmentsTable.name)),
+    db.select({ id: communitiesTable.id, name: communitiesTable.name }).from(communitiesTable).orderBy(asc(communitiesTable.name), asc(communitiesTable.id)).limit(page.limit).offset(page.offset),
+    db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId }).from(categoriesTable).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(page.limit).offset(page.offset),
+    db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(page.limit).offset(page.offset),
+    db.select({ id: departmentsTable.id, name: departmentsTable.name, communityId: departmentsTable.communityId }).from(departmentsTable).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(page.limit).offset(page.offset),
   ]);
   res.json({ communities, categories, channels, departments });
 });
@@ -609,13 +638,14 @@ router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest,
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  const page = collectionPage(req);
+  if (!page) { invalidCollectionPage(res); return; }
   await ensurePermissionCatalog();
-  const [roles, links] = await Promise.all([
-    db.select().from(customRolesTable).orderBy(asc(customRolesTable.label)),
-    db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
+  const roles = await db.select().from(customRolesTable).orderBy(asc(customRolesTable.label), asc(customRolesTable.key)).limit(page.limit).offset(page.offset);
+  const links = roles.length ? await db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
       .from(rolePermissionsTable)
-      .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId)),
-  ]);
+      .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
+      .where(inArray(rolePermissionsTable.role, roles.map((role) => role.key))) : [];
   res.json(ListAdminCustomRolesResponse.parse({
     roles: roles.map((role) => ({ ...role, permissions: links.filter((link) => link.role === role.key).map((link) => link.permission) })),
     permissions: CUSTOM_ROLE_PERMISSIONS.map((key) => ({

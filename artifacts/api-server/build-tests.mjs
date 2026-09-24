@@ -18,6 +18,7 @@ await esbuild({
     path.resolve(artifactDir, "src/lib/invitation-email.test.ts"),
     path.resolve(artifactDir, "src/lib/ws.test.ts"),
     path.resolve(artifactDir, "src/lib/fixed-window-limiter.test.ts"),
+    path.resolve(artifactDir, "src/lib/visible-list-page.test.ts"),
     path.resolve(artifactDir, "src/routes/storage.test.ts"),
     path.resolve(artifactDir, "src/lib/validation.test.ts"),
     path.resolve(artifactDir, "src/lib/test-account-policy.test.ts"),

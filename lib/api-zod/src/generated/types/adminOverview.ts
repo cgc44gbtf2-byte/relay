@@ -9,6 +9,7 @@ import type { AdminActivityPagination } from './adminActivityPagination';
 import type { AdminOverviewActivityItem } from './adminOverviewActivityItem';
 import type { AdminOverviewCategoriesItem } from './adminOverviewCategoriesItem';
 import type { AdminOverviewChannelsItem } from './adminOverviewChannelsItem';
+import type { AdminOverviewCollectionPagination } from './adminOverviewCollectionPagination';
 import type { AdminOverviewRecentMessagesItem } from './adminOverviewRecentMessagesItem';
 import type { AdminOverviewStats } from './adminOverviewStats';
 import type { AdminOverviewUsersItem } from './adminOverviewUsersItem';
@@ -18,6 +19,7 @@ export interface AdminOverview {
   users: AdminOverviewUsersItem[];
   channels: AdminOverviewChannelsItem[];
   categories: AdminOverviewCategoriesItem[];
+  collectionPagination: AdminOverviewCollectionPagination;
   recentMessages: AdminOverviewRecentMessagesItem[];
   activity: AdminOverviewActivityItem[];
   activityPagination: AdminActivityPagination;
