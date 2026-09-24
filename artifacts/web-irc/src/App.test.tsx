@@ -394,6 +394,221 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
 
+describe("community organization polling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+    vi.unstubAllGlobals();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  });
+
+  it("renders cross-session relationship changes without replacing an unsaved settings draft", async () => {
+    const community = {
+      id: 41, name: "Polling workspace", description: "Server description", rules: "", services: "",
+      serviceArea: "", businessHours: "", contactEmail: "", contactPhone: "", plan: "business",
+      memberCount: 3, channelCount: 0,
+    };
+    const people = [
+      { id: "employee-1", username: "alex", displayName: "Alex Employee", status: "online", role: "member" },
+      { id: "manager-1", username: "dana", displayName: "Dana Department", status: "online", role: "member" },
+      { id: "manager-2", username: "taylor", displayName: "Taylor Team", status: "online", role: "member" },
+    ];
+    let serverChanged = false;
+    const detail = () => {
+      const changed = serverChanged;
+      return {
+        community, canManage: true, canManageOrganization: true, isOwner: false, members: people,
+        employees: [
+          {
+            userId: "employee-1", username: "alex", displayName: "Alex Employee", employeeNumber: "E-1",
+            jobTitle: "Engineer", employmentStatus: "active", departmentId: changed ? 11 : null,
+            locationId: changed ? 21 : null, managerId: changed ? "manager-1" : null,
+            teamIds: changed ? [31] : [], onboardedAt: null, offboardedAt: null, presenceStatus: "online",
+          },
+          {
+            userId: "manager-1", username: "dana", displayName: "Dana Department", employeeNumber: "E-2",
+            jobTitle: "Director", employmentStatus: "active", departmentId: null, locationId: null,
+            managerId: null, teamIds: [], onboardedAt: null, offboardedAt: null, presenceStatus: "online",
+          },
+          {
+            userId: "manager-2", username: "taylor", displayName: "Taylor Team", employeeNumber: "E-3",
+            jobTitle: "Lead", employmentStatus: "active", departmentId: null, locationId: null,
+            managerId: null, teamIds: [], onboardedAt: null, offboardedAt: null, presenceStatus: "online",
+          },
+        ],
+        departments: [{ id: 11, name: "Operations", description: "", managerId: changed ? "manager-1" : null, status: "active" }],
+        locations: [{ id: 21, name: "North Office", code: "NO", address: "", timezone: "UTC", status: "active" }],
+        teams: [{ id: 31, name: "Response Team", description: "", departmentId: changed ? 11 : null, locationId: changed ? 21 : null, managerId: changed ? "manager-2" : null, status: "active" }],
+        teamMemberships: changed ? [{ teamId: 31, userId: "employee-1", role: "member", status: "active", joinedAt: "", endedAt: null }] : [],
+        assignments: [{ id: 1, userId: "employee-1", role: "member", scopeType: "community", communityId: 41 }],
+        channels: [], categories: [], announcements: [], invitations: [], policies: [], documents: [], tasks: [],
+        pagination: {
+          employees: { limit: 100, offset: 0, hasMore: false },
+          invitations: { limit: 100, offset: 0, hasMore: false },
+          tasks: { limit: 100, offset: 0, hasMore: false },
+          channels: { limit: 100, offset: 0, hasMore: false },
+          categories: { limit: 100, offset: 0, hasMore: false },
+          assignments: { limit: 100, offset: 0, hasMore: false },
+          departments: { limit: 100, offset: 0, hasMore: false },
+          locations: { limit: 100, offset: 0, hasMore: false },
+          teams: { limit: 100, offset: 0, hasMore: false },
+          policies: { limit: 100, offset: 0, hasMore: false },
+        },
+      };
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "admin" });
+      if (url === "/api/communities") return jsonResponse([community]);
+      if (url === "/api/me") return jsonResponse(profile);
+      if (url === "/api/communities/41/dashboard") return jsonResponse({
+        stats: { employees: 3, online: 3, channels: 0, openTasks: 0, announcements: 0, pendingRequests: 0 },
+        tasks: { open: 0, dueThisWeek: 0, overdue: 0 },
+        recentActivity: [],
+      });
+      if (url.startsWith("/api/communities/41/activity")) return jsonResponse({ entries: [], actions: [] });
+      if (url.startsWith("/api/communities/41/documents")) return jsonResponse({
+        documents: [], folders: [], pagination: { limit: 100, offset: 0, hasMore: false },
+        folderPagination: { limit: 100, offset: 0, hasMore: false },
+      });
+      if (url.startsWith("/api/communities/41?")) return jsonResponse(detail());
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/communities/41");
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "departments" });
+    const settingsName = screen.getByPlaceholderText("business name") as HTMLInputElement;
+    fireEvent.change(settingsName, { target: { value: "Unsaved local workspace name" } });
+    expect(screen.getAllByText(/Location: Unassigned · Teams: Unassigned/)).toHaveLength(3);
+
+    serverChanged = true;
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(screen.getByText(/Location: North Office · Teams: Response Team · Reporting manager: Dana Department · Department manager: Dana Department · Team manager: Taylor Team/)).toBeTruthy();
+    expect((screen.getByLabelText("Manager for Operations") as HTMLSelectElement).value).toBe("manager-1");
+    expect((screen.getByLabelText("Manager for Response Team") as HTMLSelectElement).value).toBe("manager-2");
+    expect(settingsName.value).toBe("Unsaved local workspace name");
+  });
+
+  it("does not let a delayed workspace mutation invalidate the newly selected workspace", async () => {
+    const workspace = (id: number, name: string) => ({
+      id, name, description: `${name} description`, rules: "", services: "", serviceArea: "",
+      businessHours: "", contactEmail: "", contactPhone: "", plan: "business", memberCount: 2,
+      channelCount: 0, canManage: true, joined: true,
+    });
+    const workspaceA = workspace(51, "Workspace A");
+    const workspaceB = workspace(52, "Workspace B");
+    const detail = (community: typeof workspaceA) => ({
+      community, canManage: true, canManageOrganization: true, isOwner: false,
+      members: [
+        { id: "employee-1", username: "alex", displayName: "Alex Employee", status: "online", role: "member" },
+        { id: "manager-1", username: "dana", displayName: "Dana Manager", status: "online", role: "member" },
+      ],
+      employees: [
+        {
+          userId: "employee-1", username: "alex", displayName: "Alex Employee", employeeNumber: "E-1",
+          jobTitle: "Engineer", employmentStatus: "active", departmentId: 11, locationId: null,
+          managerId: null, teamIds: [], onboardedAt: null, offboardedAt: null, presenceStatus: "online",
+        },
+        {
+          userId: "manager-1", username: "dana", displayName: "Dana Manager", employeeNumber: "E-2",
+          jobTitle: "Manager", employmentStatus: "active", departmentId: null, locationId: null,
+          managerId: null, teamIds: [], onboardedAt: null, offboardedAt: null, presenceStatus: "online",
+        },
+      ],
+      departments: [{ id: 11, name: `${community.name} Department`, description: "", managerId: null, status: "active" }],
+      locations: [], teams: [], teamMemberships: [],
+      assignments: [{ id: community.id, userId: "employee-1", role: "member", scopeType: "community", communityId: community.id }],
+      channels: [], categories: [], announcements: [], invitations: [], policies: [], documents: [], tasks: [],
+      pagination: Object.fromEntries([
+        "employees", "invitations", "tasks", "channels", "categories", "assignments",
+        "departments", "locations", "teams", "policies",
+      ].map((key) => [key, { limit: 100, offset: 0, hasMore: false }])),
+    });
+    let resolveMutation!: () => void;
+    const mutationResponse = new Promise<Response>((resolve) => {
+      resolveMutation = () => resolve(new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    });
+    let resolveWorkspaceB!: () => void;
+    const workspaceBResponse = new Promise<Response>((resolve) => {
+      resolveWorkspaceB = () => resolve(new Response(JSON.stringify(detail(workspaceB)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    });
+    let workspaceADetailCalls = 0;
+    let workspaceBDetailCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "admin" });
+      if (url === "/api/communities") return jsonResponse([workspaceA, workspaceB]);
+      if (url === "/api/me") return jsonResponse(profile);
+      if (url === "/api/communities/51/departments/11/manager" && init?.method === "PATCH") return mutationResponse;
+      if (url.startsWith("/api/communities/51?")) {
+        workspaceADetailCalls += 1;
+        return jsonResponse(detail(workspaceA));
+      }
+      if (url.startsWith("/api/communities/52?")) {
+        workspaceBDetailCalls += 1;
+        return workspaceBDetailCalls === 1 ? workspaceBResponse : jsonResponse(detail(workspaceB));
+      }
+      if (/\/api\/communities\/(51|52)\/dashboard$/.test(url)) return jsonResponse({
+        stats: { employees: 2, online: 2, channels: 0, openTasks: 0, announcements: 0, pendingRequests: 0 },
+        tasks: { open: 0, dueThisWeek: 0, overdue: 0 }, recentActivity: [],
+      });
+      if (/\/api\/communities\/(51|52)\/activity/.test(url)) return jsonResponse({ entries: [], actions: [] });
+      if (/\/api\/communities\/(51|52)\/documents/.test(url)) return jsonResponse({
+        documents: [], folders: [], pagination: { limit: 100, offset: 0, hasMore: false },
+        folderPagination: { limit: 100, offset: 0, hasMore: false },
+      });
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/communities/51");
+    render(<App />);
+    await screen.findByRole("heading", { name: "Workspace A" });
+
+    fireEvent.change(screen.getByLabelText("Manager for Workspace A Department"), { target: { value: "manager-1" } });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
+      String(input) === "/api/communities/51/departments/11/manager" && init?.method === "PATCH")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: /Workspace B/ }));
+    await waitFor(() => expect(workspaceBDetailCalls).toBe(1));
+
+    await act(async () => {
+      resolveMutation();
+      await mutationResponse;
+    });
+    expect(workspaceADetailCalls).toBe(1);
+
+    await act(async () => {
+      resolveWorkspaceB();
+      await workspaceBResponse;
+    });
+    expect(await screen.findByRole("heading", { name: "Workspace B" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Workspace A" })).toBeNull();
+    expect(workspaceADetailCalls).toBe(1);
+
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(workspaceBDetailCalls).toBe(2);
+    expect(workspaceADetailCalls).toBe(1);
+    expect(screen.getByRole("heading", { name: "Workspace B" })).toBeTruthy();
+  });
+});
+
 describe("deleted room recovery", () => {
   beforeEach(() => {
     vi.stubGlobal("alert", vi.fn());

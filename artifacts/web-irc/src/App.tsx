@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { fetchOrganizationPages, mergeOrganizationPages, useOrganizationFreshness } from "./useOrganizationFreshness";
 import {
   Bell,
   Activity,
@@ -3942,6 +3943,9 @@ function CommunityConsole() {
   const [ownerActionError, setOwnerActionError] = useState("");
   const [loadingMoreDetail, setLoadingMoreDetail] = useState(false);
   const [loadMoreDetailError, setLoadMoreDetailError] = useState("");
+  const detailRequestGeneration = useRef(0);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
 
   const loadCommunities = async () => {
     const [nextPermissions, nextCommunities, me] = await Promise.all([
@@ -3961,7 +3965,12 @@ function CommunityConsole() {
     });
   };
   const loadDetail = async (id: number) => {
+    // A delayed mutation may hold a callback from a previous workspace.
+    // Reject it before it can invalidate the active workspace's request.
+    if (selectedIdRef.current !== id) return;
+    const generation = ++detailRequestGeneration.current;
     const next = await api<CommunityDetail>(`/communities/${id}?view=summary&employeesLimit=100&employeesOffset=0&invitationsLimit=100&invitationsOffset=0&tasksLimit=100&tasksOffset=0&channelsLimit=100&channelsOffset=0&categoriesLimit=100&categoriesOffset=0&assignmentsLimit=100&assignmentsOffset=0&departmentsLimit=100&departmentsOffset=0&locationsLimit=100&locationsOffset=0&teamsLimit=100&teamsOffset=0&policiesLimit=100&policiesOffset=0`);
+    if (generation !== detailRequestGeneration.current || selectedIdRef.current !== id) return;
     // The legacy detail shape remains unchanged, while large workspaces are
     // reassembled explicitly here so existing panels still see every record.
     setDetail(next);
@@ -3976,6 +3985,21 @@ function CommunityConsole() {
       contactPhone: next.community.contactPhone,
     });
   };
+  useOrganizationFreshness({
+    workspaceId: selectedId,
+    enabled: Boolean(detail && detail.community.id === selectedId && !working && !loadingMoreDetail),
+    fetchFresh: async (id) => {
+      const current = detail;
+      if (!current || current.community.id !== id) return [];
+      return fetchOrganizationPages<CommunityDetail>(id, current, api);
+    },
+    applyFresh: (id, pages) => {
+      setDetail((current) => current && current.community.id === id
+        ? mergeOrganizationPages(current, pages)
+        : current);
+    },
+    onError: () => setError("Could not refresh the organization directory. Automatic refresh will retry."),
+  });
   const loadMoreDetail = async () => {
     if (!detail) return;
     if (loadingMoreDetail) return;
@@ -4014,10 +4038,15 @@ function CommunityConsole() {
   }, [requestedCommunityId]);
   useEffect(() => {
     if (selectedId === null) {
+      ++detailRequestGeneration.current;
       setDetail(null);
       return;
     }
+    ++detailRequestGeneration.current;
     loadDetail(selectedId).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load community"));
+    return () => {
+      ++detailRequestGeneration.current;
+    };
   }, [selectedId]);
   const createCommunity = async (event: FormEvent) => {
     event.preventDefault();

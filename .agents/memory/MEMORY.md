@@ -30,3 +30,4 @@
 - [Orval parameter export collisions](orval-parameter-collisions.md) — path-and-query parameter validators need explicit barrel exports to disambiguate generated type names.
 - [Prettier external-file probes](prettier-external-file-probes.md) — keep temporary YAML validation fixtures inside the repository so Prettier CLI actually parses them.
 - [Completion rebase verification](completion-rebase-verification.md) — automatic concurrent-task integration can invalidate checks; compare pre-completion and reviewed trees.
+- [Organization freshness tradeoff](organization-freshness.md) — directory freshness should work without depending on the chat page's socket lifecycle.
