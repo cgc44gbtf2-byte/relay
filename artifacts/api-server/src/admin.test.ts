@@ -8,6 +8,7 @@ import { pool } from "@workspace/db";
 import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
+import { logger } from "./lib/logger";
 import { hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
@@ -8116,6 +8117,10 @@ describe("admin access controls", () => {
     let communityId: number | null = null;
     const triggerName = `fail_message_notification_${randomUUID().replaceAll("-", "")}`;
     const functionName = `${triggerName}_fn`;
+    const warningCalls: Array<{ context: unknown; message: unknown }> = [];
+    const warningMock = mock.method(logger, "warn", ((context: unknown, message?: unknown) => {
+      warningCalls.push({ context, message });
+    }) as typeof logger.warn);
 
     try {
       const [senderProfile, recipientProfile] = await Promise.all([
@@ -8201,17 +8206,67 @@ describe("admin access controls", () => {
         messageIds.push(messageId as string);
       }
 
-      const committedMessages = await pool.query<{ body: string }>(
-        `SELECT body
-         FROM irc_messages
-         WHERE id = ANY($1::uuid[])`,
-        [messageIds],
+      assert.equal((channelMessage.body as { body?: unknown }).body, channelBody);
+      assert.equal((directMessage.body as { body?: unknown }).body, directBody);
+      assert.equal(
+        JSON.stringify([channelMessage.body, directMessage.body]).includes("forced notification failure"),
+        false,
+        "notification failure details must not be returned to the sender",
       );
-      assert.deepEqual(
-        committedMessages.rows.map((row) => row.body).sort(),
-        [channelBody, directBody].sort(),
+
+      const hasLoggedFailure = (expectedMessage: string, expectedId: string): boolean => (
+        warningCalls.some(({ context, message }) => (
+          message === expectedMessage
+          && typeof context === "object"
+          && context !== null
+          && "messageId" in context
+          && context.messageId === expectedId
+          && "err" in context
+          && context.err !== undefined
+        ))
+      );
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          clearInterval(interval);
+          reject(new Error("Timed out waiting for notification failures to be logged."));
+        }, 5_000);
+        const interval = setInterval(() => {
+          if (
+            !hasLoggedFailure("Message mention notifications failed.", (channelMessage.body as { id: string }).id)
+            || !hasLoggedFailure("Direct-message notification failed.", (directMessage.body as { id: string }).id)
+          ) return;
+          clearTimeout(timeout);
+          clearInterval(interval);
+          resolve();
+        }, 10);
+      });
+      assert.equal(
+        hasLoggedFailure("Message mention notifications failed.", (channelMessage.body as { id: string }).id),
+        true,
+      );
+      assert.equal(
+        hasLoggedFailure("Direct-message notification failed.", (directMessage.body as { id: string }).id),
+        true,
+      );
+
+      const [channelHistory, directHistory] = await Promise.all([
+        apiRequest(senderSession, `/channels/${channelId}/messages`),
+        apiRequest(senderSession, `/dm/${recipientSession.userId}/messages`),
+      ]);
+      assert.equal(channelHistory.status, 200, JSON.stringify(channelHistory));
+      assert.equal(directHistory.status, 200, JSON.stringify(directHistory));
+      assert.ok(channelHistory.body && typeof channelHistory.body === "object");
+      assert.ok(directHistory.body && typeof directHistory.body === "object");
+      assert.ok(
+        (channelHistory.body as { messages: Array<{ id: string; body: string }> }).messages
+          .some(({ id, body }) => id === (channelMessage.body as { id: string }).id && body === channelBody),
+      );
+      assert.ok(
+        (directHistory.body as { messages: Array<{ id: string; body: string }> }).messages
+          .some(({ id, body }) => id === (directMessage.body as { id: string }).id && body === directBody),
       );
     } finally {
+      warningMock.mock.restore();
       await pool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON irc_notifications`);
       await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
       if (messageIds.length) {
