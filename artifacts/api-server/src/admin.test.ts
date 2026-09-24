@@ -685,6 +685,89 @@ after(async () => {
   }
 });
 
+describe("free community onboarding", () => {
+  test("keeps repeated onboarding retries to one free community and separates paid workspaces", async () => {
+    const owner = await createTestSession("free_community_onboarding");
+
+    try {
+      const profile = await apiRequest(owner, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+
+      const onboardingResponses = await Promise.all(
+        Array.from({ length: 4 }, () => apiRequest(owner, "/onboarding")),
+      );
+      for (const response of onboardingResponses) {
+        assert.equal(response.status, 200, JSON.stringify(response));
+      }
+
+      type OnboardingState = {
+        ownerCommunity: { id: number; plan: string } | null;
+        communities: Array<{ id: number; plan: string }>;
+      };
+      const onboardingStates = onboardingResponses.map(
+        (response) => response.body as OnboardingState,
+      );
+      const freeCommunity = onboardingStates[0].ownerCommunity;
+      assert.ok(freeCommunity);
+      assert.equal(freeCommunity.plan, "free_community");
+      assert.ok(onboardingStates.every(
+        (state) => state.ownerCommunity?.id === freeCommunity.id,
+      ));
+
+      const storedFreeCommunities = await pool.query<{ id: number; plan: string }>(
+        `SELECT id, plan
+         FROM irc_communities
+         WHERE owner_id = $1 AND plan = 'free_community'`,
+        [owner.userId],
+      );
+      assert.deepEqual(storedFreeCommunities.rows, [{
+        id: freeCommunity.id,
+        plan: "free_community",
+      }]);
+
+      const starterRooms = await pool.query<{ name: string }>(
+        "SELECT name FROM irc_channels WHERE community_id = $1 ORDER BY name",
+        [freeCommunity.id],
+      );
+      assert.deepEqual(starterRooms.rows.map((room) => room.name), ["#general", "#welcome"]);
+
+      const workspace = await apiRequest(owner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Paid onboarding boundary ${randomUUID().slice(0, 8)}`,
+          slug: `paid-onboarding-${randomUUID().slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(workspace.status, 201, JSON.stringify(workspace));
+      const paidWorkspace = workspace.body as { id: number; plan: string };
+      assert.equal(paidWorkspace.plan, "paid_workspace");
+
+      const workspaceListing = await apiRequest(owner, "/communities");
+      assert.equal(workspaceListing.status, 200, JSON.stringify(workspaceListing));
+      assert.ok(Array.isArray(workspaceListing.body));
+      assert.ok((workspaceListing.body as Array<{ id: number; plan: string }>).some(
+        (community) => community.id === paidWorkspace.id && community.plan === "paid_workspace",
+      ));
+
+      const onboardingAfterWorkspaceCreation = await apiRequest(owner, "/onboarding");
+      assert.equal(onboardingAfterWorkspaceCreation.status, 200, JSON.stringify(onboardingAfterWorkspaceCreation));
+      const finalOnboarding = onboardingAfterWorkspaceCreation.body as OnboardingState;
+      assert.equal(finalOnboarding.ownerCommunity?.id, freeCommunity.id);
+      assert.equal(finalOnboarding.ownerCommunity?.plan, "free_community");
+      assert.ok(finalOnboarding.communities.every(
+        (community) => community.id !== paidWorkspace.id && community.plan !== "paid_workspace",
+      ));
+    } finally {
+      await pool.query(
+        "DELETE FROM irc_communities WHERE owner_id = $1",
+        [owner.userId],
+      );
+    }
+  });
+});
+
 describe("admin access controls", () => {
   test("rolls back announcements and all notifications when announcement auditing fails", async () => {
     const owner = await createTestSession("announcement_rollback_owner");
