@@ -430,6 +430,64 @@ describe("admin test-user cleanup safeguards", () => {
     });
   });
 
+  test("preserves the user-listing failure when webhook delivery also fails", async () => {
+    const listingError = "user listing failed: sk_test_listing_failure_secret";
+    const webhookUrl = "https://notifications.example.invalid/listing-failure";
+    const previousActions = process.env.GITHUB_ACTIONS;
+    const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+    const originalFetch = globalThis.fetch;
+    const originalConsoleError = console.error;
+    const originalConsoleLog = console.log;
+    const diagnostics: string[] = [];
+    let requests = 0;
+
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.TEAM_NOTIFICATION_WEBHOOK_URL = webhookUrl;
+    console.error = (...args: unknown[]) => {
+      diagnostics.push(args.map(String).join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      diagnostics.push(args.map(String).join(" "));
+    };
+    globalThis.fetch = async () => {
+      requests += 1;
+      throw new Error(`fetch failed for ${webhookUrl}`);
+    };
+
+    try {
+      const result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], {
+          clerk: createClerk({
+            getUserList: async () => {
+              throw new Error(listingError);
+            },
+          }),
+          database: createDatabase(),
+        }),
+      );
+
+      assert.equal(result, 1);
+      assert.equal(requests, 3);
+      const output = diagnostics.join("\n");
+      assert.match(output, /user listing failed/);
+      assert.match(output, /Failed to deliver cleanup failure notification/);
+      assert.doesNotMatch(output, /sk_test_listing_failure_secret/);
+      assert.doesNotMatch(output, /\b(?:sk|pk)_(?:test|live)_[A-Za-z0-9_-]+/);
+      assert.doesNotMatch(output, /notifications\.example\.invalid/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalConsoleError;
+      console.log = originalConsoleLog;
+      if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+      else process.env.GITHUB_ACTIONS = previousActions;
+      if (previousWebhook === undefined) {
+        delete process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
+      } else {
+        process.env.TEAM_NOTIFICATION_WEBHOOK_URL = previousWebhook;
+      }
+    }
+  });
+
   test("delivers the redacted failure summary to the team channel", async () => {
     const username = `${TEST_USERNAME_PREFIX}webhook`;
     const clerkSecret = "sk_test_webhook_secret";
