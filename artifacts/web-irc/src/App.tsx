@@ -2630,7 +2630,7 @@ function AnnouncementCenter({ detail, working, setWorking, setNotice, setError, 
   </section>;
 }
 
-function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
+function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh, initialTaskId }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void>; initialTaskId: number | null }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignedTo, setAssignedTo] = useState("");
@@ -2639,14 +2639,24 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
   const [priority, setPriority] = useState("medium");
   const [dueDate, setDueDate] = useState("");
   const [taskSearch, setTaskSearch] = useState("");
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(initialTaskId);
   const [taskDetails, setTaskDetails] = useState(new Map<number, CommunityDetail["tasks"][number]>());
   const [comment, setComment] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   useEffect(() => {
-    setSelectedTaskId(null);
+    setSelectedTaskId(initialTaskId);
     setTaskDetails(new Map());
-  }, [detail.community.id]);
+    if (initialTaskId === null) return;
+    let active = true;
+    api<CommunityDetail["tasks"][number]>(`/communities/${detail.community.id}/tasks/${initialTaskId}`)
+      .then((task) => {
+        if (active) setTaskDetails((current) => new Map(current).set(initialTaskId, task));
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Could not load task details");
+      });
+    return () => { active = false; };
+  }, [detail.community.id, initialTaskId]);
   const loadTaskDetail = async (taskId: number, force = false) => {
     if (!force && taskDetails.has(taskId)) return;
     const task = await api<CommunityDetail["tasks"][number]>(`/communities/${detail.community.id}/tasks/${taskId}`);
@@ -3430,6 +3440,8 @@ function CommunityConsole() {
   const [, routeParams] = useRoute<{ id?: string }>("/communities/:id");
   const parsedCommunityId = routeParams?.id ? Number(routeParams.id) : NaN;
   const requestedCommunityId = Number.isSafeInteger(parsedCommunityId) && parsedCommunityId > 0 ? parsedCommunityId : null;
+  const parsedTaskId = Number(new URLSearchParams(window.location.search).get("taskId"));
+  const requestedTaskId = Number.isSafeInteger(parsedTaskId) && parsedTaskId > 0 ? parsedTaskId : null;
   const [permissions, setPermissions] = useState<PermissionSnapshot | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [communities, setCommunities] = useState<CommunitySummary[]>([]);
@@ -3773,7 +3785,7 @@ function CommunityConsole() {
               {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
-             <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
+             <TaskBoard detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} initialTaskId={selectedId === requestedCommunityId ? requestedTaskId : null} />
              {(detail.canManage || detail.canManageOrganization) && <OrganizationPanel detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />}
               {detail.canManage && <section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace resources</h2><p className="mt-1 text-xs text-muted-foreground">Delete a category alone to keep its channels uncategorized, or delete the category and every channel inside it. Channel deletion also removes members, requests, messages, invitations, and attachments.</p></div><Trash2 className="h-5 w-5 text-destructive" /></div><div className="mt-5 grid gap-5 xl:grid-cols-3"><div><p className="font-mono text-[10px] uppercase text-muted-foreground">categories</p><div className="mt-2 space-y-2">{detail.categories.map((category) => <div key={category.id} className="rounded border border-border/70 px-3 py-2"><div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-xs">{category.name}</span><span className="font-mono text-[9px] text-muted-foreground">{detail.channels.filter((channel) => channel.categoryId === category.id).length} channels</span></div><div className="mt-2 flex flex-wrap justify-end gap-2"><AdminDeleteButton label="category only" working={working} onDelete={() => void deleteCommunityResource("categories", category.id, `category “${category.name}”`)} />{detail.isOwner && <AdminDeleteButton label="category + channels" working={working} onDelete={() => void deleteCategoryWithChannels(category)} />}</div></div>)}{detail.categories.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No categories.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">channels</p><div className="mt-2 space-y-2">{detail.channels.map((channel) => <div key={channel.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{channel.name}</span>{detail.isOwner ? <button type="button" disabled={working} aria-label={`Delete channel ${channel.name}`} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-channel", id: channel.id, label: channel.name, phrase: ownerConfirmationPhrase("delete-channel", channel.name, detail.community.name) }); }} className="rounded border border-destructive/40 px-2 py-1 font-mono text-[9px] text-destructive disabled:opacity-50">delete</button> : <span className="font-mono text-[9px] text-muted-foreground">owner only</span>}</div>)}{detail.channels.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No channels.</p>}</div></div><div><p className="font-mono text-[10px] uppercase text-muted-foreground">announcements</p><div className="mt-2 space-y-2">{detail.announcements.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2"><span className="truncate font-mono text-xs">{item.title}</span><AdminDeleteButton label="delete" working={working} onDelete={() => void deleteCommunityResource("announcements", item.id, `announcement “${item.title}”`)} /></div>)}{detail.announcements.length === 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">No announcements.</p>}</div></div></div></section>}
            </div>}

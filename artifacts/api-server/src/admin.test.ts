@@ -4969,8 +4969,10 @@ describe("admin access controls", () => {
         type: string;
         category: string;
         body: string;
+        community_id: number;
+        action_url: string;
       }>(
-        `SELECT type, category, body
+        `SELECT type, category, body, community_id, action_url
          FROM irc_notifications
          WHERE user_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
          ORDER BY id`,
@@ -4980,6 +4982,8 @@ describe("admin access controls", () => {
         type: "task_assigned",
         category: "task_assigned",
         body: "You were assigned the task “Prepare onboarding”.",
+        community_id: communityId,
+        action_url: `/communities/${communityId}?taskId=${taskId}`,
       }]);
 
       const changed = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
@@ -5000,6 +5004,55 @@ describe("admin access controls", () => {
         category: "task_updated",
         body: "Task “Prepare onboarding” updated: status → in_progress, priority → urgent.",
       }]);
+
+      for (const [status, label] of [
+        ["waiting", "Waiting"],
+        ["completed", "Completed"],
+        ["cancelled", "Cancelled"],
+      ] as const) {
+        const statusChange = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        assert.equal(statusChange.status, 200, JSON.stringify(statusChange));
+        const statusNotifications = await pool.query<{
+          type: string;
+          category: string;
+          body: string;
+          community_id: number;
+          action_url: string;
+        }>(
+          `SELECT type, category, body, community_id, action_url
+           FROM irc_notifications
+           WHERE user_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
+             AND body = $3
+           ORDER BY id`,
+          [workerSession.userId, String(taskId), `Task “Prepare onboarding” moved to ${label}.`],
+        );
+        assert.deepEqual(statusNotifications.rows, [{
+          type: "task_updated",
+          category: "task_updated",
+          body: `Task “Prepare onboarding” moved to ${label}.`,
+          community_id: communityId,
+          action_url: `/communities/${communityId}?taskId=${taskId}`,
+        }]);
+        const actorStatusNotifications = await pool.query(
+          `SELECT id FROM irc_notifications
+           WHERE user_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
+             AND body = $3`,
+          [ownerSession.userId, String(taskId), `Task “Prepare onboarding” moved to ${label}.`],
+        );
+        assert.equal(actorStatusNotifications.rowCount, 0);
+      }
+
+      const waitingAudit = await pool.query(
+        `SELECT id FROM irc_admin_audit_logs
+         WHERE community_id = $1 AND actor_id = $2 AND action = 'updated_workspace_task'
+           AND details = $3`,
+        [communityId, ownerSession.userId, `${taskId} → waiting`],
+      );
+      assert.equal(waitingAudit.rowCount, 1);
 
       const reassigned = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${taskId}`, {
         method: "PATCH",
@@ -5038,6 +5091,44 @@ describe("admin access controls", () => {
         body: JSON.stringify({ assignedTo: outsiderSession.userId }),
       });
       assert.equal(crossWorkspaceAssignment.status, 400, JSON.stringify(crossWorkspaceAssignment));
+
+      const ownTask = await apiRequest(ownerSession, `/communities/${communityId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Review own work",
+          assignedTo: ownerSession.userId,
+        }),
+      });
+      assert.equal(ownTask.status, 201, JSON.stringify(ownTask));
+      const ownTaskId = (ownTask.body as { id: number }).id;
+      const ownTaskUpdate = await apiRequest(ownerSession, `/communities/${communityId}/tasks/${ownTaskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "waiting", priority: "high" }),
+      });
+      assert.equal(ownTaskUpdate.status, 200, JSON.stringify(ownTaskUpdate));
+      const ownTaskNotifications = await pool.query(
+        `SELECT id FROM irc_notifications
+         WHERE entity_type = 'workspace_task' AND entity_id = $1
+           AND type IN ('task_assigned', 'task_updated')`,
+        [String(ownTaskId)],
+      );
+      assert.deepEqual(ownTaskNotifications.rows, []);
+      const ownTaskAuditNotifications = await pool.query(
+        `SELECT id FROM irc_notifications
+         WHERE user_id = $1 AND community_id = $2 AND type = 'administrative_action'
+           AND body = ANY($3::text[])`,
+        [
+          ownerSession.userId,
+          communityId,
+          [
+            "created workspace task: Review own work",
+            `updated workspace task: ${ownTaskId} → waiting`,
+          ],
+        ],
+      );
+      assert.deepEqual(ownTaskAuditNotifications.rows, []);
     } finally {
       if (communityId !== null) {
         await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);

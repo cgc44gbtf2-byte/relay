@@ -192,6 +192,7 @@ async function writeCommunityAudit(
   action: string,
   communityId: number,
   metadata?: string | CommunityAuditMetadata,
+  options: { notifyActor?: boolean } = {},
 ): Promise<void> {
   const audit = typeof metadata === "string" ? { details: metadata } : (metadata ?? {});
   const [actor] = await db.select({ displayName: usersTable.displayName })
@@ -215,7 +216,9 @@ async function writeCommunityAudit(
     eq(userRolesTable.communityId, communityId),
     inArray(userRolesTable.role, ["workspace_owner", "workspace_admin", "community_admin", "department_admin"]),
   ));
-  await createNotifications(managers.map((manager) => manager.userId), {
+  await createNotifications(managers
+    .filter((manager) => options.notifyActor !== false || manager.userId !== actorId)
+    .map((manager) => manager.userId), {
     type: "administrative_action",
     category: "administrative_action",
     body: audit.details ? `${action.replaceAll("_", " ")}: ${audit.details}` : action.replaceAll("_", " "),
@@ -1061,7 +1064,8 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
   const [task] = await db.insert(workspaceTasksTable).values({
     communityId, title, description, assignedTo, departmentId, locationId, priority, dueDate, createdBy: userId,
   }).returning();
-  if (assignedTo) {
+  await writeCommunityAudit(userId, "created_workspace_task", communityId, title, { notifyActor: false });
+  if (assignedTo && assignedTo !== userId) {
     await createNotification({
       userId: assignedTo,
       type: "task_assigned",
@@ -1070,10 +1074,9 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
       communityId,
       entityType: "workspace_task",
       entityId: task.id,
-      actionUrl: `/communities/${communityId}`,
+      actionUrl: `/communities/${communityId}?taskId=${task.id}`,
     });
   }
-  await writeCommunityAudit(userId, "created_workspace_task", communityId, title);
   res.status(201).json({ ...task, comments: [], attachments: [] });
 });
 
@@ -1137,19 +1140,48 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
   const currentDueDate = current.dueDate?.getTime() ?? null;
   const updatedDueDate = updated.dueDate?.getTime() ?? null;
   if (updatedDueDate !== currentDueDate) changedFields.push(updated.dueDate ? "due date" : "due date cleared");
-  if (updated.assignedTo && assignmentChanged) {
-    await createNotification({
-      userId: updated.assignedTo,
-      type: "task_assigned",
-      category: "task_assigned",
-      body: `You were assigned the task “${updated.title}”.`,
-      communityId,
-      entityType: "workspace_task",
-      entityId: updated.id,
-      actionUrl: `/communities/${communityId}`,
-    });
+  const taskActionUrl = `/communities/${communityId}?taskId=${updated.id}`;
+  const trackedStatusLabels: Record<string, string> = {
+    waiting: "Waiting",
+    completed: "Completed",
+    cancelled: "Cancelled",
+  };
+  const trackedStatus = updated.status !== current.status ? trackedStatusLabels[updated.status] : undefined;
+  const activeParticipants = new Set<string>();
+  if (trackedStatus) {
+    const participantIds = [...new Set([updated.createdBy, updated.assignedTo].filter((id): id is string => Boolean(id)))];
+    if (participantIds.length > 0) {
+      const members = await db.select({ userId: communityMembersTable.userId })
+        .from(communityMembersTable)
+        .where(and(
+          eq(communityMembersTable.communityId, communityId),
+          inArray(communityMembersTable.userId, participantIds),
+        ));
+      for (const member of members) activeParticipants.add(member.userId);
+    }
   }
-  if (current.assignedTo && assignmentChanged) {
+  await writeCommunityAudit(
+    userId,
+    "updated_workspace_task",
+    communityId,
+    `${taskId}${status ? ` → ${status}` : ""}`,
+    { notifyActor: false },
+  );
+  if (updated.assignedTo && assignmentChanged) {
+    if (updated.assignedTo !== userId) {
+      await createNotification({
+        userId: updated.assignedTo,
+        type: "task_assigned",
+        category: "task_assigned",
+        body: `You were assigned the task “${updated.title}”.`,
+        communityId,
+        entityType: "workspace_task",
+        entityId: updated.id,
+        actionUrl: taskActionUrl,
+      });
+    }
+  }
+  if (current.assignedTo && assignmentChanged && current.assignedTo !== userId) {
     await createNotification({
       userId: current.assignedTo,
       type: "task_updated",
@@ -1158,9 +1190,24 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
       communityId,
       entityType: "workspace_task",
       entityId: updated.id,
-      actionUrl: `/communities/${communityId}`,
+      actionUrl: taskActionUrl,
     });
-  } else if (updated.assignedTo && changedFields.length > 0) {
+  }
+  if (trackedStatus) {
+    for (const participantId of activeParticipants) {
+      if (participantId === userId) continue;
+      await createNotification({
+        userId: participantId,
+        type: "task_updated",
+        category: "task_updated",
+        body: `Task “${updated.title}” moved to ${trackedStatus}.`,
+        communityId,
+        entityType: "workspace_task",
+        entityId: updated.id,
+        actionUrl: taskActionUrl,
+      });
+    }
+  } else if (updated.assignedTo && updated.assignedTo !== userId && !assignmentChanged && changedFields.length > 0) {
     await createNotification({
       userId: updated.assignedTo,
       type: "task_updated",
@@ -1169,10 +1216,9 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
       communityId,
       entityType: "workspace_task",
       entityId: updated.id,
-      actionUrl: `/communities/${communityId}`,
+      actionUrl: taskActionUrl,
     });
   }
-  await writeCommunityAudit(userId, "updated_workspace_task", communityId, `${taskId}${status ? ` → ${status}` : ""}`);
   res.json({ ...updated, comments: [], attachments: [] });
 });
 
