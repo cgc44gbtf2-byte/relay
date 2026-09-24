@@ -6081,6 +6081,102 @@ describe("admin access controls", () => {
     }
   });
 
+  test("broadcasts owner topic edits only to subscribers of that channel", async () => {
+    const ownerSession = await createTestSession("owner_live_topic");
+    const subscriberSession = await createTestSession("topic_subscriber");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const createdChannels = await Promise.all([
+        apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `owner-live-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            topic: "Original owner topic",
+          }),
+        }),
+        apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `owner-other-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            topic: "Unrelated owner topic",
+          }),
+        }),
+      ]);
+      for (const created of createdChannels) {
+        assert.equal(created.status, 201, JSON.stringify(created));
+        assert.ok(created.body && typeof created.body === "object");
+        const channelId = (created.body as { id?: unknown }).id;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId as number);
+      }
+      const [targetChannelId, unrelatedChannelId] = channelIds;
+
+      const joined = await Promise.all(channelIds.map((channelId) =>
+        apiRequest(subscriberSession, `/channels/${channelId}/join`, { method: "POST" }),
+      ));
+      for (const response of joined) {
+        assert.equal(response.status, 200, JSON.stringify(response));
+      }
+
+      const [targetSocket, unrelatedSocket] = await Promise.all([
+        openWebSocket(subscriberSession),
+        openWebSocket(subscriberSession),
+      ]);
+      sockets.push(targetSocket, unrelatedSocket);
+      targetSocket.send(JSON.stringify({ type: "subscribe", channelId: targetChannelId }));
+      unrelatedSocket.send(JSON.stringify({ type: "subscribe", channelId: unrelatedChannelId }));
+      await Promise.all([
+        waitForChannelSubscription(targetSocket, targetChannelId),
+        waitForChannelSubscription(unrelatedSocket, unrelatedChannelId),
+      ]);
+
+      const liveTopicUpdate = waitForWebSocketEvent(
+        targetSocket,
+        (event) => {
+          if (event.type !== "channel" || !event.channel || typeof event.channel !== "object") {
+            return false;
+          }
+          const channel = event.channel as { id?: unknown };
+          return channel.id === targetChannelId;
+        },
+      );
+      const blockedUnrelatedUpdate = expectNoWebSocketEvent(
+        unrelatedSocket,
+        (event) => {
+          if (event.type !== "channel" || !event.channel || typeof event.channel !== "object") {
+            return false;
+          }
+          const channel = event.channel as { id?: unknown };
+          return channel.id === targetChannelId;
+        },
+        1_000,
+      );
+
+      const topicUpdate = await apiRequest(ownerSession, `/channels/${targetChannelId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Owner updated live topic" }),
+      });
+      assert.equal(topicUpdate.status, 200, JSON.stringify(topicUpdate));
+
+      const event = await liveTopicUpdate;
+      assert.ok(event.channel && typeof event.channel === "object");
+      const updatedChannel = event.channel as { id?: unknown; topic?: unknown };
+      assert.equal(updatedChannel.id, targetChannelId);
+      assert.equal(updatedChannel.topic, "Owner updated live topic");
+      await blockedUnrelatedUpdate;
+      assert.equal(targetSocket.readyState, WebSocket.OPEN);
+      assert.equal(unrelatedSocket.readyState, WebSocket.OPEN);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [ownerSession.userId, subscriberSession.userId]);
+    }
+  });
+
   test("rolls back a channel topic change when recording admin activity fails", async () => {
     const ownerSession = await createTestSession("topic_audit_failure");
     const channelIds: number[] = [];
