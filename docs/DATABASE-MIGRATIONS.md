@@ -57,6 +57,15 @@ CI can validate the reviewed migration set without a database:
 pnpm run db:check:migrations
 ```
 
+The API database CI job also runs `pnpm run db:rehearse:migrations` against a
+uniquely provisioned disposable PostgreSQL database. It loads the checked-in
+schema fixture from immediately before the first reviewed migration, applies
+every reviewed file, performs a real ledger no-op check, and runs a synthetic
+failing migration to confirm PostgreSQL rollback leaves both the schema and
+ledger consistent.
+The child process receives only `TEST_DATABASE_URL`; persistent
+`DATABASE_URL` and admin connection variables are removed before it starts.
+
 The release command treats an explicitly reviewed destructive operation
 (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DELETE FROM`, or dropping `NOT NULL`)
 as a stop condition. After inspecting the SQL and its backup impact, an

@@ -16,6 +16,7 @@
     "migrate:release": "node ./scripts/apply-migrations.mjs",
     "migrate:release:baseline": "node ./scripts/apply-migrations.mjs --baseline",
     "migrate:release:check": "node ./scripts/apply-migrations.mjs --check",
+    "rehearse:migrations": "node ./scripts/rehearse-migrations.mjs",
     "test": "node --test ./scripts/*.test.mjs",
     "test:ci": "node ./scripts/run-ci-tests.mjs"
   },

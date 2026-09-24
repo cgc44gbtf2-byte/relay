@@ -194,7 +194,7 @@ jobs:
       - name: Build API
         run: pnpm --filter @workspace/api-server run build
 
-      - name: Run disposable database schema validation and authenticated API tests
+      - name: Run migration rehearsal, schema validation, and authenticated API tests
         run: pnpm --filter @workspace/api-server run test:ci
 
   database-runner-compatibility:
