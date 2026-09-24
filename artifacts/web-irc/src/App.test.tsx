@@ -1100,3 +1100,89 @@ describe("frontend route and document error hardening", () => {
     expect(screen.queryByText("Developer access denied")).toBeNull();
   });
 });
+
+describe("admin channel and category deletion permissions", () => {
+  const category = {
+    id: 31,
+    name: "Project rooms",
+    description: "",
+    communityId: 7,
+    communityName: "Team workspace",
+    communityOwnerId: "user-1",
+  };
+  const channel = {
+    id: 12,
+    name: "#team",
+    topic: "",
+    memberCount: 2,
+    communityId: 7,
+    categoryId: 31,
+    communityName: "Team workspace",
+    createdAt: "2026-09-21T12:00:00.000Z",
+  };
+
+  function installAdminApi(ownerId: string) {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/admin/status") return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
+      if (url === "/api/admin/overview") return jsonResponse({
+        stats: { users: 1, channels: 1, messages: 0, online: 1, admins: 1 },
+        users: [],
+        channels: [channel],
+        categories: [{ ...category, communityOwnerId: ownerId }],
+        recentMessages: [],
+        activity: [],
+        activityPagination: { limit: 20, offset: 0, hasMore: false, nextOffset: null, nextCursor: null },
+      });
+      if (url === "/api/admin/health") return jsonResponse({ api: "ok", database: "ok", checkedAt: "2026-09-21T12:00:00.000Z" });
+      if (url === "/api/channels/12" && init?.method === "DELETE") return jsonResponse({ cleanupPending: false });
+      if (url === "/api/communities/7/categories/31/with-channels" && init?.method === "DELETE") {
+        return jsonResponse({ deletedChannelCount: 1, cleanupPending: false });
+      }
+      return jsonResponse({ error: "Unexpected request" }, 404);
+    }));
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, "", "/");
+  });
+
+  it("lets the exact workspace owner confirm bulk deletion through the owner-only endpoint", async () => {
+    installAdminApi("user-1");
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+    fireEvent.click(await screen.findByTestId("button-admin-nav-channels"));
+
+    expect(screen.queryByText("workspace owner only")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "delete category + channels" }));
+    fireEvent.click(screen.getByRole("button", { name: "delete category and channels" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/communities/7/categories/31/with-channels",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "DELETE CATEGORY Project rooms AND CHANNELS FROM WORKSPACE Team workspace" }),
+      }),
+    ));
+  });
+
+  it("shows non-owner administrators the owner-only state while deleting channels through the manager endpoint", async () => {
+    installAdminApi("other-owner");
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+    fireEvent.click(await screen.findByTestId("button-admin-nav-channels"));
+
+    expect(await screen.findByText("workspace owner only")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "delete category + channels" })).toBeNull();
+    expect(screen.getByRole("button", { name: "delete category only" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "delete channel" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "delete channel" }).at(-1)!);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/channels/12",
+      expect.objectContaining({ method: "DELETE" }),
+    ));
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/api/communities/7/channels/12")).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith("/with-channels"))).toBe(false);
+  });
+});
