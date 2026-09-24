@@ -666,7 +666,7 @@ export const announcementAttachmentsTable = pgTable("irc_announcement_attachment
 
 export const moderationActionsTable = pgTable("irc_moderation_actions", {
   id: serial("id").primaryKey(),
-  actorId: text("actor_id").notNull().references(() => usersTable.clerkId),
+  actorId: text("actor_id").notNull(),
   targetUserId: text("target_user_id").references(() => usersTable.clerkId),
   communityId: integer("community_id").references(() => communitiesTable.id, { onDelete: "cascade" }),
   channelId: integer("channel_id").references(() => channelsTable.id, { onDelete: "cascade" }),

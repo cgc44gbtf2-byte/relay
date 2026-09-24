@@ -11,6 +11,8 @@ The API integration test runner intentionally refuses to start without a dedicat
 
 On a fresh local cluster, schema push can try to create composite foreign keys before their referenced composite unique indexes. Bootstrap those indexes in the disposable database first, then retry schema push. Do not apply this workaround to a shared or production database.
 
+Fresh current-schema setup also requires the `pg_trgm` extension for document search indexes. Start local PostgreSQL with an explicit socket directory because `/run/postgresql` may not exist in the container.
+
 When the push encounters multiple composite-FK ordering failures in succession, another safe option is to clone only the development database's schema (no data) into a fresh disposable test database. The dump must be read-only on development; remove the empty target database's default `public` schema before restoring a schema-only dump that creates it. This verifies route behavior against the current development shape, but does not prove Drizzle can bootstrap a fresh schema.
 
 Keep migration rehearsal and current-schema bootstrap on separate disposable databases.

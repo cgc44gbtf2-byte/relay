@@ -2614,11 +2614,12 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
-  test("preserves audit history, actor ID, and actor snapshot after account cleanup", async () => {
-    const actorId = `audit_actor_${randomUUID()}`;
-    const username = `audit_actor_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-    const displayName = "Former Audit Actor";
+  test("preserves audit and moderation actor identities after account cleanup", async () => {
+    const actorId = `moderation_actor_${randomUUID()}`;
+    const username = `moderation_actor_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const displayName = "Former Moderator";
     let auditId: number | undefined;
+    let moderationId: number | undefined;
     try {
       await pool.query(
         `INSERT INTO irc_users (clerk_id, username, display_name)
@@ -2635,6 +2636,15 @@ describe("admin access controls", () => {
       auditId = inserted.rows[0]?.id;
       assert.ok(auditId);
 
+      const insertedModeration = await pool.query<{ id: number }>(
+        `INSERT INTO irc_moderation_actions (actor_id, action, details)
+         VALUES ($1, 'moderation_actor_deleted', 'Preserved moderation details')
+         RETURNING id`,
+        [actorId],
+      );
+      moderationId = insertedModeration.rows[0]?.id;
+      assert.ok(moderationId);
+
       await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
 
       const preserved = await pool.query(
@@ -2650,6 +2660,18 @@ describe("admin access controls", () => {
         target_id: "preserved-target",
         target_label: "Preserved target",
         details: "Preserved details",
+      }]);
+
+      const preservedModeration = await pool.query(
+        `SELECT actor_id, action, details
+         FROM irc_moderation_actions
+         WHERE id = $1`,
+        [moderationId],
+      );
+      assert.deepEqual(preservedModeration.rows, [{
+        actor_id: actorId,
+        action: "moderation_actor_deleted",
+        details: "Preserved moderation details",
       }]);
 
       const overview = await apiRequest(
@@ -2678,6 +2700,9 @@ describe("admin access controls", () => {
     } finally {
       if (auditId !== undefined) {
         await pool.query("DELETE FROM irc_admin_audit_logs WHERE id = $1", [auditId]);
+      }
+      if (moderationId !== undefined) {
+        await pool.query("DELETE FROM irc_moderation_actions WHERE id = $1", [moderationId]);
       }
       await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
     }
