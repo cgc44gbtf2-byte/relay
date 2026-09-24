@@ -28,10 +28,13 @@ import type {
   CustomRole,
   CustomRoleCatalog,
   CustomRoleInput,
+  DocumentDetailResponse,
   DocumentListResponse,
   ErrorResponse,
   ExportAdminActivityParams,
   GetAdminOverviewParams,
+  GetCommunityDocumentParams,
+  GetCommunityTaskParams,
   GetCommunityWorkspaceParams,
   GetIrcStateParams,
   GetOrganizationSnapshotParams,
@@ -59,6 +62,7 @@ import type {
   ListCommunitiesParams,
   ListCommunityActivityParams,
   ListCommunityDocumentsParams,
+  ListCommunityTeamMembersParams,
   ListDeveloperReleases200Item,
   ListDeveloperReleasesParams,
   ListDmThreads200Item,
@@ -76,7 +80,9 @@ import type {
   SearchMessagesParams,
   SearchUsers200Item,
   SearchUsersParams,
-  StreamIrcEventsParams
+  StreamIrcEventsParams,
+  TaskDetailResponse,
+  TeamMembersResponse
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -1636,6 +1642,290 @@ export function useListCommunityDocuments<TData = Awaited<ReturnType<typeof list
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getListCommunityDocumentsQueryOptions(communityId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetCommunityDocumentUrl = (communityId: number,
+    documentId: number,
+    params?: GetCommunityDocumentParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/documents/${documentId}?${stringifiedParams}` : `/api/communities/${communityId}/documents/${documentId}`
+}
+
+/**
+ * Without child page parameters, returns complete child arrays for existing clients. Permissions are visible to managers only. Each child page has independent continuation metadata.
+ * @summary Read a document and optionally page its versions and permissions
+ */
+export const getCommunityDocument = async (communityId: number,
+    documentId: number,
+    params?: GetCommunityDocumentParams, options?: Parameters<typeof customFetch>[1]): Promise<DocumentDetailResponse> => {
+
+  return customFetch<DocumentDetailResponse>(getGetCommunityDocumentUrl(communityId,documentId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCommunityDocumentQueryKey = (communityId: number,
+    documentId: number,
+    params?: GetCommunityDocumentParams,) => {
+    return [
+    `/api/communities/${communityId}/documents/${documentId}`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetCommunityDocumentQueryOptions = <TData = Awaited<ReturnType<typeof getCommunityDocument>>, TError = ErrorType<void>>(communityId: number,
+    documentId: number,
+    params?: GetCommunityDocumentParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityDocument>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCommunityDocumentQueryKey(communityId,documentId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunityDocument>>> = ({ signal }) => getCommunityDocument(communityId,documentId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined && documentId !== null && documentId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCommunityDocument>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCommunityDocumentQueryResult = NonNullable<Awaited<ReturnType<typeof getCommunityDocument>>>
+export type GetCommunityDocumentQueryError = ErrorType<void>
+
+
+/**
+ * @summary Read a document and optionally page its versions and permissions
+ */
+
+export function useGetCommunityDocument<TData = Awaited<ReturnType<typeof getCommunityDocument>>, TError = ErrorType<void>>(
+ communityId: number,
+    documentId: number,
+    params?: GetCommunityDocumentParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityDocument>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCommunityDocumentQueryOptions(communityId,documentId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetCommunityTaskUrl = (communityId: number,
+    taskId: number,
+    params?: GetCommunityTaskParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/tasks/${taskId}?${stringifiedParams}` : `/api/communities/${communityId}/tasks/${taskId}`
+}
+
+/**
+ * Without child page parameters, returns complete child arrays for existing clients.
+ * @summary Read a task and optionally page its comments and attachments
+ */
+export const getCommunityTask = async (communityId: number,
+    taskId: number,
+    params?: GetCommunityTaskParams, options?: Parameters<typeof customFetch>[1]): Promise<TaskDetailResponse> => {
+
+  return customFetch<TaskDetailResponse>(getGetCommunityTaskUrl(communityId,taskId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCommunityTaskQueryKey = (communityId: number,
+    taskId: number,
+    params?: GetCommunityTaskParams,) => {
+    return [
+    `/api/communities/${communityId}/tasks/${taskId}`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetCommunityTaskQueryOptions = <TData = Awaited<ReturnType<typeof getCommunityTask>>, TError = ErrorType<void>>(communityId: number,
+    taskId: number,
+    params?: GetCommunityTaskParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityTask>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCommunityTaskQueryKey(communityId,taskId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunityTask>>> = ({ signal }) => getCommunityTask(communityId,taskId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined && taskId !== null && taskId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCommunityTask>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCommunityTaskQueryResult = NonNullable<Awaited<ReturnType<typeof getCommunityTask>>>
+export type GetCommunityTaskQueryError = ErrorType<void>
+
+
+/**
+ * @summary Read a task and optionally page its comments and attachments
+ */
+
+export function useGetCommunityTask<TData = Awaited<ReturnType<typeof getCommunityTask>>, TError = ErrorType<void>>(
+ communityId: number,
+    taskId: number,
+    params?: GetCommunityTaskParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunityTask>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCommunityTaskQueryOptions(communityId,taskId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListCommunityTeamMembersUrl = (communityId: number,
+    teamId: number,
+    params?: ListCommunityTeamMembersParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/communities/${communityId}/teams/${teamId}/members?${stringifiedParams}` : `/api/communities/${communityId}/teams/${teamId}/members`
+}
+
+/**
+ * @summary Page members of a team in a business workspace
+ */
+export const listCommunityTeamMembers = async (communityId: number,
+    teamId: number,
+    params?: ListCommunityTeamMembersParams, options?: Parameters<typeof customFetch>[1]): Promise<TeamMembersResponse> => {
+
+  return customFetch<TeamMembersResponse>(getListCommunityTeamMembersUrl(communityId,teamId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCommunityTeamMembersQueryKey = (communityId: number,
+    teamId: number,
+    params?: ListCommunityTeamMembersParams,) => {
+    return [
+    `/api/communities/${communityId}/teams/${teamId}/members`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCommunityTeamMembersQueryOptions = <TData = Awaited<ReturnType<typeof listCommunityTeamMembers>>, TError = ErrorType<void>>(communityId: number,
+    teamId: number,
+    params?: ListCommunityTeamMembersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityTeamMembers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCommunityTeamMembersQueryKey(communityId,teamId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCommunityTeamMembers>>> = ({ signal }) => listCommunityTeamMembers(communityId,teamId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: communityId !== null && communityId !== undefined && teamId !== null && teamId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCommunityTeamMembers>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCommunityTeamMembersQueryResult = NonNullable<Awaited<ReturnType<typeof listCommunityTeamMembers>>>
+export type ListCommunityTeamMembersQueryError = ErrorType<void>
+
+
+/**
+ * @summary Page members of a team in a business workspace
+ */
+
+export function useListCommunityTeamMembers<TData = Awaited<ReturnType<typeof listCommunityTeamMembers>>, TError = ErrorType<void>>(
+ communityId: number,
+    teamId: number,
+    params?: ListCommunityTeamMembersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCommunityTeamMembers>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCommunityTeamMembersQueryOptions(communityId,teamId,params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

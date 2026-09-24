@@ -5,11 +5,16 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { ListCommunityDocumentsChildren } from './listCommunityDocumentsChildren';
 
 export type ListCommunityDocumentsParams = {
 q?: string;
 folderId?: number;
 category?: string;
+/**
+ * Set to summary to return only the latest version and continuation metadata for versions and permissions; omitted retains complete child arrays.
+ */
+children?: ListCommunityDocumentsChildren;
 /**
  * @minimum 1
  * @maximum 100

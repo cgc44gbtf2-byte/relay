@@ -103,6 +103,16 @@ teamsLimit?: number;
  */
 teamsOffset?: number;
 /**
+ * Opt in to bounded membership pages for the selected employees; omitted retains the full array.
+ * @minimum 1
+ * @maximum 100
+ */
+teamMembershipsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamMembershipsOffset?: number;
+/**
  * @minimum 1
  * @maximum 100
  */

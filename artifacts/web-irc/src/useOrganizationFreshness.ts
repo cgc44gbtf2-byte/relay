@@ -33,7 +33,7 @@ export async function requestOrganizationSnapshot(
   return page as OrganizationPage;
 }
 
-type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams" | "invitations">;
+type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams" | "invitations" | "teamMemberships">;
 
 function pageQuery(lengths: OrganizationLengths, offset: number): string {
   const limit = (items: unknown[]) => offset === 0
@@ -52,6 +52,8 @@ function pageQuery(lengths: OrganizationLengths, offset: number): string {
     locationsOffset: String(offset),
     teamsLimit: String(limit(lengths.teams)),
     teamsOffset: String(offset),
+    teamMembershipsLimit: String(limit(lengths.teamMemberships)),
+    teamMembershipsOffset: String(offset),
   });
   return params.toString();
 }
@@ -69,6 +71,7 @@ export async function fetchOrganizationPages<T extends OrganizationPage>(
     current.departments.length,
     current.locations.length,
     current.teams.length,
+    current.teamMemberships.length,
     current.invitations.length,
   );
   const pages: T[] = [];
@@ -95,12 +98,18 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
   return {
     ...current,
     members: combined("members", employeePages),
-    employees: combined("employees", employeePages),
+    employees: combined("employees", employeePages).map((employee) => ({
+      ...(employee as object),
+      teamIds: pages.flatMap((page) => page.teamMemberships)
+        .filter((row) => (row as { userId: string; status: string }).userId === (employee as { userId: string }).userId
+          && (row as { status: string }).status === "active")
+        .map((row) => (row as { teamId: number }).teamId),
+    })),
     assignments: combined("assignments", assignmentPages),
     departments: combined("departments", departmentPages),
     locations: combined("locations", locationPages),
     teams: combined("teams", teamPages),
-    teamMemberships: combined("teamMemberships", employeePages).filter((membership) => {
+    teamMemberships: combined("teamMemberships", pageCount(current.teamMemberships)).filter((membership) => {
       const item = membership as { teamId: number; userId: string };
       const key = `${item.teamId}:${item.userId}`;
       if (membershipKeys.has(key)) return false;
@@ -116,6 +125,7 @@ export function mergeOrganizationPages<T extends OrganizationPage>(current: T, p
       locations: paginationFor("locations", current.locations) ?? current.pagination?.locations,
       teams: paginationFor("teams", current.teams) ?? current.pagination?.teams,
       invitations: paginationFor("invitations", current.invitations) ?? current.pagination?.invitations,
+      teamMemberships: paginationFor("teamMemberships", current.teamMemberships) ?? current.pagination?.teamMemberships,
     },
   } as T;
 }

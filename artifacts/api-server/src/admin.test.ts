@@ -12958,6 +12958,124 @@ describe("admin access controls", () => {
     }
   });
 
+  test("pages large document, task, and team children without losing later records", async () => {
+    const owner = await createTestSession("child_pagination_owner");
+    const outsider = await createTestSession("child_pagination_outsider");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    let communityId: number | undefined;
+    let memberIds: string[] = [];
+    try {
+      assert.equal((await apiRequest(owner, "/me")).status, 200);
+      assert.equal((await apiRequest(outsider, "/me")).status, 200);
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ('Child pages', $1, $2, 'paid_workspace', true) RETURNING id`,
+        [`child-pages-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0].id;
+      await pool.query("INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'owner')", [communityId, owner.userId]);
+      await pool.query("INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by) VALUES ($1, 'workspace_owner', 'community', $2, $1)", [owner.userId, communityId]);
+      const task = (await pool.query<{ id: number }>("INSERT INTO irc_workspace_tasks (community_id, title, created_by) VALUES ($1, 'Large task', $2) RETURNING id", [communityId, owner.userId])).rows[0].id;
+      const document = (await pool.query<{ id: number }>("INSERT INTO irc_business_documents (community_id, title, owner_id) VALUES ($1, 'Large document', $2) RETURNING id", [communityId, owner.userId])).rows[0].id;
+      const team = (await pool.query<{ id: number }>("INSERT INTO irc_teams (community_id, name) VALUES ($1, 'Large team') RETURNING id", [communityId])).rows[0].id;
+      const users = await pool.query<{ clerk_id: string }>(
+        `INSERT INTO irc_users (clerk_id, username, display_name)
+         SELECT 'child_${suffix}_' || series, 'child_${suffix}_' || series, 'Member ' || series
+         FROM generate_series(1, 105) series RETURNING clerk_id`,
+      );
+      memberIds = users.rows.map((row) => row.clerk_id);
+      await pool.query("INSERT INTO irc_community_members (community_id, user_id, status) SELECT $1, unnest($2::text[]), 'member'", [communityId, memberIds]);
+      await pool.query("INSERT INTO irc_team_members (team_id, user_id) SELECT $1, unnest($2::text[])", [team, memberIds]);
+      const secondTeamId = (await pool.query<{ id: number }>("INSERT INTO irc_teams (community_id, name) VALUES ($1, 'Second large team') RETURNING id", [communityId])).rows[0].id;
+      await pool.query("INSERT INTO irc_team_members (team_id, user_id) SELECT $1, unnest($2::text[])", [secondTeamId, memberIds]);
+      await pool.query(
+        `INSERT INTO irc_document_versions (document_id, version, object_path, file_name, content_type, file_size, uploaded_by)
+         SELECT $1, series, '/objects/uploads/test-' || series, 'v' || series, 'text/plain', 1, $2
+         FROM generate_series(1, 105) series`,
+        [document, owner.userId],
+      );
+      await pool.query("INSERT INTO irc_document_permissions (document_id, user_id, granted_by) SELECT $1, unnest($2::text[]), $3", [document, memberIds, owner.userId]);
+      await pool.query("INSERT INTO irc_workspace_task_comments (task_id, author_id, body) SELECT $1, $2, 'comment ' || series FROM generate_series(1, 105) series", [task, owner.userId]);
+      await pool.query(
+        `INSERT INTO irc_workspace_task_attachments (task_id, uploader_id, object_path, file_name, content_type, file_size)
+         SELECT $1, $2, '/objects/uploads/task-' || series, 'attachment ' || series, 'text/plain', 1
+         FROM generate_series(1, 105) series`,
+        [task, owner.userId],
+      );
+      const taskPath = `/communities/${communityId}/tasks/${task}`;
+      const docPath = `/communities/${communityId}/documents/${document}`;
+      const teamPath = `/communities/${communityId}/teams/${team}/members`;
+      const fullTask = await apiRequest(owner, taskPath);
+      assert.equal((fullTask.body as { comments: unknown[]; attachments: unknown[] }).comments.length, 105);
+      assert.equal((fullTask.body as { attachments: unknown[] }).attachments.length, 105);
+      const taskFirst = await apiRequest(owner, `${taskPath}?commentsLimit=100&attachmentsLimit=100`);
+      const taskSecond = await apiRequest(owner, `${taskPath}?commentsLimit=100&commentsOffset=100&attachmentsLimit=100&attachmentsOffset=100`);
+      const firstTaskBody = taskFirst.body as { comments: Array<{ id: number }>; attachments: Array<{ id: number }>; childrenPagination: Record<string, { hasMore: boolean }> };
+      const secondTaskBody = taskSecond.body as typeof firstTaskBody;
+      assert.equal(firstTaskBody.comments.length, 100);
+      assert.equal(firstTaskBody.childrenPagination.comments.hasMore, true);
+      assert.equal(firstTaskBody.childrenPagination.attachments.hasMore, true);
+      assert.equal(secondTaskBody.comments.length, 5);
+      assert.equal(secondTaskBody.attachments.length, 5);
+      assert.equal(secondTaskBody.childrenPagination.comments.hasMore, false);
+      assert.ok(secondTaskBody.comments[0].id > firstTaskBody.comments[99].id);
+      const fullDoc = await apiRequest(owner, docPath);
+      assert.equal((fullDoc.body as { versions: unknown[]; permissions: unknown[] }).versions.length, 105);
+      assert.equal((fullDoc.body as { permissions: unknown[] }).permissions.length, 105);
+      const documentList = await apiRequest(owner, `/communities/${communityId}/documents?children=summary`);
+      const documentSummary = (documentList.body as { documents: Array<{ versions: unknown[]; permissions: unknown[]; childrenPagination: Record<string, { hasMore: boolean }> }> }).documents[0];
+      assert.equal(documentSummary.versions.length, 1);
+      assert.equal(documentSummary.permissions.length, 1);
+      assert.equal(documentSummary.childrenPagination.versions.hasMore, true);
+      assert.equal(documentSummary.childrenPagination.permissions.hasMore, true);
+      const firstDoc = await apiRequest(owner, `${docPath}?versionsLimit=100&permissionsLimit=100`);
+      const secondDoc = await apiRequest(owner, `${docPath}?versionsLimit=100&versionsOffset=100&permissionsLimit=100&permissionsOffset=100`);
+      const firstDocBody = firstDoc.body as { versions: Array<{ version: number }>; permissions: unknown[]; childrenPagination: Record<string, { hasMore: boolean }> };
+      const secondDocBody = secondDoc.body as typeof firstDocBody;
+      assert.equal(firstDocBody.versions.length, 100);
+      assert.equal(firstDocBody.versions[0].version, 105);
+      assert.equal(firstDocBody.childrenPagination.permissions.hasMore, true);
+      assert.equal(secondDocBody.versions.length, 5);
+      assert.equal(secondDocBody.permissions.length, 5);
+      assert.equal(secondDocBody.versions[0].version, 5);
+      const firstTeam = await apiRequest(owner, `${teamPath}?membersLimit=100`);
+      const secondTeam = await apiRequest(owner, `${teamPath}?membersLimit=100&membersOffset=100`);
+      assert.equal((firstTeam.body as { members: unknown[]; pagination: { hasMore: boolean } }).members.length, 100);
+      assert.equal((firstTeam.body as { pagination: { hasMore: boolean } }).pagination.hasMore, true);
+      assert.equal((secondTeam.body as { members: unknown[]; pagination: { hasMore: boolean } }).members.length, 5);
+      assert.equal((secondTeam.body as { pagination: { hasMore: boolean } }).pagination.hasMore, false);
+      const workspaceFirst = await apiRequest(owner, `/communities/${communityId}?view=summary&teamMembershipsLimit=100`);
+      const workspaceLegacy = await apiRequest(owner, `/communities/${communityId}?view=summary`);
+      assert.ok((workspaceLegacy.body as { teamMemberships: unknown[] }).teamMemberships.length >= 198);
+      const workspaceSecond = await apiRequest(owner, `/communities/${communityId}?view=summary&teamMembershipsLimit=100&teamMembershipsOffset=100`);
+      const workspaceThird = await apiRequest(owner, `/communities/${communityId}?view=summary&teamMembershipsLimit=100&teamMembershipsOffset=200`);
+      const firstMemberships = workspaceFirst.body as { teamMemberships: Array<{ userId: string; teamId: number }>; pagination: { teamMemberships: { hasMore: boolean } } };
+      const secondMemberships = workspaceSecond.body as typeof firstMemberships;
+      const thirdMemberships = workspaceThird.body as typeof firstMemberships;
+      assert.equal(firstMemberships.teamMemberships.length, 100);
+      assert.equal(firstMemberships.pagination.teamMemberships.hasMore, true);
+      assert.equal(secondMemberships.teamMemberships.length, 100);
+      assert.equal(secondMemberships.pagination.teamMemberships.hasMore, true);
+      assert.equal(thirdMemberships.teamMemberships.length, 10);
+      assert.equal(thirdMemberships.pagination.teamMemberships.hasMore, false);
+      assert.ok(!firstMemberships.teamMemberships.some((membership) => secondMemberships.teamMemberships.some((later) => later.userId === membership.userId && later.teamId === membership.teamId)));
+      const snapshotFirst = await apiRequest(owner, `/communities/${communityId}/organization-snapshot?teamMembershipsLimit=100`);
+      const snapshotLast = await apiRequest(owner, `/communities/${communityId}/organization-snapshot?teamMembershipsLimit=100&teamMembershipsOffset=200`);
+      assert.equal((snapshotFirst.body as { teamMemberships: unknown[]; pagination: { teamMemberships: { hasMore: boolean } } }).teamMemberships.length, 100);
+      assert.equal((snapshotFirst.body as { pagination: { teamMemberships: { hasMore: boolean } } }).pagination.teamMemberships.hasMore, true);
+      assert.equal((snapshotLast.body as { teamMemberships: unknown[]; pagination: { teamMemberships: { hasMore: boolean } } }).teamMemberships.length, 10);
+      assert.equal((snapshotLast.body as { pagination: { teamMemberships: { hasMore: boolean } } }).pagination.teamMemberships.hasMore, false);
+      for (const path of [taskPath, docPath, teamPath]) {
+        assert.equal((await apiRequest(outsider, `${path}?limit=10&offset=100`)).status, 404);
+        assert.equal((await apiRequest(owner, `${path}?limit=0&offset=100`)).status, 400);
+        assert.equal((await apiRequest(owner, path.replace(`/communities/${communityId}/`, "/communities/999999999/"))).status, 404);
+      }
+    } finally {
+      if (communityId !== undefined) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      if (memberIds.length) await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [memberIds]);
+    }
+  });
+
   test("caps and paginates workspace reference collections", async () => {
     const owner = await createTestSession("workspace_reference_pagination_owner");
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);

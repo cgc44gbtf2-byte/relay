@@ -2606,7 +2606,7 @@ type CommunityDetail = {
   isOwner: boolean;
   pagination?: Record<WorkspaceDetailCollection, { hasMore: boolean; offset: number; limit: number }>;
 };
-const workspaceDetailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"] as const;
+const workspaceDetailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "teamMemberships", "policies", "announcements"] as const;
 type WorkspaceDetailCollection = typeof workspaceDetailCollections[number];
 
 export function workspaceDetailPageQuery(detail?: CommunityDetail): string {
@@ -2630,10 +2630,17 @@ export function appendWorkspaceDetailPage(current: CommunityDetail, page: Commun
   }
   if (current.pagination?.employees?.hasMore) {
     next.members = [...current.members, ...page.members];
-    next.teamMemberships = [...current.teamMemberships, ...page.teamMemberships.filter(
-      (membership) => !current.teamMemberships.some((existing) => existing.teamId === membership.teamId && existing.userId === membership.userId),
-    )];
   }
+  // Membership pages may be loaded separately from employee pages.
+  next.teamMemberships = [...new Map(
+    [...current.teamMemberships, ...page.teamMemberships]
+      .map((membership) => [`${membership.userId}:${membership.teamId}`, membership] as const),
+  ).values()];
+  next.employees = next.employees.map((employee) => ({
+    ...employee,
+    teamIds: next.teamMemberships.filter((membership) => membership.userId === employee.userId && membership.status === "active")
+      .map((membership) => membership.teamId),
+  }));
   return next;
 }
 type OwnerConfirmation = {
@@ -2904,12 +2911,15 @@ type BusinessDocument = {
   downloadCount: number;
   versions: Array<{ id: number; version: number; fileName: string; contentType: string; fileSize: number; createdAt: string }>;
   permissions?: Array<{ userId: string; permission: string }>;
+  childrenPagination?: Record<"versions" | "permissions", { limit: number; offset: number; hasMore: boolean }>;
 };
 type DocumentsPayload = { folders: Array<{ id: number; parentId: number | null; name: string }>; documents: BusinessDocument[]; canManage: boolean; pagination?: { limit: number; offset: number; hasMore: boolean }; foldersPagination?: { limit: number; offset: number; hasMore: boolean } };
 
 export function DocumentCenter({ detail, working, setWorking, setNotice, setError }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void }) {
   const [payload, setPayload] = useState<DocumentsPayload>({ folders: [], documents: [], canManage: detail.canManage });
   const [documentLoadError, setDocumentLoadError] = useState("");
+  const [childLoading, setChildLoading] = useState("");
+  const [childError, setChildError] = useState("");
   const [query, setQuery] = useState("");
   const [folderId, setFolderId] = useState("");
   const [category, setCategory] = useState("all");
@@ -2932,7 +2942,7 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
     try {
        const offset = append ? payload.documents.length : 0;
        const folderOffset = append ? payload.folders.length : 0;
-       const next = await api<DocumentsPayload>(`/communities/${detail.community.id}/documents?limit=100&offset=${offset}&foldersLimit=100&foldersOffset=${folderOffset}&q=${encodeURIComponent(query)}${folderId ? `&folderId=${folderId}` : ""}${category !== "all" ? `&category=${encodeURIComponent(category)}` : ""}`, { signal });
+       const next = await api<DocumentsPayload>(`/communities/${detail.community.id}/documents?children=summary&limit=100&offset=${offset}&foldersLimit=100&foldersOffset=${folderOffset}&q=${encodeURIComponent(query)}${folderId ? `&folderId=${folderId}` : ""}${category !== "all" ? `&category=${encodeURIComponent(category)}` : ""}`, { signal });
       if (requestId === documentRequestRef.current) {
          setPayload(append ? { ...next, folders: [...payload.folders, ...next.folders], documents: [...payload.documents, ...next.documents] } : next);
         setDocumentLoadError("");
@@ -2943,6 +2953,23 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
       setDocumentLoadError(message);
       setError(message);
     }
+  };
+  const loadDocumentChildren = async (document: BusinessDocument, kind: "versions" | "permissions") => {
+    const page = document.childrenPagination?.[kind];
+    if (!page?.hasMore || childLoading) return;
+    const key = `${document.id}:${kind}`;
+    setChildLoading(key);
+    setChildError("");
+    try {
+      const next = await api<BusinessDocument>(`/communities/${detail.community.id}/documents/${document.id}?versionsLimit=${kind === "versions" ? 20 : 1}&versionsOffset=${kind === "versions" ? document.versions.length : 0}&permissionsLimit=${kind === "permissions" ? 20 : 1}&permissionsOffset=${kind === "permissions" ? document.permissions?.length ?? 0 : 0}`);
+      setPayload((current) => ({ ...current, documents: current.documents.map((item) => item.id !== document.id ? item : {
+        ...item,
+        versions: kind === "versions" ? [...item.versions, ...next.versions.filter((version) => !item.versions.some((existing) => existing.id === version.id))] : item.versions,
+        permissions: kind === "permissions" ? [...(item.permissions ?? []), ...(next.permissions ?? []).filter((permission) => !item.permissions?.some((existing) => existing.userId === permission.userId))] : item.permissions,
+        childrenPagination: item.childrenPagination && next.childrenPagination ? { ...item.childrenPagination, [kind]: next.childrenPagination[kind] } : item.childrenPagination,
+      }) }));
+    } catch (reason) { setChildError(reason instanceof Error ? reason.message : "Could not load document history"); }
+    finally { setChildLoading(""); }
   };
   useEffect(() => {
     const controller = new AbortController();
@@ -3011,6 +3038,8 @@ export function DocumentCenter({ detail, working, setWorking, setNotice, setErro
     <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-card p-4"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search documents…" className="h-9 min-w-[220px] flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><select value={folderId} onChange={(event) => setFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">All folders</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={category} onChange={(event) => setCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="all">All categories</option><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select>{payload.canManage && <button onClick={() => setShowCreate((value) => !value)} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">{showCreate ? "close editor" : "add document"}</button>}</div>
     {payload.canManage && showCreate && <div className="grid gap-5 xl:grid-cols-2"><form onSubmit={uploadDocument} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">upload document</h3><div className="mt-4 grid gap-3"><input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Document title" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" className="min-h-20 rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><div className="grid gap-3 sm:grid-cols-2"><select value={documentCategory} onChange={(event) => setDocumentCategory(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="policies">Policies</option><option value="procedures">Procedures</option><option value="training">Training</option><option value="forms">Forms</option><option value="employee">Employee documents</option><option value="company">Company documents</option></select><select value={documentFolderId} onChange={(event) => setDocumentFolderId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No folder</option>{payload.folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select value={visibility} onChange={(event) => setVisibility(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="company">Everyone in workspace</option><option value="managers">Managers only</option><option value="employee">One employee</option><option value="private">Explicit permissions</option></select>{visibility === "employee" && <select required value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} className="h-9 rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select>}</div><label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><input type="checkbox" checked={requiresAcknowledgement} onChange={(event) => setRequiresAcknowledgement(event.target.checked)} /> require acknowledgment</label><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} aria-label="Document expiration" className="h-9 rounded border border-input bg-background px-3 font-mono text-xs" /><input required type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="h-9 rounded border border-input bg-background px-2 py-1.5 font-mono text-[10px]" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">upload document</button></div></form><form onSubmit={createFolder} className="rounded-xl border border-border bg-card p-5"><h3 className="font-mono text-sm font-bold">organize folders</h3><p className="mt-1 text-xs text-muted-foreground">Create folders for recurring operating materials.</p><div className="mt-4 flex gap-2"><input required value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="Folder name" className="h-9 min-w-0 flex-1 rounded border border-input bg-background px-3 font-mono text-xs" /><button disabled={working} className="rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create</button></div><div className="mt-5 space-y-2">{payload.folders.map((folder) => <button type="button" key={folder.id} onClick={() => setFolderId(String(folder.id))} className={`block w-full rounded border px-3 py-2 text-left font-mono text-xs ${folderId === String(folder.id) ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>/ {folder.name}</button>)}</div></form></div>}
       <div className="grid gap-4 md:grid-cols-2">{documentLoadError ? <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/10 p-8 font-mono text-xs text-destructive md:col-span-2">{documentLoadError}</div> : <>{visibleDocuments.map((document) => { const latest = document.versions[0]; const expired = document.expiresAt ? new Date(document.expiresAt) <= new Date() : false; return <article key={document.id} className="rounded-xl border border-border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-[9px] uppercase tracking-[.15em] text-primary">{document.category} · {document.visibility}</p><h3 className="mt-2 truncate font-mono text-sm font-bold">{document.title}</h3><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{document.description || "No description provided."}</p></div><span className={`rounded px-2 py-1 font-mono text-[9px] uppercase ${expired ? "bg-destructive/10 text-destructive" : "bg-chart-4/10 text-chart-4"}`}>{expired ? "expired" : "current"}</span></div><div className="mt-4 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>v{latest?.version ?? 0}</span><span>{document.versions.length} version{document.versions.length === 1 ? "" : "s"}</span><span>{document.downloadCount} download{document.downloadCount === 1 ? "" : "s"}</span>{document.requiresAcknowledgement && <span>{document.acknowledgementCount} acknowledged</span>}</div>{latest && <a href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${latest.id}`} target="_blank" rel="noreferrer" className="mt-4 block truncate rounded border border-border px-3 py-2 font-mono text-xs text-primary hover:bg-muted">{latest.fileName}</a>}{payload.canManage && <label className="mt-3 block font-mono text-[10px] text-muted-foreground">upload new version<input type="file" onChange={(event) => { const nextFile = event.target.files?.[0]; if (nextFile) void uploadVersion(document.id, nextFile); }} className="mt-1 block h-8 w-full rounded border border-input bg-background px-2 py-1 font-mono text-[9px]" /></label>}{document.requiresAcknowledgement && !document.acknowledgedAt && !expired && <button disabled={working} onClick={() => void acknowledge(document.id)} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">acknowledge document</button>}<div className="mt-3 space-y-1">{document.versions.slice(1).map((version) => <a key={version.id} href={`/api/communities/${detail.community.id}/documents/${document.id}/download/${version.id}`} target="_blank" rel="noreferrer" className="block truncate font-mono text-[10px] text-muted-foreground hover:text-primary">v{version.version} · {version.fileName}</a>)}</div>{payload.canManage && <div className="mt-4 border-t border-border pt-3"><p className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">grant explicit access</p><div className="mt-2 flex gap-2"><select value={permissionUserId} onChange={(event) => setPermissionUserId(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="">employee</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><select value={permissionRole} onChange={(event) => setPermissionRole(event.target.value)} className="h-8 rounded border border-input bg-background px-2 font-mono text-[9px]"><option value="viewer">viewer</option><option value="editor">editor</option><option value="acknowledger">acknowledger</option></select><button type="button" disabled={working || !permissionUserId} onClick={() => void grantPermission(document.id)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground disabled:opacity-50">grant</button></div></div>}</article>; })}{visibleDocuments.length === 0 && <div className="rounded-xl border border-dashed border-border p-8 font-mono text-xs text-muted-foreground md:col-span-2">No documents match this search.</div>}</>}</div>
+      {childError && <p role="alert" className="font-mono text-xs text-destructive">{childError}</p>}
+      {payload.documents.map((document) => document.childrenPagination && (document.childrenPagination.versions.hasMore || document.childrenPagination.permissions.hasMore || Boolean(document.permissions?.length)) && <div key={document.id} className="flex flex-wrap gap-2 rounded border border-border p-2 font-mono text-[10px]"><span className="mr-2">{document.title}</span>{(["versions", "permissions"] as const).map((kind) => document.childrenPagination?.[kind].hasMore && <button key={kind} type="button" disabled={Boolean(childLoading)} onClick={() => void loadDocumentChildren(document, kind)} className="text-primary disabled:opacity-50">{childLoading === `${document.id}:${kind}` ? "loading…" : `load more ${kind}`}</button>)}{document.permissions?.map((permission) => <span key={permission.userId}>{permission.userId}: {permission.permission}</span>)}</div>)}
       {(payload.pagination?.hasMore || payload.foldersPagination?.hasMore) && <button type="button" onClick={() => void loadDocuments(undefined, true)} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary">{payload.pagination?.hasMore ? "load older documents" : "load older folders"}</button>}
     {documentLoadError && <button type="button" onClick={() => setDocumentLoadError("")} className="sr-only" aria-label="Dismiss error">Dismiss document error</button>}
   </section>;
@@ -3144,7 +3173,10 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
   const [dueDate, setDueDate] = useState("");
   const [taskSearch, setTaskSearch] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(initialTaskId);
-  const [taskDetails, setTaskDetails] = useState(new Map<number, CommunityDetail["tasks"][number]>());
+  type PagedTask = CommunityDetail["tasks"][number] & { childrenPagination?: Record<"comments" | "attachments", { limit: number; offset: number; hasMore: boolean }> };
+  const [taskDetails, setTaskDetails] = useState(new Map<number, PagedTask>());
+  const [loadingChild, setLoadingChild] = useState("");
+  const [childError, setChildError] = useState("");
   const [comment, setComment] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   useEffect(() => {
@@ -3152,7 +3184,7 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
     setTaskDetails(new Map());
     if (initialTaskId === null) return;
     let active = true;
-    api<CommunityDetail["tasks"][number]>(`/communities/${detail.community.id}/tasks/${initialTaskId}`)
+    api<PagedTask>(`/communities/${detail.community.id}/tasks/${initialTaskId}?commentsLimit=20&attachmentsLimit=20`)
       .then((task) => {
         if (active) setTaskDetails((current) => new Map(current).set(initialTaskId, task));
       })
@@ -3163,8 +3195,25 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
   }, [detail.community.id, initialTaskId]);
   const loadTaskDetail = async (taskId: number, force = false) => {
     if (!force && taskDetails.has(taskId)) return;
-    const task = await api<CommunityDetail["tasks"][number]>(`/communities/${detail.community.id}/tasks/${taskId}`);
+    const task = await api<PagedTask>(`/communities/${detail.community.id}/tasks/${taskId}?commentsLimit=20&attachmentsLimit=20`);
     setTaskDetails((current) => new Map(current).set(taskId, task));
+  };
+  const loadTaskChildren = async (task: PagedTask, kind: "comments" | "attachments") => {
+    if (!task.childrenPagination?.[kind].hasMore || loadingChild) return;
+    setLoadingChild(kind);
+    setChildError("");
+    try {
+      const next = await api<PagedTask>(`/communities/${detail.community.id}/tasks/${task.id}?commentsLimit=${kind === "comments" ? 20 : 1}&commentsOffset=${kind === "comments" ? task.comments.length : 0}&attachmentsLimit=${kind === "attachments" ? 20 : 1}&attachmentsOffset=${kind === "attachments" ? task.attachments.length : 0}`);
+      setTaskDetails((current) => {
+        const currentTask = current.get(task.id);
+        if (!currentTask) return current;
+        return new Map(current).set(task.id, { ...currentTask,
+          [kind]: [...currentTask[kind], ...next[kind].filter((row) => !currentTask[kind].some((existing) => existing.id === row.id))],
+          childrenPagination: { ...currentTask.childrenPagination!, [kind]: next.childrenPagination![kind] },
+        });
+      });
+    } catch (reason) { setChildError(reason instanceof Error ? reason.message : "Could not load task history"); }
+    finally { setLoadingChild(""); }
   };
   const selectTask = async (taskId: number) => {
     setSelectedTaskId(taskId);
@@ -3257,7 +3306,7 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
     return [task.title, task.description, task.status, task.priority, assignee?.displayName, department?.name, location?.name]
       .filter(Boolean).join(" ").toLowerCase().includes(taskSearch.trim().toLowerCase());
   });
-  const selectedTask = selectedTaskId === null ? null : taskDetails.get(selectedTaskId) ?? detail.tasks.find((task) => task.id === selectedTaskId) ?? null;
+  const selectedTask = selectedTaskId === null ? null : taskDetails.get(selectedTaskId) ?? null;
   const statusLabel: Record<string, string> = { todo: "To Do", in_progress: "In Progress", waiting: "Waiting", completed: "Completed", cancelled: "Cancelled" };
   return <section className="space-y-5">
     <div className="flex flex-wrap items-end justify-between gap-3">
@@ -3279,6 +3328,7 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
       {files.length > 0 && <p className="mt-2 font-mono text-[10px] text-muted-foreground">{files.length} attachment{files.length === 1 ? "" : "s"} selected</p>}
       <button disabled={working} className="mt-4 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">create task</button>
     </form>}
+     {selectedTask && <div className="flex flex-wrap gap-3 font-mono text-[10px]">{(["attachments", "comments"] as const).map((kind) => selectedTask.childrenPagination?.[kind].hasMore && <button key={kind} type="button" disabled={Boolean(loadingChild)} onClick={() => void loadTaskChildren(selectedTask, kind)} className="text-primary disabled:opacity-50">{loadingChild === kind ? "loading…" : `load more ${kind}`}</button>)}{childError && <p role="alert" className="text-destructive">{childError}</p>}</div>}
      <div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
        <section className="rounded-xl border border-border bg-card">
          <div className="divide-y divide-border">{visibleTasks.map((task) => { const assignee = detail.members.find((member) => member.id === task.assignedTo); const department = detail.departments.find((item) => item.id === task.departmentId); const location = detail.locations.find((item) => item.id === task.locationId); return <button key={task.id} onClick={() => void selectTask(task.id)} className={`block w-full px-5 py-4 text-left hover:bg-muted/40 ${selectedTaskId === task.id ? "bg-muted/40" : ""}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-mono text-xs font-bold">{task.title}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{task.description || "No description."}</p></div><span className={`shrink-0 rounded px-2 py-1 font-mono text-[9px] uppercase ${task.priority === "urgent" ? "bg-destructive/15 text-destructive" : "bg-primary/10 text-primary"}`}>{task.priority}</span></div><div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[9px] text-muted-foreground"><span>{statusLabel[task.status] ?? task.status}</span><span>{assignee?.displayName ?? "Unassigned"}</span>{department && <span>{department.name}</span>}{location && <span>{location.name}</span>}{task.dueDate && <span>due {new Date(task.dueDate).toLocaleDateString()}</span>}</div></button>; })}{visibleTasks.length === 0 && <EmptyAdminState label={taskSearch ? "No tasks match that search." : "No tasks yet."} />}</div>
@@ -3294,6 +3344,25 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
   const [department, setDepartment] = useState("");
   const [location, setLocation] = useState("");
   const [team, setTeam] = useState("");
+  type TeamPage = { members: Array<{ userId: string; displayName: string; role: string; status: string }>; pagination: { limit: number; offset: number; hasMore: boolean } };
+  const [teamPages, setTeamPages] = useState<Record<number, TeamPage>>({});
+  const [teamPageLoading, setTeamPageLoading] = useState<number | null>(null);
+  const [teamPageError, setTeamPageError] = useState("");
+  useEffect(() => { setTeamPages({}); setTeamPageError(""); }, [detail.community.id]);
+  const loadTeamMembers = async (teamId: number) => {
+    if (teamPageLoading !== null) return;
+    setTeamPageLoading(teamId);
+    setTeamPageError("");
+    try {
+      const offset = teamPages[teamId]?.members.length ?? 0;
+      const page = await api<TeamPage>(`/communities/${detail.community.id}/teams/${teamId}/members?membersLimit=20&membersOffset=${offset}`);
+      setTeamPages((current) => ({ ...current, [teamId]: { ...page, members: [
+        ...(current[teamId]?.members ?? []),
+        ...page.members.filter((member) => !current[teamId]?.members.some((existing) => existing.userId === member.userId)),
+      ] } }));
+    } catch (reason) { setTeamPageError(reason instanceof Error ? reason.message : "Could not load team members"); }
+    finally { setTeamPageLoading(null); }
+  };
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteDepartmentId, setInviteDepartmentId] = useState("");
@@ -3351,6 +3420,7 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
         ...(assigned ? { body: JSON.stringify({ role: "member", status: "active" }) } : {}),
       });
       setNotice(assigned ? "Employee added to team." : "Employee removed from team.");
+      setTeamPages((current) => { const next = { ...current }; delete next[teamId]; return next; });
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update team membership");
@@ -3516,8 +3586,10 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
             <p className="font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></p>
             {(departmentName || managerName) && <p className="mt-1 font-mono text-[9px] text-muted-foreground">{[departmentName, managerName ? `Manager: ${managerName}` : null].filter(Boolean).join(" · ")}</p>}
             {detail.canManageOrganization && <label className="mt-2 block font-mono text-[9px] text-muted-foreground">Manager<select aria-label={`Manager for ${item.name}`} disabled={working} value={item.managerId ?? ""} onChange={(event) => void updateUnitManager("teams", item.id, event.target.value || null)} className="mt-1 h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.employees.filter((employee) => employee.employmentStatus === "active").map((employee) => <option key={employee.userId} value={employee.userId}>{employee.displayName}</option>)}</select></label>}
+            <div className="mt-2 font-mono text-[10px] text-muted-foreground">{teamPages[item.id]?.members.map((member) => <span key={member.userId} className="mr-2">{member.displayName} ({member.status})</span>)}{(!teamPages[item.id] || teamPages[item.id].pagination.hasMore) && <button type="button" disabled={teamPageLoading !== null} className="text-primary disabled:opacity-50" onClick={() => void loadTeamMembers(item.id)}>{teamPageLoading === item.id ? "loading…" : teamPages[item.id] ? "load more members" : "view members"}</button>}</div>
           </div>;
         })}</div>
+        {teamPageError && <p role="alert" className="font-mono text-xs text-destructive">{teamPageError}</p>}
       </div>
     </div>}
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
@@ -3555,7 +3627,7 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
                 <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Department</span><select disabled={working} value={employee.departmentId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { departmentId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
                 <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Location</span><select disabled={working} value={employee.locationId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { locationId: event.target.value ? Number(event.target.value) : null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
                 <label className="space-y-1"><span className="font-mono text-[9px] uppercase text-muted-foreground">Manager</span><select disabled={working} value={employee.managerId ?? ""} onChange={(event) => void updateOrganization(employee.userId, { managerId: event.target.value || null })} className="h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{eligibleManagers.map((item) => <option key={item.userId} value={item.userId}>{item.displayName}</option>)}</select></label>
-                <div className="sm:col-span-3"><span className="font-mono text-[9px] uppercase text-muted-foreground">Teams</span><div className="mt-2 flex flex-wrap gap-2">{detail.teams.length === 0 ? <span className="font-mono text-[10px] text-muted-foreground">Create a team first.</span> : detail.teams.map((item) => <label key={item.id} className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"><input type="checkbox" disabled={working} checked={employee.teamIds.includes(item.id)} onChange={(event) => void updateTeamMembership(item.id, employee.userId, event.target.checked)} />{item.name}</label>)}</div></div>
+                <div className="sm:col-span-3"><span className="font-mono text-[9px] uppercase text-muted-foreground">Teams</span>{detail.pagination?.teamMemberships?.hasMore && <p className="mt-1 font-mono text-[9px] text-muted-foreground">Load remaining team memberships before changing assignments.</p>}<div className="mt-2 flex flex-wrap gap-2">{detail.teams.length === 0 ? <span className="font-mono text-[10px] text-muted-foreground">Create a team first.</span> : detail.teams.map((item) => <label key={item.id} className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"><input type="checkbox" disabled={working || detail.pagination?.teamMemberships?.hasMore} checked={employee.teamIds.includes(item.id)} onChange={(event) => void updateTeamMembership(item.id, employee.userId, event.target.checked)} />{item.name}</label>)}</div></div>
               </div>}
             </div>;
           })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>

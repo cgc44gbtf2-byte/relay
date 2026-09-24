@@ -75,4 +75,14 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
+ * @minimum 1
+ * @maximum 100
+ */
+teamMembershipsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamMembershipsOffset?: number;
 };

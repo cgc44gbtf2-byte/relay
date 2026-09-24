@@ -418,6 +418,10 @@ export const getCommunityWorkspaceQueryTeamsLimitMax = 100;
 export const getCommunityWorkspaceQueryTeamsOffsetDefault = 0;
 export const getCommunityWorkspaceQueryTeamsOffsetMin = 0;
 
+export const getCommunityWorkspaceQueryTeamMembershipsLimitMax = 100;
+
+export const getCommunityWorkspaceQueryTeamMembershipsOffsetMin = 0;
+
 export const getCommunityWorkspaceQueryPoliciesLimitDefault = 100;
 export const getCommunityWorkspaceQueryPoliciesLimitMax = 100;
 
@@ -452,6 +456,8 @@ export const GetCommunityWorkspaceQueryParams = zod.object({
   "locationsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryLocationsOffsetMin).default(getCommunityWorkspaceQueryLocationsOffsetDefault),
   "teamsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamsLimitMax).default(getCommunityWorkspaceQueryTeamsLimitDefault),
   "teamsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamsOffsetMin).default(getCommunityWorkspaceQueryTeamsOffsetDefault),
+  "teamMembershipsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamMembershipsLimitMax).optional().describe('Opt in to bounded membership pages for the selected employees; omitted retains the full array.'),
+  "teamMembershipsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamMembershipsOffsetMin).optional(),
   "policiesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryPoliciesLimitMax).default(getCommunityWorkspaceQueryPoliciesLimitDefault),
   "policiesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryPoliciesOffsetMin).default(getCommunityWorkspaceQueryPoliciesOffsetDefault),
   "announcementsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryAnnouncementsLimitMax).optional().describe('Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.'),
@@ -551,6 +557,10 @@ export const getOrganizationSnapshotQueryTeamsLimitMax = 100;
 
 export const getOrganizationSnapshotQueryTeamsOffsetMin = 0;
 
+export const getOrganizationSnapshotQueryTeamMembershipsLimitMax = 100;
+
+export const getOrganizationSnapshotQueryTeamMembershipsOffsetMin = 0;
+
 
 
 export const GetOrganizationSnapshotQueryParams = zod.object({
@@ -567,7 +577,9 @@ export const GetOrganizationSnapshotQueryParams = zod.object({
   "locationsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryLocationsLimitMax).optional(),
   "locationsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryLocationsOffsetMin).optional(),
   "teamsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryTeamsLimitMax).optional(),
-  "teamsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamsOffsetMin).optional()
+  "teamsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamsOffsetMin).optional(),
+  "teamMembershipsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryTeamMembershipsLimitMax).optional().describe('Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.'),
+  "teamMembershipsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamMembershipsOffsetMin).optional()
 })
 
 export const GetOrganizationSnapshotHeader = zod.object({
@@ -730,6 +742,7 @@ export const ListCommunityDocumentsQueryParams = zod.object({
   "q": zod.coerce.string().optional(),
   "folderId": zod.coerce.number().int().optional(),
   "category": zod.coerce.string().optional(),
+  "children": zod.enum(['summary']).optional().describe('Set to summary to return only the latest version and continuation metadata for versions and permissions; omitted retains complete child arrays.'),
   "documentsLimit": zod.coerce.number().int().min(1).max(listCommunityDocumentsQueryDocumentsLimitMax).default(listCommunityDocumentsQueryDocumentsLimitDefault),
   "documentsOffset": zod.coerce.number().int().min(listCommunityDocumentsQueryDocumentsOffsetMin).default(listCommunityDocumentsQueryDocumentsOffsetDefault),
   "foldersLimit": zod.coerce.number().int().min(1).max(listCommunityDocumentsQueryFoldersLimitMax).default(listCommunityDocumentsQueryFoldersLimitDefault),
@@ -764,6 +777,161 @@ export const ListCommunityDocumentsResponse = zod.object({
   "offset": zod.number().int().min(listCommunityDocumentsResponseFoldersPaginationOffsetMin),
   "hasMore": zod.boolean()
 }).optional()
+})
+
+
+/**
+ * Without child page parameters, returns complete child arrays for existing clients. Permissions are visible to managers only. Each child page has independent continuation metadata.
+ * @summary Read a document and optionally page its versions and permissions
+ */
+export const GetCommunityDocumentParams = zod.object({
+  "communityId": zod.coerce.number().int(),
+  "documentId": zod.coerce.number().int()
+})
+
+export const getCommunityDocumentQueryVersionsLimitMax = 100;
+
+export const getCommunityDocumentQueryVersionsOffsetMin = 0;
+
+export const getCommunityDocumentQueryPermissionsLimitMax = 100;
+
+export const getCommunityDocumentQueryPermissionsOffsetMin = 0;
+
+
+
+export const GetCommunityDocumentQueryParams = zod.object({
+  "versionsLimit": zod.coerce.number().int().min(1).max(getCommunityDocumentQueryVersionsLimitMax).optional(),
+  "versionsOffset": zod.coerce.number().int().min(getCommunityDocumentQueryVersionsOffsetMin).optional(),
+  "permissionsLimit": zod.coerce.number().int().min(1).max(getCommunityDocumentQueryPermissionsLimitMax).optional(),
+  "permissionsOffset": zod.coerce.number().int().min(getCommunityDocumentQueryPermissionsOffsetMin).optional()
+})
+
+export const getCommunityDocumentResponseChildrenPaginationVersionsLimitMax = 100;
+
+export const getCommunityDocumentResponseChildrenPaginationVersionsOffsetMin = 0;
+
+export const getCommunityDocumentResponseChildrenPaginationPermissionsLimitMax = 100;
+
+export const getCommunityDocumentResponseChildrenPaginationPermissionsOffsetMin = 0;
+
+
+
+export const GetCommunityDocumentResponse = zod.object({
+  "id": zod.number().int(),
+  "versions": zod.array(zod.object({
+
+}).passthrough()),
+  "permissions": zod.array(zod.object({
+
+}).passthrough()).optional(),
+  "childrenPagination": zod.object({
+  "versions": zod.object({
+  "limit": zod.number().int().min(1).max(getCommunityDocumentResponseChildrenPaginationVersionsLimitMax),
+  "offset": zod.number().int().min(getCommunityDocumentResponseChildrenPaginationVersionsOffsetMin),
+  "hasMore": zod.boolean()
+}).optional(),
+  "permissions": zod.object({
+  "limit": zod.number().int().min(1).max(getCommunityDocumentResponseChildrenPaginationPermissionsLimitMax),
+  "offset": zod.number().int().min(getCommunityDocumentResponseChildrenPaginationPermissionsOffsetMin),
+  "hasMore": zod.boolean()
+}).optional()
+}).optional()
+})
+
+
+/**
+ * Without child page parameters, returns complete child arrays for existing clients.
+ * @summary Read a task and optionally page its comments and attachments
+ */
+export const GetCommunityTaskParams = zod.object({
+  "communityId": zod.coerce.number().int(),
+  "taskId": zod.coerce.number().int()
+})
+
+export const getCommunityTaskQueryCommentsLimitMax = 100;
+
+export const getCommunityTaskQueryCommentsOffsetMin = 0;
+
+export const getCommunityTaskQueryAttachmentsLimitMax = 100;
+
+export const getCommunityTaskQueryAttachmentsOffsetMin = 0;
+
+
+
+export const GetCommunityTaskQueryParams = zod.object({
+  "commentsLimit": zod.coerce.number().int().min(1).max(getCommunityTaskQueryCommentsLimitMax).optional(),
+  "commentsOffset": zod.coerce.number().int().min(getCommunityTaskQueryCommentsOffsetMin).optional(),
+  "attachmentsLimit": zod.coerce.number().int().min(1).max(getCommunityTaskQueryAttachmentsLimitMax).optional(),
+  "attachmentsOffset": zod.coerce.number().int().min(getCommunityTaskQueryAttachmentsOffsetMin).optional()
+})
+
+export const getCommunityTaskResponseChildrenPaginationCommentsLimitMax = 100;
+
+export const getCommunityTaskResponseChildrenPaginationCommentsOffsetMin = 0;
+
+export const getCommunityTaskResponseChildrenPaginationAttachmentsLimitMax = 100;
+
+export const getCommunityTaskResponseChildrenPaginationAttachmentsOffsetMin = 0;
+
+
+
+export const GetCommunityTaskResponse = zod.object({
+  "id": zod.number().int(),
+  "comments": zod.array(zod.object({
+
+}).passthrough()),
+  "attachments": zod.array(zod.object({
+
+}).passthrough()),
+  "childrenPagination": zod.object({
+  "comments": zod.object({
+  "limit": zod.number().int().min(1).max(getCommunityTaskResponseChildrenPaginationCommentsLimitMax),
+  "offset": zod.number().int().min(getCommunityTaskResponseChildrenPaginationCommentsOffsetMin),
+  "hasMore": zod.boolean()
+}).optional(),
+  "attachments": zod.object({
+  "limit": zod.number().int().min(1).max(getCommunityTaskResponseChildrenPaginationAttachmentsLimitMax),
+  "offset": zod.number().int().min(getCommunityTaskResponseChildrenPaginationAttachmentsOffsetMin),
+  "hasMore": zod.boolean()
+}).optional()
+}).optional()
+})
+
+
+/**
+ * @summary Page members of a team in a business workspace
+ */
+export const ListCommunityTeamMembersParams = zod.object({
+  "communityId": zod.coerce.number().int(),
+  "teamId": zod.coerce.number().int()
+})
+
+export const listCommunityTeamMembersQueryMembersLimitMax = 100;
+
+export const listCommunityTeamMembersQueryMembersOffsetMin = 0;
+
+
+
+export const ListCommunityTeamMembersQueryParams = zod.object({
+  "membersLimit": zod.coerce.number().int().min(1).max(listCommunityTeamMembersQueryMembersLimitMax).optional(),
+  "membersOffset": zod.coerce.number().int().min(listCommunityTeamMembersQueryMembersOffsetMin).optional()
+})
+
+export const listCommunityTeamMembersResponsePaginationLimitMax = 100;
+
+export const listCommunityTeamMembersResponsePaginationOffsetMin = 0;
+
+
+
+export const ListCommunityTeamMembersResponse = zod.object({
+  "members": zod.array(zod.object({
+
+}).passthrough()),
+  "pagination": zod.object({
+  "limit": zod.number().int().min(1).max(listCommunityTeamMembersResponsePaginationLimitMax),
+  "offset": zod.number().int().min(listCommunityTeamMembersResponsePaginationOffsetMin),
+  "hasMore": zod.boolean()
+})
 })
 
 

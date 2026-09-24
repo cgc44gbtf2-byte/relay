@@ -56,6 +56,45 @@ export interface DocumentListResponse {
   foldersPagination?: PageInfo;
 }
 
+export type DocumentDetailResponseVersionsItem = { [key: string]: unknown };
+
+export type DocumentDetailResponsePermissionsItem = { [key: string]: unknown };
+
+export type DocumentDetailResponseChildrenPagination = {
+  versions?: PageInfo;
+  permissions?: PageInfo;
+};
+
+export interface DocumentDetailResponse {
+  id: number;
+  versions: DocumentDetailResponseVersionsItem[];
+  permissions?: DocumentDetailResponsePermissionsItem[];
+  childrenPagination?: DocumentDetailResponseChildrenPagination;
+}
+
+export type TaskDetailResponseCommentsItem = { [key: string]: unknown };
+
+export type TaskDetailResponseAttachmentsItem = { [key: string]: unknown };
+
+export type TaskDetailResponseChildrenPagination = {
+  comments?: PageInfo;
+  attachments?: PageInfo;
+};
+
+export interface TaskDetailResponse {
+  id: number;
+  comments: TaskDetailResponseCommentsItem[];
+  attachments: TaskDetailResponseAttachmentsItem[];
+  childrenPagination?: TaskDetailResponseChildrenPagination;
+}
+
+export type TeamMembersResponseMembersItem = { [key: string]: unknown };
+
+export interface TeamMembersResponse {
+  members: TeamMembersResponseMembersItem[];
+  pagination: PageInfo;
+}
+
 export type OrganizationSnapshotMembersItem = { [key: string]: unknown };
 
 export type OrganizationSnapshotEmployeesItem = { [key: string]: unknown };
@@ -604,6 +643,16 @@ teamsLimit?: number;
  */
 teamsOffset?: number;
 /**
+ * Opt in to bounded membership pages for the selected employees; omitted retains the full array.
+ * @minimum 1
+ * @maximum 100
+ */
+teamMembershipsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamMembershipsOffset?: number;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -692,6 +741,16 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
+ * @minimum 1
+ * @maximum 100
+ */
+teamMembershipsLimit?: number;
+/**
+ * @minimum 0
+ */
+teamMembershipsOffset?: number;
 };
 
 export type ListModerationLogsParams = {
@@ -735,6 +794,10 @@ q?: string;
 folderId?: number;
 category?: string;
 /**
+ * Set to summary to return only the latest version and continuation metadata for versions and permissions; omitted retains complete child arrays.
+ */
+children?: ListCommunityDocumentsChildren;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -752,6 +815,67 @@ foldersLimit?: number;
  * @minimum 0
  */
 foldersOffset?: number;
+};
+
+export type ListCommunityDocumentsChildren = typeof ListCommunityDocumentsChildren[keyof typeof ListCommunityDocumentsChildren];
+
+
+export const ListCommunityDocumentsChildren = {
+  summary: 'summary',
+} as const;
+
+export type GetCommunityDocumentParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+versionsLimit?: number;
+/**
+ * @minimum 0
+ */
+versionsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+permissionsLimit?: number;
+/**
+ * @minimum 0
+ */
+permissionsOffset?: number;
+};
+
+export type GetCommunityTaskParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+commentsLimit?: number;
+/**
+ * @minimum 0
+ */
+commentsOffset?: number;
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+attachmentsLimit?: number;
+/**
+ * @minimum 0
+ */
+attachmentsOffset?: number;
+};
+
+export type ListCommunityTeamMembersParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+membersLimit?: number;
+/**
+ * @minimum 0
+ */
+membersOffset?: number;
 };
 
 export type GetAdminOverviewParams = {

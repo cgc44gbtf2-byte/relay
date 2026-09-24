@@ -370,6 +370,13 @@ paths:
         - name: teamsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: teamMembershipsLimit
+          in: query
+          description: Opt in to bounded membership pages for the selected employees; omitted retains the full array.
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: teamMembershipsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
         - name: policiesLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
@@ -441,6 +448,13 @@ paths:
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: teamsOffset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: teamMembershipsLimit
+          in: query
+          description: Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: teamMembershipsOffset
           in: query
           schema: { type: integer, minimum: 0 }
         - name: If-None-Match
@@ -553,6 +567,10 @@ paths:
         - name: category
           in: query
           schema: { type: string }
+        - name: children
+          in: query
+          description: "Set to summary to return only the latest version and continuation metadata for versions and permissions; omitted retains complete child arrays."
+          schema: { type: string, enum: [summary] }
         - name: documentsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
@@ -571,6 +589,62 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocumentListResponse" }
+  /communities/{communityId}/documents/{documentId}:
+    get:
+      operationId: getCommunityDocument
+      tags: [documents]
+      summary: Read a document and optionally page its versions and permissions
+      description: "Without child page parameters, returns complete child arrays for existing clients. Permissions are visible to managers only. Each child page has independent continuation metadata."
+      parameters:
+        - { name: communityId, in: path, required: true, schema: { type: integer } }
+        - { name: documentId, in: path, required: true, schema: { type: integer } }
+        - { name: versionsLimit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: versionsOffset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: permissionsLimit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: permissionsOffset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: Document with versions and permissions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentDetailResponse" }
+        "400": { description: Invalid pagination }
+        "404": { description: Document not found or inaccessible }
+  /communities/{communityId}/tasks/{taskId}:
+    get:
+      operationId: getCommunityTask
+      tags: [tasks]
+      summary: Read a task and optionally page its comments and attachments
+      description: "Without child page parameters, returns complete child arrays for existing clients."
+      parameters:
+        - { name: communityId, in: path, required: true, schema: { type: integer } }
+        - { name: taskId, in: path, required: true, schema: { type: integer } }
+        - { name: commentsLimit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: commentsOffset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: attachmentsLimit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: attachmentsOffset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: Task with comments and attachments
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskDetailResponse" }
+        "400": { description: Invalid pagination }
+        "404": { description: Task not found or inaccessible }
+  /communities/{communityId}/teams/{teamId}/members:
+    get:
+      operationId: listCommunityTeamMembers
+      tags: [communities]
+      summary: Page members of a team in a business workspace
+      parameters:
+        - { name: communityId, in: path, required: true, schema: { type: integer } }
+        - { name: teamId, in: path, required: true, schema: { type: integer } }
+        - { name: membersLimit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: membersOffset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200": { description: Team members and continuation metadata, content: { application/json: { schema: { $ref: "#/components/schemas/TeamMembersResponse" } } } }
+        "400": { description: Invalid pagination }
+        "404": { description: Team not found or inaccessible }
   /admin/overview:
     get:
       operationId: getAdminOverview
@@ -1018,6 +1092,36 @@ components:
         canManage: { type: boolean }
         pagination: { $ref: "#/components/schemas/PageInfo" }
         foldersPagination: { $ref: "#/components/schemas/PageInfo" }
+    DocumentDetailResponse:
+      type: object
+      required: [id, versions]
+      properties:
+        id: { type: integer }
+        versions: { type: array, items: { type: object } }
+        permissions: { type: array, items: { type: object } }
+        childrenPagination:
+          type: object
+          properties:
+            versions: { $ref: "#/components/schemas/PageInfo" }
+            permissions: { $ref: "#/components/schemas/PageInfo" }
+    TaskDetailResponse:
+      type: object
+      required: [id, comments, attachments]
+      properties:
+        id: { type: integer }
+        comments: { type: array, items: { type: object } }
+        attachments: { type: array, items: { type: object } }
+        childrenPagination:
+          type: object
+          properties:
+            comments: { $ref: "#/components/schemas/PageInfo" }
+            attachments: { $ref: "#/components/schemas/PageInfo" }
+    TeamMembersResponse:
+      type: object
+      required: [members, pagination]
+      properties:
+        members: { type: array, items: { type: object } }
+        pagination: { $ref: "#/components/schemas/PageInfo" }
     OrganizationSnapshot:
       type: object
       required: [members, employees, assignments, departments, locations, teams, teamMemberships, invitations, pagination]

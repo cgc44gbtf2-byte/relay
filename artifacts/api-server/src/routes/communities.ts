@@ -296,7 +296,7 @@ function pageParam(req: AuthenticatedRequest, name: string): { limit: number; of
   };
 }
 
-const detailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"] as const;
+const detailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "teamMemberships", "policies", "announcements"] as const;
 function safeInvitation(invitation: typeof workspaceInvitationsTable.$inferSelect) {
   const { tokenHash: _token, emailAttemptId: _attempt, emailProviderId: _provider, ...safe } = invitation;
   return safe;
@@ -678,8 +678,14 @@ router.get("/communities/:communityId/tasks/:taskId", requireAuth, async (req: A
     res.status(404).json({ error: "Task not found." });
     return;
   }
-  const [comments, attachments] = await Promise.all([
-    db.select({
+  if (!validPageQuery(req, ["comments", "attachments"])) {
+    res.status(400).json({ error: "Invalid child pagination." });
+    return;
+  }
+  const paged = ["commentsLimit", "commentsOffset", "attachmentsLimit", "attachmentsOffset"].some((key) => req.query[key] !== undefined);
+  const commentsPage = pageParam(req, "comments");
+  const attachmentsPage = pageParam(req, "attachments");
+  const commentsQuery = db.select({
       id: workspaceTaskCommentsTable.id,
       taskId: workspaceTaskCommentsTable.taskId,
       authorId: workspaceTaskCommentsTable.authorId,
@@ -689,15 +695,46 @@ router.get("/communities/:communityId/tasks/:taskId", requireAuth, async (req: A
     }).from(workspaceTaskCommentsTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, workspaceTaskCommentsTable.authorId))
       .where(eq(workspaceTaskCommentsTable.taskId, taskId))
-      .orderBy(asc(workspaceTaskCommentsTable.createdAt)),
-    db.select().from(workspaceTaskAttachmentsTable)
+      .orderBy(asc(workspaceTaskCommentsTable.createdAt), asc(workspaceTaskCommentsTable.id));
+  const attachmentsQuery = db.select().from(workspaceTaskAttachmentsTable)
       .where(eq(workspaceTaskAttachmentsTable.taskId, taskId))
-      .orderBy(asc(workspaceTaskAttachmentsTable.createdAt)),
+      .orderBy(asc(workspaceTaskAttachmentsTable.createdAt), asc(workspaceTaskAttachmentsTable.id));
+  const [comments, attachments] = await Promise.all([
+    paged ? commentsQuery.limit(commentsPage.limit + 1).offset(commentsPage.offset) : commentsQuery,
+    paged ? attachmentsQuery.limit(attachmentsPage.limit + 1).offset(attachmentsPage.offset) : attachmentsQuery,
   ]);
-  res.json({ ...task, comments, attachments });
+  res.json({ ...task, comments: paged ? comments.slice(0, commentsPage.limit) : comments,
+    attachments: paged ? attachments.slice(0, attachmentsPage.limit) : attachments,
+    ...(paged ? { childrenPagination: {
+      comments: { ...commentsPage, hasMore: comments.length > commentsPage.limit },
+      attachments: { ...attachmentsPage, hasMore: attachments.length > attachmentsPage.limit },
+    } } : {}) });
 });
 
-const organizationCollections = ["employees", "invitations", "assignments", "departments", "locations", "teams"] as const;
+router.get("/communities/:communityId/teams/:teamId/members", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const teamId = Number(param(req, "teamId"));
+  if (!Number.isSafeInteger(communityId) || !Number.isSafeInteger(teamId) || !(await canAccessBusiness(userId, communityId))) {
+    res.status(404).json({ error: "Team not found." });
+    return;
+  }
+  const [team] = await db.select({ id: teamsTable.id }).from(teamsTable)
+    .where(and(eq(teamsTable.id, teamId), eq(teamsTable.communityId, communityId)));
+  if (!team) { res.status(404).json({ error: "Team not found." }); return; }
+  if (!validPageQuery(req, ["members"])) { res.status(400).json({ error: "Invalid member pagination." }); return; }
+  const page = pageParam(req, "members");
+  const members = await db.select({
+    teamId: teamMembersTable.teamId, userId: teamMembersTable.userId, role: teamMembersTable.role,
+    status: teamMembersTable.status, joinedAt: teamMembersTable.joinedAt, endedAt: teamMembersTable.endedAt,
+    displayName: usersTable.displayName,
+  }).from(teamMembersTable).innerJoin(usersTable, eq(usersTable.clerkId, teamMembersTable.userId))
+    .where(eq(teamMembersTable.teamId, teamId)).orderBy(asc(teamMembersTable.userId))
+    .limit(page.limit + 1).offset(page.offset);
+  res.json({ members: members.slice(0, page.limit), pagination: { ...page, hasMore: members.length > page.limit } });
+});
+
+const organizationCollections = ["employees", "invitations", "assignments", "departments", "locations", "teams", "teamMemberships"] as const;
 
 router.get("/communities/:communityId/organization-snapshot", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
@@ -716,6 +753,8 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
   const departmentsPage = pageParam(req, "departments");
   const locationsPage = pageParam(req, "locations");
   const teamsPage = pageParam(req, "teams");
+  const membershipPage = pageParam(req, "teamMemberships");
+  const pagedMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined;
   const [members, assignments, departments, locations, teams, invitations] = await Promise.all([
     db.select({
       id: usersTable.clerkId, username: usersTable.username, displayName: usersTable.displayName,
@@ -743,6 +782,12 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
   // The viewer's team memberships remain available even when their directory
   // row falls on a later page, matching the workspace detail response.
   const memberIds = [...new Set([...members.slice(0, employeesPage.limit).map((member) => member.id), userId])];
+  const membershipQuery = db.select({
+    teamId: teamMembersTable.teamId, userId: teamMembersTable.userId, role: teamMembersTable.role,
+    status: teamMembersTable.status, joinedAt: teamMembersTable.joinedAt, endedAt: teamMembersTable.endedAt,
+  }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+    .where(and(eq(teamsTable.communityId, communityId), pagedMemberships ? undefined : inArray(teamMembersTable.userId, memberIds)))
+    .orderBy(asc(teamMembersTable.userId), asc(teamMembersTable.teamId));
   const [profiles, teamMemberships] = await Promise.all([
     memberIds.length ? db.select({
       userId: employeeProfilesTable.userId, employeeNumber: employeeProfilesTable.employeeNumber,
@@ -754,11 +799,7 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
       eq(employeeProfilesTable.communityId, communityId), inArray(employeeProfilesTable.userId, memberIds),
     )) : Promise.resolve([] as Array<Pick<typeof employeeProfilesTable.$inferSelect,
       "userId" | "employeeNumber" | "jobTitle" | "employmentStatus" | "departmentId" | "locationId" | "managerId" | "onboardedAt" | "offboardedAt">>),
-    memberIds.length ? db.select({
-      teamId: teamMembersTable.teamId, userId: teamMembersTable.userId, role: teamMembersTable.role,
-      status: teamMembersTable.status, joinedAt: teamMembersTable.joinedAt, endedAt: teamMembersTable.endedAt,
-    }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-      .where(and(eq(teamsTable.communityId, communityId), inArray(teamMembersTable.userId, memberIds))) : Promise.resolve([] as Array<typeof teamMembersTable.$inferSelect>),
+    pagedMemberships ? membershipQuery.limit(membershipPage.limit + 1).offset(membershipPage.offset) : memberIds.length ? membershipQuery : Promise.resolve([] as Array<typeof teamMembersTable.$inferSelect>),
   ]);
   const profilesById = new Map(profiles.map((profile) => [profile.userId, profile]));
   const snapshot = {
@@ -770,18 +811,19 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
         employeeNumber: profile?.employeeNumber ?? "", jobTitle: profile?.jobTitle ?? "",
         employmentStatus: profile?.employmentStatus ?? "active", departmentId: profile?.departmentId ?? null,
         locationId: profile?.locationId ?? null, managerId: profile?.managerId ?? null,
-        teamIds: teamMemberships.filter((item) => item.userId === member.id && item.status === "active").map((item) => item.teamId),
+        teamIds: teamMemberships.slice(0, pagedMemberships ? membershipPage.limit : undefined).filter((item) => item.userId === member.id && item.status === "active").map((item) => item.teamId),
         onboardedAt: profile?.onboardedAt ?? null, offboardedAt: profile?.offboardedAt ?? null,
         presenceStatus: member.status,
       };
     }),
-    teamMemberships,
+    teamMemberships: pagedMemberships ? teamMemberships.slice(0, membershipPage.limit) : teamMemberships,
     assignments: assignments.slice(0, assignmentsPage.limit).map((assignment) => ({ ...assignment, grantedBy: undefined })),
     departments: departments.slice(0, departmentsPage.limit),
     locations: locations.slice(0, locationsPage.limit),
     teams: teams.slice(0, teamsPage.limit),
     invitations: invitations.slice(0, invitationsPage.limit).map(safeInvitation),
     pagination: {
+      ...(pagedMemberships ? { teamMemberships: { ...membershipPage, hasMore: teamMemberships.length > membershipPage.limit } } : {}),
       employees: { ...employeesPage, hasMore: members.length > employeesPage.limit },
       invitations: { ...invitationsPage, hasMore: invitations.length > invitationsPage.limit },
       assignments: { ...assignmentsPage, hasMore: assignments.length > assignmentsPage.limit },
@@ -826,6 +868,8 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const departmentPage = pageParam(req, "departments");
   const locationPage = pageParam(req, "locations");
   const teamPage = pageParam(req, "teams");
+  const teamMembershipPage = pageParam(req, "teamMemberships");
+  const pageTeamMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined;
   const policyPage = pageParam(req, "policies");
   // Preserve the historic 20-item first announcement page.
   const announcementPage = {
@@ -939,6 +983,17 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     }).from(workspaceTaskAttachmentsTable)
       .innerJoin(workspaceTasksTable, eq(workspaceTasksTable.id, workspaceTaskAttachmentsTable.taskId))
        .where(selectedTaskIds.length ? inArray(workspaceTaskAttachmentsTable.taskId, selectedTaskIds) : sql`false`);
+  const teamMembershipsQuery = db.select({
+    teamId: teamMembersTable.teamId,
+    userId: teamMembersTable.userId,
+    role: teamMembersTable.role,
+    status: teamMembersTable.status,
+    joinedAt: teamMembersTable.joinedAt,
+    endedAt: teamMembersTable.endedAt,
+  }).from(teamMembersTable)
+    .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+    .where(and(eq(teamsTable.communityId, community.id), pageTeamMemberships ? undefined : inArray(teamMembersTable.userId, selectedMemberIds)))
+    .orderBy(asc(teamMembersTable.userId), asc(teamMembersTable.teamId));
   const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
      Promise.resolve(pagedMembers),
     db.select().from(channelsTable).where(channelVisibility).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
@@ -991,16 +1046,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
      Promise.resolve(pagedTasks),
     taskCommentsQuery,
     taskAttachmentsQuery,
-    db.select({
-      teamId: teamMembersTable.teamId,
-      userId: teamMembersTable.userId,
-      role: teamMembersTable.role,
-      status: teamMembersTable.status,
-      joinedAt: teamMembersTable.joinedAt,
-      endedAt: teamMembersTable.endedAt,
-    }).from(teamMembersTable)
-      .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-       .where(and(eq(teamsTable.communityId, community.id), inArray(teamMembersTable.userId, selectedMemberIds))),
+    pageTeamMemberships ? teamMembershipsQuery.limit(teamMembershipPage.limit + 1).offset(teamMembershipPage.offset) : teamMembershipsQuery,
      returnedAnnouncementIds.length ? db.select({
       announcementId: announcementReadReceiptsTable.announcementId,
       userId: announcementReadReceiptsTable.userId,
@@ -1034,7 +1080,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const canManageOrganization = await requireOrganizationManager(userId, community.id);
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
   const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
-  for (const membership of teamMemberships) {
+  for (const membership of teamMemberships.slice(0, pageTeamMemberships ? teamMembershipPage.limit : undefined)) {
     const existing = teamMembershipsByUserId.get(membership.userId) ?? [];
     existing.push(membership);
     teamMembershipsByUserId.set(membership.userId, existing);
@@ -1089,8 +1135,9 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     canManage,
     canManageOrganization,
     isOwner: community.ownerId === userId,
-    teamMemberships,
+    teamMemberships: pageTeamMemberships ? teamMemberships.slice(0, teamMembershipPage.limit) : teamMemberships,
      pagination: {
+       ...(pageTeamMemberships ? { teamMemberships: { ...teamMembershipPage, hasMore: teamMemberships.length > teamMembershipPage.limit } } : {}),
        employees: { limit: employeePage.limit, offset: employeePage.offset, hasMore: members.length > employeePage.limit },
        invitations: { limit: invitationPage.limit, offset: invitationPage.offset, hasMore: invitations.length > invitationPage.limit },
        tasks: { limit: taskPage.limit, offset: taskPage.offset, hasMore: tasks.length > taskPage.limit },
@@ -2657,12 +2704,21 @@ router.get("/communities/:communityId/documents", requireAuth, async (req: Authe
       .limit(documentPage.limit + 1).offset(documentPage.offset),
   ]);
   const documentIds = documents.slice(0, documentPage.limit).map((document) => document.id);
-  const [versions, acknowledgements, acknowledgementCounts, downloadCounts, permissions] = await Promise.all([
-    documentIds.length ? db.select().from(documentVersionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId)).where(inArray(documentVersionsTable.documentId, documentIds)).orderBy(desc(documentVersionsTable.version)) : Promise.resolve([] as Array<{ irc_document_versions: typeof documentVersionsTable.$inferSelect; irc_business_documents: typeof businessDocumentsTable.$inferSelect }>),
+  const childSummary = req.query.children === "summary";
+  const [versions, acknowledgements, acknowledgementCounts, downloadCounts, permissions, versionCounts, permissionCounts] = await Promise.all([
+    documentIds.length ? db.select().from(documentVersionsTable).innerJoin(businessDocumentsTable, eq(businessDocumentsTable.id, documentVersionsTable.documentId)).where(and(
+      inArray(documentVersionsTable.documentId, documentIds),
+      childSummary ? sql`${documentVersionsTable.version} = (select max(v.version) from irc_document_versions v where v.document_id = ${documentVersionsTable.documentId})` : undefined,
+    )).orderBy(desc(documentVersionsTable.version)) : Promise.resolve([] as Array<{ irc_document_versions: typeof documentVersionsTable.$inferSelect; irc_business_documents: typeof businessDocumentsTable.$inferSelect }>),
     documentIds.length ? db.select().from(documentAcknowledgementsTable).where(and(inArray(documentAcknowledgementsTable.documentId, documentIds), eq(documentAcknowledgementsTable.userId, userId))) : Promise.resolve([] as Array<typeof documentAcknowledgementsTable.$inferSelect>),
     documentIds.length ? db.select({ documentId: documentAcknowledgementsTable.documentId, total: count() }).from(documentAcknowledgementsTable).where(inArray(documentAcknowledgementsTable.documentId, documentIds)).groupBy(documentAcknowledgementsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
     documentIds.length ? db.select({ documentId: documentDownloadsTable.documentId, total: count() }).from(documentDownloadsTable).where(inArray(documentDownloadsTable.documentId, documentIds)).groupBy(documentDownloadsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
-    documentIds.length ? db.select().from(documentPermissionsTable).where(inArray(documentPermissionsTable.documentId, documentIds)) : Promise.resolve([] as Array<typeof documentPermissionsTable.$inferSelect>),
+    documentIds.length && manager ? db.select().from(documentPermissionsTable).where(and(
+      inArray(documentPermissionsTable.documentId, documentIds),
+      childSummary ? sql`${documentPermissionsTable.userId} = (select min(p.user_id) from irc_document_permissions p where p.document_id = ${documentPermissionsTable.documentId})` : undefined,
+    )) : Promise.resolve([] as Array<typeof documentPermissionsTable.$inferSelect>),
+    documentIds.length && childSummary ? db.select({ documentId: documentVersionsTable.documentId, total: count() }).from(documentVersionsTable).where(inArray(documentVersionsTable.documentId, documentIds)).groupBy(documentVersionsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
+    documentIds.length && childSummary && manager ? db.select({ documentId: documentPermissionsTable.documentId, total: count() }).from(documentPermissionsTable).where(inArray(documentPermissionsTable.documentId, documentIds)).groupBy(documentPermissionsTable.documentId) : Promise.resolve([] as Array<{ documentId: number; total: number }>),
   ]);
   const permissionsByDocument = new Map<number, Array<{ userId: string; permission: string }>>();
   permissions.forEach((permission) => {
@@ -2681,6 +2737,10 @@ router.get("/communities/:communityId/documents", requireAuth, async (req: Authe
       acknowledgementCount: acknowledgementCountByDocument.get(document.id) ?? 0,
       downloadCount: downloadCountByDocument.get(document.id) ?? 0,
       permissions: manager ? permissionsByDocument.get(document.id) ?? [] : undefined,
+      ...(childSummary ? { childrenPagination: {
+        versions: { limit: 1, offset: 0, hasMore: Number(versionCounts.find((row) => row.documentId === document.id)?.total ?? 0) > 1 },
+        permissions: { limit: 1, offset: 0, hasMore: manager && Number(permissionCounts.find((row) => row.documentId === document.id)?.total ?? 0) > 1 },
+      } } : {}),
     })),
     canManage: manager,
      pagination: {
@@ -2690,6 +2750,40 @@ router.get("/communities/:communityId/documents", requireAuth, async (req: Authe
      },
      foldersPagination: { limit: folderPage.limit, offset: folderPage.offset, hasMore: folders.length > folderPage.limit },
   });
+});
+
+router.get("/communities/:communityId/documents/:documentId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const documentId = Number(param(req, "documentId"));
+  if (!Number.isSafeInteger(communityId) || !Number.isSafeInteger(documentId) || !(await canAccessBusiness(userId, communityId))) {
+    res.status(404).json({ error: "Document not found." }); return;
+  }
+  const document = await documentForUser(documentId, communityId, userId);
+  if (!document) {
+    res.status(404).json({ error: "Document not found." }); return;
+  }
+  if (!validPageQuery(req, ["versions", "permissions"])) {
+    res.status(400).json({ error: "Invalid child pagination." }); return;
+  }
+  const manager = await communityPermission(userId, communityId, "manage_community");
+  const paged = ["versionsLimit", "versionsOffset", "permissionsLimit", "permissionsOffset"].some((key) => req.query[key] !== undefined);
+  const versionsPage = pageParam(req, "versions");
+  const permissionsPage = pageParam(req, "permissions");
+  const versionsQuery = db.select().from(documentVersionsTable).where(eq(documentVersionsTable.documentId, documentId))
+    .orderBy(desc(documentVersionsTable.version), desc(documentVersionsTable.id));
+  const permissionsQuery = db.select().from(documentPermissionsTable).where(eq(documentPermissionsTable.documentId, documentId))
+    .orderBy(asc(documentPermissionsTable.userId));
+  const [versions, permissions] = await Promise.all([
+    paged ? versionsQuery.limit(versionsPage.limit + 1).offset(versionsPage.offset) : versionsQuery,
+    manager ? paged ? permissionsQuery.limit(permissionsPage.limit + 1).offset(permissionsPage.offset) : permissionsQuery : Promise.resolve([]),
+  ]);
+  res.json({ ...document, versions: paged ? versions.slice(0, versionsPage.limit) : versions,
+    permissions: manager ? paged ? permissions.slice(0, permissionsPage.limit) : permissions : undefined,
+    ...(paged ? { childrenPagination: {
+      versions: { ...versionsPage, hasMore: versions.length > versionsPage.limit },
+      permissions: { ...permissionsPage, hasMore: manager && permissions.length > permissionsPage.limit },
+    } } : {}) });
 });
 
 router.post("/communities/:communityId/document-folders", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
