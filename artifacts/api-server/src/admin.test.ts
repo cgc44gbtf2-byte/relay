@@ -965,6 +965,38 @@ describe("admin access controls", () => {
     assert.deepEqual(afterRows, beforeRows);
   });
 
+  test("cannot regain IRC access by requesting a token after session revocation", async () => {
+    const revokedSession = await createTestSession("revoked_replacement_token");
+    const profile = await apiRequest(revokedSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+
+    await revokeTestSession(revokedSession);
+    await new Promise((resolve) => setTimeout(resolve, SESSION_STATUS_CACHE_TTL_MS + 25));
+
+    const tokenResult = await withClerkRateLimitRetry(
+      () => clerkClient.sessions.getToken(revokedSession.sessionId),
+    ).then(
+      (token) => ({ kind: "issued" as const, jwt: token.jwt }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+
+    if (tokenResult.kind === "rejected") {
+      const status = tokenResult.error && typeof tokenResult.error === "object" &&
+          "status" in tokenResult.error
+        ? tokenResult.error.status
+        : undefined;
+      assert.ok(
+        typeof status === "number" && status >= 400 && status < 500 && status !== 429,
+        "Clerk should explicitly reject token requests for a revoked session",
+      );
+      return;
+    }
+
+    const response = await apiRequestWithToken(tokenResult.jwt, "/me");
+    assert.equal(response.status, 401, JSON.stringify(response));
+    assert.deepEqual(response.body, { error: "Sign in to continue" });
+  });
+
   test("keeps one IRC profile available to a refreshed sibling session after revoking another session", async () => {
     const revokedSession = await createTestSession("revoked_scoped");
     const activeSession = await createSessionForUser(revokedSession.userId);
