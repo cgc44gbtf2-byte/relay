@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
+    branches:
+      - development
   pull_request:
+    branches:
+      - development
   schedule:
     - cron: "0 */6 * * *"
 
@@ -33,6 +37,9 @@ jobs:
 
       - name: Run release validation (typecheck, tests, builds, licenses)
         run: pnpm run release:validate
+
+      - name: Build all workspace packages
+        run: pnpm run build
 
   validate-scheduled-cleanup:
     runs-on: ubuntu-latest
