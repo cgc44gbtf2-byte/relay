@@ -741,6 +741,27 @@ activityStartDate?: string;
 activityEndDate?: string;
 };
 
+export type ExportAdminActivityParams = {
+/**
+ * @maxLength 200
+ */
+activityActor?: string;
+/**
+ * @maxLength 200
+ */
+activityAction?: string;
+/**
+ * Inclusive UTC calendar date for the earliest activity to export; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityStartDate?: string;
+/**
+ * Inclusive UTC calendar date for the latest activity to export; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityEndDate?: string;
+};
+
 export type ListAdminUsersParams = {
 /**
  * Number of records to return.

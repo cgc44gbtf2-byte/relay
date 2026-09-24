@@ -30,6 +30,7 @@ import type {
   CustomRoleInput,
   DocumentListResponse,
   ErrorResponse,
+  ExportAdminActivityParams,
   GetAdminOverviewParams,
   GetCommunityWorkspaceParams,
   GetIrcStateParams,
@@ -1713,6 +1714,90 @@ export function useCheckAdminActivity<TData = Awaited<ReturnType<typeof checkAdm
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getCheckAdminActivityQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getExportAdminActivityUrl = (params?: ExportAdminActivityParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/admin/activity/export?${stringifiedParams}` : `/api/admin/activity/export`
+}
+
+/**
+ * @summary Download all matching administrative activity as CSV
+ */
+export const exportAdminActivity = async (params?: ExportAdminActivityParams, options?: Parameters<typeof customFetch>[1]): Promise<string> => {
+
+  return customFetch<string>(getExportAdminActivityUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getExportAdminActivityQueryKey = (params?: ExportAdminActivityParams,) => {
+    return [
+    `/api/admin/activity/export`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getExportAdminActivityQueryOptions = <TData = Awaited<ReturnType<typeof exportAdminActivity>>, TError = ErrorType<ErrorResponse>>(params?: ExportAdminActivityParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof exportAdminActivity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getExportAdminActivityQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof exportAdminActivity>>> = ({ signal }) => exportAdminActivity(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof exportAdminActivity>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ExportAdminActivityQueryResult = NonNullable<Awaited<ReturnType<typeof exportAdminActivity>>>
+export type ExportAdminActivityQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Download all matching administrative activity as CSV
+ */
+
+export function useExportAdminActivity<TData = Awaited<ReturnType<typeof exportAdminActivity>>, TError = ErrorType<ErrorResponse>>(
+ params?: ExportAdminActivityParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof exportAdminActivity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getExportAdminActivityQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

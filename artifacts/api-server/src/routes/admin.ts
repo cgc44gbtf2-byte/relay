@@ -99,6 +99,67 @@ function parseActivityDate(value: unknown): string | undefined | null {
   return date.toISOString().slice(0, 10) === value ? value : null;
 }
 
+type AdminActivityFilters = {
+  actor: string;
+  action: string;
+  startDate: string | undefined;
+  endDate: string | undefined;
+};
+
+function parseAdminActivityFilters(
+  query: AuthenticatedRequest["query"],
+): { filters: AdminActivityFilters } | { error: string } {
+  const actor = parseActivityFilter(query.activityActor);
+  const action = parseActivityFilter(query.activityAction);
+  const startDate = parseActivityDate(query.activityStartDate);
+  const endDate = parseActivityDate(query.activityEndDate);
+  if (actor === null || action === null) {
+    return { error: "Activity filters must be 200 characters or fewer." };
+  }
+  if (startDate === null || endDate === null) {
+    return { error: "Activity dates must be valid YYYY-MM-DD calendar dates." };
+  }
+  if (startDate && endDate && startDate > endDate) {
+    return { error: "Activity start date must be on or before the end date." };
+  }
+  return { filters: { actor, action, startDate, endDate } };
+}
+
+function adminActivityFilterConditions({ actor, action, startDate, endDate }: AdminActivityFilters) {
+  return and(
+    actor ? ilike(adminAuditLogsTable.actorDisplayName, `%${escapeLikePattern(actor)}%`) : undefined,
+    action ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(action)}%`) : undefined,
+    startDate
+      ? sql`${adminAuditLogsTable.createdAt} >= (${startDate}::date::timestamp AT TIME ZONE 'UTC')`
+      : undefined,
+    endDate
+      ? sql`${adminAuditLogsTable.createdAt} < ((${endDate}::date + 1)::timestamp AT TIME ZONE 'UTC')`
+      : undefined,
+  );
+}
+
+function csvCell(value: string | number | Date | null): string {
+  const text = value instanceof Date ? value.toISOString() : String(value ?? "");
+  const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safeText.replaceAll('"', '""')}"`;
+}
+
+async function writeCsvChunk(res: import("express").Response, chunk: string): Promise<boolean> {
+  if (res.destroyed) return false;
+  if (res.write(chunk)) return true;
+  return new Promise((resolve) => {
+    const finish = (drained: boolean) => {
+      res.off("drain", onDrain);
+      res.off("close", onClose);
+      resolve(drained);
+    };
+    const onDrain = () => finish(true);
+    const onClose = () => finish(false);
+    res.once("drain", onDrain);
+    res.once("close", onClose);
+  });
+}
+
 function parseActivityCursor(value: unknown): ActivityCursor | null | false {
   if (value === undefined) return null;
   if (
@@ -235,22 +296,12 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   }
 
   const effectiveActivityOffset = activityCursor || activityAfterCursor ? 0 : activityOffset;
-  const activityActor = parseActivityFilter(req.query.activityActor);
-  const activityAction = parseActivityFilter(req.query.activityAction);
-  const activityStartDate = parseActivityDate(req.query.activityStartDate);
-  const activityEndDate = parseActivityDate(req.query.activityEndDate);
-  if (activityActor === null || activityAction === null) {
-    res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
+  const parsedFilters = parseAdminActivityFilters(req.query);
+  if ("error" in parsedFilters) {
+    res.status(400).json({ error: parsedFilters.error });
     return;
   }
-  if (activityStartDate === null || activityEndDate === null) {
-    res.status(400).json({ error: "Activity dates must be valid YYYY-MM-DD calendar dates." });
-    return;
-  }
-  if (activityStartDate && activityEndDate && activityStartDate > activityEndDate) {
-    res.status(400).json({ error: "Activity start date must be on or before the end date." });
-    return;
-  }
+  const activityFilters = parsedFilters.filters;
   const [
     [userStats],
     [channelCount],
@@ -344,18 +395,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       })
       .from(adminAuditLogsTable)
       .where(and(
-        activityActor
-          ? ilike(adminAuditLogsTable.actorDisplayName, `%${escapeLikePattern(activityActor)}%`)
-          : undefined,
-        activityAction
-          ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(activityAction)}%`)
-          : undefined,
-        activityStartDate
-          ? sql`${adminAuditLogsTable.createdAt} >= (${activityStartDate}::date::timestamp AT TIME ZONE 'UTC')`
-          : undefined,
-        activityEndDate
-          ? sql`${adminAuditLogsTable.createdAt} < ((${activityEndDate}::date + 1)::timestamp AT TIME ZONE 'UTC')`
-          : undefined,
+        adminActivityFilterConditions(activityFilters),
         activityCursor
           ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${activityCursor.createdAt}::timestamptz, ${activityCursor.id})`
           : undefined,
@@ -415,6 +455,84 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   });
 });
 
+router.get("/admin/activity/export", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+  const parsedFilters = parseAdminActivityFilters(req.query);
+  if ("error" in parsedFilters) {
+    res.status(400).json({ error: parsedFilters.error });
+    return;
+  }
+
+  const columns = ["id", "actor_id", "actor", "action", "target_id", "target_label", "details", "created_at"];
+  const batchSize = 500;
+  let cursor: ActivityCursor | null = null;
+  let sentHeader = false;
+  res
+    .status(200)
+    .type("text/csv")
+    .set("Content-Disposition", 'attachment; filename="relay-activity.csv"')
+    .set("Cache-Control", "no-store");
+  while (true) {
+    const activity: Array<{
+      id: number;
+      actorId: string | null;
+      actor: string | null;
+      action: string;
+      targetId: string | null;
+      targetLabel: string | null;
+      details: string | null;
+      createdAt: Date;
+      cursorCreatedAt: string;
+    }> = await db
+      .select({
+        id: adminAuditLogsTable.id,
+        actorId: adminAuditLogsTable.actorId,
+        actor: adminAuditLogsTable.actorDisplayName,
+        action: adminAuditLogsTable.action,
+        targetId: adminAuditLogsTable.targetId,
+        targetLabel: adminAuditLogsTable.targetLabel,
+        details: adminAuditLogsTable.details,
+        createdAt: adminAuditLogsTable.createdAt,
+        cursorCreatedAt: sql<string>`to_char(${adminAuditLogsTable.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(adminAuditLogsTable)
+      .where(and(
+        adminActivityFilterConditions(parsedFilters.filters),
+        cursor
+          ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id})`
+          : undefined,
+      ))
+      .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
+      .limit(batchSize);
+
+    if (!sentHeader) {
+      const header = `${columns.map((column) => csvCell(column)).join(",")}\r\n`;
+      if (!(await writeCsvChunk(res, header))) return;
+      sentHeader = true;
+    }
+    if (activity.length === 0) break;
+    const rows = activity.map((entry) => [
+      entry.id,
+      entry.actorId,
+      entry.actor,
+      entry.action,
+      entry.targetId,
+      entry.targetLabel,
+      entry.details,
+      entry.createdAt,
+    ].map(csvCell).join(",")).join("\r\n") + "\r\n";
+    if (!(await writeCsvChunk(res, rows))) return;
+    if (activity.length < batchSize) break;
+    const lastEntry = activity[activity.length - 1];
+    if (!lastEntry) break;
+    cursor = { createdAt: lastEntry.cursorCreatedAt, id: lastEntry.id };
+  }
+  res.end();
+});
+
 router.get("/admin/activity/check", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   if (!(await adminProfile(req))) {
     res.status(403).json({ error: "Admin access required." });
@@ -422,24 +540,13 @@ router.get("/admin/activity/check", requireAuth, async (req: AuthenticatedReques
   }
 
   const activityAfterCursor = parseActivityCursor(req.query.activityAfterCursor);
-  const activityActor = parseActivityFilter(req.query.activityActor);
-  const activityAction = parseActivityFilter(req.query.activityAction);
-  const activityStartDate = parseActivityDate(req.query.activityStartDate);
-  const activityEndDate = parseActivityDate(req.query.activityEndDate);
   if (activityAfterCursor === false) {
     res.status(400).json({ error: "Invalid activity cursor." });
     return;
   }
-  if (activityActor === null || activityAction === null) {
-    res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
-    return;
-  }
-  if (activityStartDate === null || activityEndDate === null) {
-    res.status(400).json({ error: "Activity dates must be valid YYYY-MM-DD calendar dates." });
-    return;
-  }
-  if (activityStartDate && activityEndDate && activityStartDate > activityEndDate) {
-    res.status(400).json({ error: "Activity start date must be on or before the end date." });
+  const parsedFilters = parseAdminActivityFilters(req.query);
+  if ("error" in parsedFilters) {
+    res.status(400).json({ error: parsedFilters.error });
     return;
   }
 
@@ -447,18 +554,7 @@ router.get("/admin/activity/check", requireAuth, async (req: AuthenticatedReques
     .select({ id: adminAuditLogsTable.id })
     .from(adminAuditLogsTable)
     .where(and(
-      activityActor
-        ? ilike(adminAuditLogsTable.actorDisplayName, `%${escapeLikePattern(activityActor)}%`)
-        : undefined,
-      activityAction
-        ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(activityAction)}%`)
-        : undefined,
-      activityStartDate
-        ? sql`${adminAuditLogsTable.createdAt} >= (${activityStartDate}::date::timestamp AT TIME ZONE 'UTC')`
-        : undefined,
-      activityEndDate
-        ? sql`${adminAuditLogsTable.createdAt} < ((${activityEndDate}::date + 1)::timestamp AT TIME ZONE 'UTC')`
-        : undefined,
+      adminActivityFilterConditions(parsedFilters.filters),
       activityAfterCursor
         ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) > (${activityAfterCursor.createdAt}::timestamptz, ${activityAfterCursor.id})`
         : undefined,

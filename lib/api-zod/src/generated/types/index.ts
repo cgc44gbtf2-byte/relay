@@ -46,6 +46,7 @@ export * from './documentListResponse';
 export * from './documentListResponseDocumentsItem';
 export * from './documentListResponseFoldersItem';
 export * from './errorResponse';
+export * from './exportAdminActivityParams';
 export * from './getAdminOverviewParams';
 export * from './getCommunityWorkspaceParams';
 export * from './getIrcStateParams';

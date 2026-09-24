@@ -805,6 +805,27 @@ export const CheckAdminActivityResponse = zod.object({
 
 
 /**
+ * @summary Download all matching administrative activity as CSV
+ */
+export const exportAdminActivityQueryActivityActorMax = 200;
+
+export const exportAdminActivityQueryActivityActionMax = 200;
+
+export const exportAdminActivityQueryActivityStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const exportAdminActivityQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
+export const ExportAdminActivityQueryParams = zod.object({
+  "activityActor": zod.coerce.string().max(exportAdminActivityQueryActivityActorMax).optional(),
+  "activityAction": zod.coerce.string().max(exportAdminActivityQueryActivityActionMax).optional(),
+  "activityStartDate": zod.coerce.string().regex(exportAdminActivityQueryActivityStartDateRegExp).optional().describe('Inclusive UTC calendar date for the earliest activity to export; must be YYYY-MM-DD.'),
+  "activityEndDate": zod.coerce.string().regex(exportAdminActivityQueryActivityEndDateRegExp).optional().describe('Inclusive UTC calendar date for the latest activity to export; must be YYYY-MM-DD.')
+})
+
+export const ExportAdminActivityResponse = zod.unknown()
+
+
+/**
  * @summary List admin-visible users
  */
 export const listAdminUsersQueryLimitDefault = 50;

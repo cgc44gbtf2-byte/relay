@@ -957,6 +957,7 @@ describe("admin access controls", () => {
       ["/admin/claim", { method: "POST" }],
       ["/admin/health"],
       ["/admin/overview"],
+      ["/admin/activity/export"],
       ["/admin/users"],
       [
         `/admin/users/${firstSession.userId}/role`,
@@ -2671,6 +2672,106 @@ describe("admin access controls", () => {
         const invalidResponse = await apiRequest(adminSession, invalidPath);
         assert.equal(invalidResponse.status, 400, JSON.stringify(invalidResponse));
       }
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
+  test("exports every event matching the validated activity filters", async () => {
+    const marker = `audit_export_${randomUUID().replaceAll("-", "")}`;
+    const matchingCount = 55;
+    const fixtures = Array.from({ length: matchingCount }, (_, index) => ({
+      actor: `${marker} Alpha`,
+      action: `${marker}_change`,
+      target: `${marker}_target_${index}`,
+      label: `${marker} target ${index}`,
+      details: index === 0 ? "=1+1" : index === 1 ? 'quoted, detail "with quotes"' : `detail ${index}`,
+      createdAt: `2026-04-02T12:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    }));
+    fixtures.push(
+      {
+        actor: `${marker} Alpha`,
+        action: `${marker}_change`,
+        target: `${marker}_outside_date`,
+        label: `${marker} outside date`,
+        details: "outside the selected date range",
+        createdAt: "2026-04-03T00:00:00.000Z",
+      },
+      {
+        actor: `${marker} Beta`,
+        action: `${marker}_change`,
+        target: `${marker}_other_actor`,
+        label: `${marker} other actor`,
+        details: "actor does not match",
+        createdAt: "2026-04-02T12:00:00.000Z",
+      },
+      {
+        actor: `${marker} Alpha`,
+        action: `${marker}_other`,
+        target: `${marker}_other_action`,
+        label: `${marker} other action`,
+        details: "action does not match",
+        createdAt: "2026-04-02T12:00:00.000Z",
+      },
+    );
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (const fixture of fixtures) {
+      const offset = parameters.length;
+      values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`);
+      parameters.push(
+        adminSession.userId,
+        fixture.actor,
+        fixture.action,
+        fixture.target,
+        fixture.label,
+        fixture.details,
+        fixture.createdAt,
+      );
+    }
+
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+       VALUES ${values.join(", ")}
+       RETURNING id`,
+      parameters,
+    );
+    const matchingIds = inserted.rows.slice(0, matchingCount).map(({ id }) => String(id));
+
+    try {
+      const query = new URLSearchParams({
+        activityActor: `${marker} Alpha`,
+        activityAction: `${marker}_change`,
+        activityStartDate: "2026-04-02",
+        activityEndDate: "2026-04-02",
+      });
+      const response = await apiRequest(adminSession, `/admin/activity/export?${query}`);
+      assert.equal(response.status, 200, JSON.stringify(response));
+      assert.equal(typeof response.body, "string");
+      const csv = response.body as string;
+      const rows = csv.split("\r\n");
+      assert.equal(rows.length, matchingCount + 1);
+      assert.equal(rows[0], '"id","actor_id","actor","action","target_id","target_label","details","created_at"');
+      const exportedIds = rows.slice(1).map((row) => row.slice(1, row.indexOf('","')));
+      assert.deepEqual(new Set(exportedIds), new Set(matchingIds));
+      assert.ok(csv.includes('"\'=1+1"'), "formula-like details should be safe to open in a spreadsheet");
+      assert.ok(csv.includes('"quoted, detail ""with quotes"""'), "CSV values should escape commas and quotes");
+
+      const invalidDate = await apiRequest(
+        adminSession,
+        "/admin/activity/export?activityStartDate=2026-04-03&activityEndDate=2026-04-02",
+      );
+      assert.equal(invalidDate.status, 400, JSON.stringify(invalidDate));
+      const oversizedActor = await apiRequest(
+        adminSession,
+        `/admin/activity/export?activityActor=${"x".repeat(201)}`,
+      );
+      assert.equal(oversizedActor.status, 400, JSON.stringify(oversizedActor));
+      const denied = await apiRequest(memberSession, `/admin/activity/export?${query}`);
+      assert.equal(denied.status, 403, JSON.stringify(denied));
     } finally {
       await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
         `${marker}%`,

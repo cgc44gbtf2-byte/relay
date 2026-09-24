@@ -1897,6 +1897,13 @@ describe("admin activity date filters", () => {
 
   it("requests activity with date, actor, and action filters and clears all filters", async () => {
     const overviewRequests: string[] = [];
+    const exportRequests: string[] = [];
+    const mockUrl = Object.assign(class extends window.URL {}, {
+      createObjectURL: vi.fn(() => "blob:admin-activity"),
+      revokeObjectURL: vi.fn(),
+    });
+    vi.stubGlobal("URL", mockUrl);
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/admin/status") {
@@ -1921,6 +1928,12 @@ describe("admin activity date filters", () => {
       if (url === "/api/admin/health") {
         return jsonResponse({ api: "ok", database: "ok", checkedAt: "2026-09-21T12:00:00.000Z" });
       }
+      if (url.startsWith("/api/admin/activity/export")) {
+        exportRequests.push(url);
+        return Promise.resolve(new Response('"id","actor_id"\r\n"1","user-1"', {
+          headers: { "content-type": "text/csv" },
+        }));
+      }
       return jsonResponse({ error: "Unexpected request" }, 404);
     }));
     window.history.pushState({}, "", "/admin");
@@ -1935,10 +1948,19 @@ describe("admin activity date filters", () => {
     const filteredPath = "/api/admin/overview?activityActor=Alpha&activityAction=change&activityStartDate=2026-04-01&activityEndDate=2026-04-03";
     await waitFor(() => expect(overviewRequests).toContain(filteredPath));
 
+    fireEvent.click(screen.getByTestId("button-export-admin-activity"));
+    await waitFor(() => expect(exportRequests).toContain(
+      "/api/admin/activity/export?activityActor=Alpha&activityAction=change&activityStartDate=2026-04-01&activityEndDate=2026-04-03",
+    ));
+    expect(mockUrl.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Activity history downloaded.")).toBeTruthy();
+
     fireEvent.click(screen.getByTestId("button-clear-activity-filters"));
     await waitFor(() => expect(overviewRequests).toContain("/api/admin/overview"));
     expect((screen.getByTestId("input-activity-start-date") as HTMLInputElement).value).toBe("");
     expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
+    anchorClick.mockRestore();
   });
 });
 

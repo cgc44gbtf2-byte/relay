@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Clock3,
   Database,
+  Download,
   Hash,
   LayoutDashboard,
   LogOut,
@@ -2027,6 +2028,7 @@ function AdminConsole() {
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
   const [loadingNewerActivity, setLoadingNewerActivity] = useState(false);
+  const [exportingActivity, setExportingActivity] = useState(false);
   const [newActivityAvailable, setNewActivityAvailable] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -2301,6 +2303,41 @@ function AdminConsole() {
       setLoadingNewerActivity(false);
     }
   };
+  const exportActivity = async () => {
+    const params = new URLSearchParams();
+    if (activityActorFilter.trim()) params.set("activityActor", activityActorFilter.trim());
+    if (activityActionFilter.trim()) params.set("activityAction", activityActionFilter.trim());
+    if (activityStartDateFilter) params.set("activityStartDate", activityStartDateFilter);
+    if (activityEndDateFilter) params.set("activityEndDate", activityEndDateFilter);
+    setError("");
+    setExportingActivity(true);
+    try {
+      const query = params.toString();
+      const response = await fetch(`/api/admin/activity/export${query ? `?${query}` : ""}`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: unknown } | null;
+        throw new ApiError(
+          typeof payload?.error === "string" ? payload.error : "Could not download activity history",
+          response.status,
+        );
+      }
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `relay-activity-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+      setNotice("Activity history downloaded.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not download activity history");
+    } finally {
+      setExportingActivity(false);
+    }
+  };
   const accounts = (directoryLoaded ? directory : overview?.users ?? []).filter((account) => { const q = query.trim().toLowerCase(); return (!q || account.username.toLowerCase().includes(q) || account.displayName.toLowerCase().includes(q)) && (roleFilter === "all" || account.role === roleFilter) && (statusFilter === "all" || account.status === statusFilter) && (accountStatusFilter === "all" || account.accountStatus === accountStatusFilter); });
   const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "overview", LayoutDashboard], ["accounts", "accounts", Users], ["channels", "channels", Hash], ["roles", "scoped roles", Shield], ["activity", "activity", Activity], ["upgrades", "upgrades", CheckCircle2], ["system", "system status", Server]];
   const title = nav.find(([key]) => key === section)?.[1] ?? "overview";
@@ -2403,6 +2440,16 @@ function AdminConsole() {
                        >
                          {loadingNewerActivity ? "checking activity…" : newActivityAvailable ? overview.activityPagination.newerHasMore ? "load more new activity" : "load new activity" : overview.activityPagination.newerHasMore ? "load more new activity" : "check for new activity"}
                        </button>}
+                       <button
+                         type="button"
+                         disabled={exportingActivity}
+                         onClick={() => void exportActivity()}
+                         className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50"
+                         data-testid="button-export-admin-activity"
+                       >
+                         <Download className="h-3.5 w-3.5" />
+                         {exportingActivity ? "preparing csv…" : "download csv"}
+                       </button>
                        <Activity className="h-4 w-4 text-primary" />
                      </div>
                   </div>
