@@ -11037,6 +11037,111 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back a document version and timestamp when its audit insert fails", async () => {
+    assert.ok(
+      process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL,
+      "Audit rollback tests require only a dedicated TEST_DATABASE_URL, not the development database.",
+    );
+    const owner = await createTestSession("document_version_audit_owner");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const triggerName = `fail_document_version_audit_${suffix}`;
+    const functionName = `fail_document_version_audit_fn_${suffix}`;
+    let communityId: number | undefined;
+    let triggerCreated = false;
+    let functionCreated = false;
+    try {
+      assert.equal((await apiRequest(owner, "/me")).status, 200);
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+        ["Document audit rollback", `document-audit-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0].id;
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'owner')",
+        [communityId, owner.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_owner', 'community', $2, $1)`,
+        [owner.userId, communityId],
+      );
+      const initialTimestamp = new Date("2024-01-01T00:00:00.000Z");
+      const document = await pool.query<{ id: number; updated_at: Date }>(
+        `INSERT INTO irc_business_documents
+           (community_id, title, description, category, visibility, owner_id, updated_at)
+         VALUES ($1, 'Audit rollback fixture', '', 'company', 'company', $2, $3)
+         RETURNING id, updated_at`,
+        [communityId, owner.userId, initialTimestamp],
+      );
+      const documentId = document.rows[0].id;
+      await pool.query(
+        `INSERT INTO irc_document_versions
+           (document_id, version, object_path, file_name, content_type, file_size, uploaded_by)
+         VALUES ($1, 1, $2, 'initial.txt', 'text/plain', 1, $3)`,
+        [documentId, `/objects/uploads/${randomUUID()}`, owner.userId],
+      );
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'uploaded_document_version' AND NEW.community_id = ${communityId} THEN
+             RAISE EXCEPTION 'forced document version audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      functionCreated = true;
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      triggerCreated = true;
+
+      const response = await apiRequest(owner, `/communities/${communityId}/documents/${documentId}/versions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          objectPath: `/objects/uploads/${randomUUID()}`,
+          fileName: "retry.txt",
+          contentType: "text/plain",
+          fileSize: 1,
+        }),
+      });
+      assert.equal(response.status, 500, JSON.stringify(response));
+      const [versions, unchangedDocument, audits] = await Promise.all([
+        pool.query<{ version: number }>(
+          "SELECT version FROM irc_document_versions WHERE document_id = $1 ORDER BY version", [documentId],
+        ),
+        pool.query<{ updated_at: Date }>(
+          "SELECT updated_at FROM irc_business_documents WHERE id = $1", [documentId],
+        ),
+        pool.query(
+          `SELECT id FROM irc_admin_audit_logs
+           WHERE community_id = $1 AND action = 'uploaded_document_version'`, [communityId],
+        ),
+      ]);
+      assert.deepEqual(versions.rows.map(({ version }) => version), [1]);
+      assert.equal(unchangedDocument.rows[0].updated_at.getTime(), initialTimestamp.getTime());
+      assert.deepEqual(audits.rows, []);
+    } finally {
+      try {
+        if (triggerCreated) {
+          await pool.query(`DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs`);
+        }
+        if (functionCreated) {
+          await pool.query(`DROP FUNCTION "${functionName}"()`);
+        }
+      } finally {
+        if (communityId !== undefined) {
+          await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+        }
+      }
+    }
+  });
+
   test("allocates distinct sequential document versions for simultaneous uploads", async () => {
     assert.ok(
       process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL,

@@ -2665,7 +2665,7 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
-  const version = await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const [lockedDocument] = await tx.select({ id: businessDocumentsTable.id }).from(businessDocumentsTable)
       .where(and(
         eq(businessDocumentsTable.id, documentId),
@@ -2688,14 +2688,19 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
     }).returning();
     await tx.update(businessDocumentsTable).set({ updatedAt: new Date() })
       .where(eq(businessDocumentsTable.id, documentId));
-    return inserted;
+    const audit = { details: `${document.title} v${inserted.version}` };
+    await insertCommunityAudit(tx, userId, "uploaded_document_version", communityId, audit);
+    const notifications = await insertCommunityAuditNotifications(
+      tx, userId, "uploaded_document_version", communityId, audit,
+    );
+    return { version: inserted, notifications };
   });
-  if (!version) {
+  if (!result) {
     res.status(404).json({ error: "Document not found." });
     return;
   }
-  await writeCommunityAudit(userId, "uploaded_document_version", communityId, `${document.title} v${version.version}`);
-  res.status(201).json(version);
+  broadcastNotifications(result.notifications);
+  res.status(201).json(result.version);
 });
 
 router.post("/communities/:communityId/documents/:documentId/acknowledge", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
