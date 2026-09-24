@@ -8,10 +8,11 @@ checklist, not a production-readiness sign-off.
 - PostgreSQL 16: the most recent complete authenticated CI run passed 120/120
   integration tests, migration rehearsal, fresh-schema bootstrap, strict no-op
   validation, and scheduled test-user cleanup.
-- PostgreSQL 14.18 and 15.13: each passed all 30 database-script compatibility
-  tests, including real schema bootstrap, disposable database isolation, and
-  cleanup. These are the CI compatibility-matrix tests, not the full authenticated
-  API suite on these two versions.
+- PostgreSQL 14.18, 15.13 and 16.10: each passed all 30 database-script
+  compatibility tests with no skips. The matrix now executes the reviewed
+  migration chain, migration no-op check, forced-failure rollback, fresh-schema
+  bootstrap, strict schema no-op check, isolation and cleanup on each version.
+  Authenticated API execution is deliberately stubbed in this compatibility job.
 - The subsequent scoped WebSocket invalidation change passed API typechecking
   and 32/32 API unit tests. The full authenticated suite was not rerun for that
   change.

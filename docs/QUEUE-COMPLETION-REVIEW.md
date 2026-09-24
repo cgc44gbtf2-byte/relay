@@ -1,5 +1,9 @@
 # Queue completion review — 2026-09-24
 
+Follow-up: migration-matrix work completed after the review below. Task #157
+is now an additional verified-complete removal candidate; its entry is updated.
+The original ten-candidate review and its counts below describe the earlier snapshot.
+
 Reviewed all 56 active/ready/draft items. Ten are verified complete against the main workspace and recorded prior test runs. Task states were NOT changed: available task controls allow description edits, but not removal/archive of arbitrary existing tasks. Ten completed-task descriptions now contain verification notes. Other task descriptions were left untouched.
 
 No application code, production data, or isolated task-agent work was changed. No new tests were run for this review; recorded successful executions and current regression code were inspected.
@@ -105,7 +109,7 @@ OPEN. `package.json:19` has guarded `release:start`, but `.replit` has no deploy
 
 ### #157 — Confirm release migrations work on every supported PostgreSQL version
 
-PARTIAL. PostgreSQL 14.18 and 15.13 passed 30/30 database script checks, but the real-schema compatibility test deliberately skips migration rehearsal/no-op commands. Full reviewed SQL chain, second-run no-op and forced rollback on both versions remain outstanding.
+COMPLETE. The compatibility test now runs real migration rehearsal, migration no-op and forced rollback, plus current-schema bootstrap and strict no-op checks. PostgreSQL 14.18, 15.13 and 16.10 each passed 30/30 checks with no skips; cleanup confirmed zero remaining temporary databases. Authenticated API calls remain deliberately stubbed in this matrix.
 
 ### #158 — Remove the migration rehearsal's dependency on repository history
 
