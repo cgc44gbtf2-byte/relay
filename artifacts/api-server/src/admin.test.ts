@@ -4690,10 +4690,13 @@ describe("admin access controls", () => {
     }
   });
 
-  test("reports exact community dashboard statistics from database aggregates", async () => {
+  test("keeps community dashboard statistics accurate as workspace state changes", async () => {
     const ownerSession = await createTestSession("dashboard_owner");
     const workerSession = await createTestSession("dashboard_worker");
     let communityId: number | null = null;
+    let otherCommunityId: number | null = null;
+    const communityActivityMarker = `dashboard_activity_${randomUUID()}`;
+    const otherActivityMarker = `dashboard_activity_other_${randomUUID()}`;
 
     try {
       const workerProfile = await apiRequest(workerSession, "/me");
@@ -4712,10 +4715,22 @@ describe("admin access controls", () => {
       communityId = (community.body as { id?: unknown }).id as number;
       assert.equal(typeof communityId, "number");
 
+      const otherCommunity = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Other dashboard ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(otherCommunity.status, 201, JSON.stringify(otherCommunity));
+      otherCommunityId = (otherCommunity.body as { id?: unknown }).id as number;
+      assert.equal(typeof otherCommunityId, "number");
+
       await pool.query(
         `UPDATE irc_users SET status = CASE
            WHEN clerk_id = $1 THEN 'online'
-           WHEN clerk_id = $2 THEN 'offline'
+           WHEN clerk_id = $2 THEN 'online'
            ELSE status
          END
          WHERE clerk_id IN ($1, $2)`,
@@ -4736,20 +4751,23 @@ describe("admin access controls", () => {
       assert.equal(channelIds.length, 3);
 
       const now = Date.now();
+      const weekMs = 7 * 24 * 60 * 60 * 1000;
       await pool.query(
         `INSERT INTO irc_workspace_tasks
            (community_id, title, status, due_date, created_by)
          VALUES
            ($1, 'Open without due date', 'todo', NULL, $2),
-           ($1, 'Due this week', 'in_progress', $3, $2),
+           ($1, 'Due near end of week', 'in_progress', $3, $2),
            ($1, 'Overdue', 'todo', $4, $2),
+           ($1, 'Beyond this week', 'todo', $5, $2),
            ($1, 'Completed future task', 'completed', $3, $2),
            ($1, 'Cancelled overdue task', 'cancelled', $4, $2)`,
         [
           communityId,
           ownerSession.userId,
-          new Date(now + 2 * 24 * 60 * 60 * 1000),
-          new Date(now - 24 * 60 * 60 * 1000),
+          new Date(now + weekMs - 5 * 60 * 1000),
+          new Date(now - 5 * 60 * 1000),
+          new Date(now + weekMs + 5 * 60 * 1000),
         ],
       );
       await pool.query(
@@ -4773,6 +4791,20 @@ describe("admin access controls", () => {
          VALUES ($1, $3, 'pending'), ($2, $3, 'approved')`,
         [channelIds[0], channelIds[1], workerSession.userId],
       );
+      await pool.query(
+        `INSERT INTO irc_admin_audit_logs
+           (actor_id, actor_display_name, community_id, action, details, created_at)
+         VALUES
+           ($1, 'Dashboard test', $2, 'dashboard_test_activity', $3, now()),
+           ($1, 'Dashboard test', $4, 'dashboard_test_activity', $5, now() + interval '1 second')`,
+        [
+          ownerSession.userId,
+          communityId,
+          communityActivityMarker,
+          otherCommunityId,
+          otherActivityMarker,
+        ],
+      );
 
       const dashboard = await apiRequest(
         ownerSession,
@@ -4781,35 +4813,109 @@ describe("admin access controls", () => {
       assert.equal(dashboard.status, 200, JSON.stringify(dashboard));
       assert.ok(dashboard.body && typeof dashboard.body === "object");
       const body = dashboard.body as {
-        stats?: unknown;
-        tasks?: unknown;
-        recentActivity?: unknown;
+        stats?: {
+          employees?: number;
+          online?: number;
+          channels?: number;
+          openTasks?: number;
+          announcements?: number;
+          pendingRequests?: number;
+        };
+        tasks?: { open?: number; dueThisWeek?: number; overdue?: number };
+        recentActivity?: Array<{ details?: unknown }>;
       };
       assert.deepEqual(body.stats, {
         employees: 2,
-        online: 1,
+        online: 2,
         channels: 3,
-        openTasks: 3,
+        openTasks: 4,
         announcements: 2,
         pendingRequests: 1,
       });
       assert.deepEqual(body.tasks, {
-        open: 3,
+        open: 4,
         dueThisWeek: 1,
         overdue: 1,
       });
       assert.ok(Array.isArray(body.recentActivity));
+      assert.ok(
+        body.recentActivity.some(({ details }) => details === communityActivityMarker),
+        "the dashboard includes activity from its own workspace",
+      );
+      assert.ok(
+        body.recentActivity.every(({ details }) => details !== otherActivityMarker),
+        "the dashboard excludes activity from another workspace",
+      );
+
+      await pool.query("UPDATE irc_users SET status = 'offline' WHERE clerk_id = $1", [
+        workerSession.userId,
+      ]);
+      await pool.query(
+        `UPDATE irc_workspace_tasks
+         SET status = 'completed', completed_at = now()
+         WHERE community_id = $1 AND title = 'Due near end of week'`,
+        [communityId],
+      );
+      await pool.query(
+        `UPDATE irc_workspace_tasks
+         SET due_date = now() - interval '1 minute'
+         WHERE community_id = $1 AND title = 'Open without due date'`,
+        [communityId],
+      );
+      await pool.query(
+        `UPDATE irc_server_announcements
+         SET expires_at = now() - interval '1 minute'
+         WHERE community_id = $1 AND body = 'Current scheduled'`,
+        [communityId],
+      );
+      await pool.query(
+        `UPDATE irc_channel_join_requests
+         SET status = 'approved', reviewed_at = now(), reviewed_by = $3
+         WHERE channel_id = $1 AND user_id = $2 AND status = 'pending'`,
+        [channelIds[0], workerSession.userId, ownerSession.userId],
+      );
+
+      const updatedDashboard = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/dashboard`,
+      );
+      assert.equal(updatedDashboard.status, 200, JSON.stringify(updatedDashboard));
+      assert.ok(updatedDashboard.body && typeof updatedDashboard.body === "object");
+      const updatedBody = updatedDashboard.body as {
+        stats?: unknown;
+        tasks?: unknown;
+      };
+      assert.deepEqual(updatedBody.stats, {
+        employees: 2,
+        online: 1,
+        channels: 3,
+        openTasks: 3,
+        announcements: 1,
+        pendingRequests: 0,
+      });
+      assert.deepEqual(updatedBody.tasks, {
+        open: 3,
+        dueThisWeek: 0,
+        overdue: 2,
+      });
     } finally {
-      if (communityId !== null) {
+      await pool.query(
+        "DELETE FROM irc_admin_audit_logs WHERE details = ANY($1::text[])",
+        [[communityActivityMarker, otherActivityMarker]],
+      );
+      const communityIds = [communityId, otherCommunityId].filter(
+        (id): id is number => id !== null,
+      );
+      if (communityIds.length) {
         await pool.query(
           `DELETE FROM irc_channel_join_requests
            WHERE channel_id IN (
-             SELECT id FROM irc_channels WHERE community_id = $1
+             SELECT id FROM irc_channels WHERE community_id = ANY($1::int[])
            )`,
-          [communityId],
+          [communityIds],
         );
-        await pool.query("DELETE FROM irc_communities WHERE id = $1", [
-          communityId,
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [
+          communityIds,
         ]);
       }
     }
