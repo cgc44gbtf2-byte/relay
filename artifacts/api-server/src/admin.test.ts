@@ -4593,6 +4593,111 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps private workspace list query counts bounded as communities and scoped roles grow", async (t) => {
+    const session = await createTestSession("workspace_scale");
+    const adminSession = await createTestSession("workspace_scale_admin");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const communityIds: number[] = [];
+    const customRoles: string[] = [];
+    const expected: Array<{ id: number; joined: boolean; canManage: boolean }> = [];
+
+    try {
+      assert.equal((await apiRequest(session, "/me")).status, 200);
+      assert.equal((await apiRequest(adminSession, "/me")).status, 200);
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId]);
+      assert.equal((await apiRequest(adminSession, "/permissions/catalog")).status, 200);
+
+      const growTo = async (size: number): Promise<void> => {
+        while (communityIds.length < size) {
+          const index = communityIds.length;
+          // Repeat all access paths at each size, including inaccessible workspaces.
+          const kind = index % 6;
+          const { rows: [community] } = await pool.query<{ id: number }>(
+            `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+             VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+            [`Scale ${suffix} ${index}`, `scale-${suffix}-${index}`, adminSession.userId],
+          );
+          communityIds.push(community.id);
+          if (kind === 1) {
+            await pool.query(
+              `INSERT INTO irc_community_members (community_id, user_id, status)
+               VALUES ($1, $2, 'member')`,
+              [community.id, session.userId],
+            );
+          } else if (kind >= 2) {
+            let role = kind === 2 ? "workspace_owner" : "workspace_admin";
+            if (kind >= 4) {
+              // Distinct custom roles grow the permission join as well as assignments.
+              role = `scale_${suffix}_${index}`;
+              customRoles.push(role);
+              await pool.query(
+                `INSERT INTO irc_custom_roles (key, label, scope_type, created_by)
+                 VALUES ($1, $1, 'community', $2)`,
+                [role, adminSession.userId],
+              );
+              const inserted = await pool.query(
+                `INSERT INTO irc_role_permissions (role, permission_id)
+                 SELECT $1, id FROM irc_permission_definitions WHERE key = $2`,
+                [role, kind === 4 ? "view_business" : "manage_community"],
+              );
+              assert.equal(inserted.rowCount, 1);
+            }
+            await pool.query(
+              `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+               VALUES ($1, $2, 'community', $3, $4)`,
+              [session.userId, role, community.id, adminSession.userId],
+            );
+          }
+          if (kind !== 0) {
+            expected.push({
+              id: community.id,
+              joined: kind === 1,
+              canManage: kind === 2 || kind === 3 || kind === 5,
+            });
+          }
+        }
+      };
+
+      const measureList = async (): Promise<number> => {
+        // Call through to PostgreSQL; count only the request, never fixture SQL.
+        const querySpy = mock.method(pool, "query");
+        let listed: ApiResponse;
+        let count: number;
+        try {
+          listed = await apiRequest(session, "/communities");
+          count = querySpy.mock.callCount();
+        } finally {
+          querySpy.mock.restore();
+        }
+        assert.equal(listed.status, 200, JSON.stringify(listed));
+        assert.ok(Array.isArray(listed.body));
+        const actual = (listed.body as typeof expected)
+          .filter(({ id }) => communityIds.includes(id))
+          .map(({ id, joined, canManage }) => ({ id, joined, canManage }))
+          .sort((a, b) => a.id - b.id);
+        assert.deepEqual(actual, [...expected].sort((a, b) => a.id - b.id));
+        assert.ok(count > 0, "The query counter must observe real database queries.");
+        // Allows fixed authentication/profile overhead, but not even one query per workspace.
+        assert.ok(count <= 12, `Workspace list exceeded its fixed query budget: ${count}`);
+        return count;
+      };
+
+      await growTo(12);
+      // Finish profile/auth bootstrap before either measured request.
+      assert.equal((await apiRequest(session, "/communities")).status, 200);
+      const smallCount = await measureList();
+      await growTo(120);
+      const largeCount = await measureList();
+      assert.equal(largeCount, smallCount, "Ten times as many workspaces and scoped roles must not add queries.");
+      t.diagnostic(`Workspace list queries: 12 workspaces=${smallCount}, 120 workspaces=${largeCount}`);
+    } finally {
+      await pool.query("DELETE FROM irc_user_roles WHERE user_id = $1", [session.userId]);
+      await pool.query("DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])", [customRoles]);
+      await pool.query("DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])", [customRoles]);
+      await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+    }
+  });
+
   test("rolls back custom-role creation when audit logging fails", async () => {
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const label = `Audit Failure ${suffix}`;
