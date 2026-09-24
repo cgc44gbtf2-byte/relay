@@ -997,7 +997,7 @@ describe("admin access controls", () => {
     assert.deepEqual(response.body, { error: "Sign in to continue" });
   });
 
-  test("keeps one IRC profile available to a refreshed sibling session after revoking another session", async () => {
+  test("keeps a refreshed sibling session active for username and profile updates when another session is revoked", async () => {
     const revokedSession = await createTestSession("revoked_scoped");
     const activeSession = await createSessionForUser(revokedSession.userId);
     const initialProfile = await apiRequest(revokedSession, "/me");
@@ -1010,22 +1010,31 @@ describe("admin access controls", () => {
     await revokeTestSession(revokedSession);
     await new Promise((resolve) => setTimeout(resolve, SESSION_STATUS_CACHE_TTL_MS + 25));
 
+    const revokedUsername = `revoked_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const revokedResponse = await apiRequestWithToken(revokedToken.jwt, "/me", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "Revoked session update" }),
+      body: JSON.stringify({
+        username: revokedUsername,
+        displayName: "Revoked session update",
+      }),
     });
     assert.equal(revokedResponse.status, 401, JSON.stringify(revokedResponse));
     assert.deepEqual(revokedResponse.body, { error: "Sign in to continue" });
 
+    const activeUsername = `active_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const activeDisplayName = `Active sibling ${randomUUID().slice(0, 8)}`;
     const activeResponse = await apiRequestWithToken(activeToken.jwt, "/me", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: activeDisplayName }),
+      body: JSON.stringify({ username: activeUsername, displayName: activeDisplayName }),
     });
     assert.equal(activeResponse.status, 200, JSON.stringify(activeResponse));
     assert.ok(activeResponse.body && typeof activeResponse.body === "object");
+    assert.equal(
+      (activeResponse.body as { username?: unknown }).username,
+      activeUsername,
+    );
     assert.equal(
       (activeResponse.body as { displayName?: unknown }).displayName,
       activeDisplayName,
@@ -1041,6 +1050,10 @@ describe("admin access controls", () => {
     assert.equal(
       (refreshedActiveResponse.body as { id?: unknown }).id,
       revokedSession.userId,
+    );
+    assert.equal(
+      (refreshedActiveResponse.body as { username?: unknown }).username,
+      activeUsername,
     );
     assert.equal(
       (refreshedActiveResponse.body as { displayName?: unknown }).displayName,
