@@ -290,6 +290,27 @@ function waitForWebSocketEvent(
   });
 }
 
+async function waitForChannelSubscription(socket: WebSocket, channelId: number): Promise<void> {
+  const marker = randomUUID();
+  const receivedProbe = waitForWebSocketEvent(
+    socket,
+    (event) => event.type === "channel_subscription_probe" && event.marker === marker,
+  );
+  const sendProbe = (): void => {
+    wsHub.broadcastChannel(channelId, {
+      type: "channel_subscription_probe",
+      marker,
+    });
+  };
+  const probeInterval = setInterval(sendProbe, 25);
+  sendProbe();
+  try {
+    await receivedProbe;
+  } finally {
+    clearInterval(probeInterval);
+  }
+}
+
 function expectNoWebSocketEvent(
   socket: WebSocket,
   predicate: (event: Record<string, unknown>) => boolean,
@@ -3158,6 +3179,95 @@ describe("admin access controls", () => {
         [channelIds.map(String)],
       );
       await removeTestChannels(channelIds);
+    }
+  });
+
+  test("broadcasts admin topic edits only to subscribers of that channel", async () => {
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const createdChannels = await Promise.all([
+        apiRequest(adminSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `live-topic-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            topic: "Original target topic",
+          }),
+        }),
+        apiRequest(adminSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `live-other-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            topic: "Unrelated channel topic",
+          }),
+        }),
+      ]);
+      for (const created of createdChannels) {
+        assert.equal(created.status, 201, JSON.stringify(created));
+        assert.ok(created.body && typeof created.body === "object");
+        const channelId = (created.body as { id?: unknown }).id;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId as number);
+      }
+      const [targetChannelId, unrelatedChannelId] = channelIds;
+
+      const [targetSocket, unrelatedSocket] = await Promise.all([
+        openWebSocket(adminSession),
+        openWebSocket(adminSession),
+      ]);
+      sockets.push(targetSocket, unrelatedSocket);
+      targetSocket.send(JSON.stringify({ type: "subscribe", channelId: targetChannelId }));
+      unrelatedSocket.send(JSON.stringify({ type: "subscribe", channelId: unrelatedChannelId }));
+      await Promise.all([
+        waitForChannelSubscription(targetSocket, targetChannelId),
+        waitForChannelSubscription(unrelatedSocket, unrelatedChannelId),
+      ]);
+
+      const liveTopicUpdate = waitForWebSocketEvent(
+        targetSocket,
+        (event) => {
+          if (event.type !== "channel" || !event.channel || typeof event.channel !== "object") {
+            return false;
+          }
+          const channel = event.channel as { id?: unknown };
+          return channel.id === targetChannelId;
+        },
+      );
+      const blockedUnrelatedUpdate = expectNoWebSocketEvent(
+        unrelatedSocket,
+        (event) => {
+          if (event.type !== "channel" || !event.channel || typeof event.channel !== "object") {
+            return false;
+          }
+          const channel = event.channel as { id?: unknown };
+          return channel.id === targetChannelId;
+        },
+      );
+
+      const topicUpdate = await apiRequest(
+        adminSession,
+        `/admin/channels/${targetChannelId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Admin updated live topic" }),
+        },
+      );
+      assert.equal(topicUpdate.status, 200, JSON.stringify(topicUpdate));
+
+      const event = await liveTopicUpdate;
+      assert.ok(event.channel && typeof event.channel === "object");
+      const updatedChannel = event.channel as { id?: unknown; topic?: unknown };
+      assert.equal(updatedChannel.id, targetChannelId);
+      assert.equal(updatedChannel.topic, "Admin updated live topic");
+      await blockedUnrelatedUpdate;
+      assert.equal(targetSocket.readyState, WebSocket.OPEN);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [adminSession.userId]);
     }
   });
 
