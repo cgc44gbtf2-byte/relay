@@ -55,6 +55,8 @@ import { WorkspaceIndicator } from "./components/workspace-indicator";
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
+import { invitationDeliveryMessage, type InvitationResponse } from "./lib/invitation-delivery";
+
 function workspaceInvitationUrl(communityId: number, token: string): string {
   const query = new URLSearchParams({ communityId: String(communityId), token });
   return `${window.location.origin}${basePath}/accept-invitation?${query.toString()}`;
@@ -3196,8 +3198,10 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
   const createInvitation = async (event: FormEvent) => {
     event.preventDefault();
     setWorking(true);
+    setError("");
+    setNotice("");
     try {
-      const created = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations`, {
+      const created = await api<InvitationResponse>(`/communities/${detail.community.id}/invitations`, {
         method: "POST",
         body: JSON.stringify({
           email: inviteEmail,
@@ -3209,7 +3213,8 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
       });
       setInviteToken(workspaceInvitationUrl(detail.community.id, created.invitationToken));
       setInviteEmail("");
-      setNotice("Invitation created. Share the private invitation link with the employee.");
+      if (created.emailDelivery?.status === "failed") setError(invitationDeliveryMessage(created));
+      else setNotice(invitationDeliveryMessage(created));
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create employee invitation");
@@ -3219,10 +3224,13 @@ export function OrganizationPanel({ detail, working, setWorking, setNotice, setE
   };
   const resendInvitation = async (invitationId: number) => {
     setWorking(true);
+    setError("");
+    setNotice("");
     try {
-      const resent = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations/${invitationId}/resend`, { method: "POST", body: "{}" });
+      const resent = await api<InvitationResponse>(`/communities/${detail.community.id}/invitations/${invitationId}/resend`, { method: "POST", body: "{}" });
       setInviteToken(workspaceInvitationUrl(detail.community.id, resent.invitationToken));
-      setNotice("Invitation renewed. Share the new private invitation link with the employee.");
+      if (resent.emailDelivery?.status === "failed") setError(invitationDeliveryMessage(resent));
+      else setNotice(invitationDeliveryMessage(resent));
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not resend invitation");
@@ -3706,7 +3714,7 @@ function OnboardingPage() {
   const [contactPhone, setContactPhone] = useState("");
   const [inviteEmails, setInviteEmails] = useState("");
   const [inviteRole, setInviteRole] = useState("employee");
-  const [inviteTokens, setInviteTokens] = useState<Array<{ email: string; token: string }>>([]);
+  const [inviteTokens, setInviteTokens] = useState<Array<{ email: string; token: string; deliveryMessage: string }>>([]);
 
   const refresh = async () => {
     const next = await api<OnboardingState>("/onboarding");
@@ -3791,7 +3799,7 @@ function OnboardingPage() {
   const invitePeople = async (event: FormEvent) => {
     event.preventDefault();
     if (!community) return;
-    const emails = inviteEmails.split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter(Boolean);
+    const emails = [...new Set(inviteEmails.split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter(Boolean))];
     if (emails.length === 0) {
       await finishOnboarding();
       return;
@@ -3799,15 +3807,19 @@ function OnboardingPage() {
     setWorking(true);
     setError("");
     try {
-      const created: Array<{ email: string; token: string }> = [];
-      for (const email of emails) {
-        const invitation = await api<{ invitationToken: string }>(`/communities/${community.id}/invitations`, {
+      for (const [index, email] of emails.entries()) {
+        const invitation = await api<InvitationResponse>(`/communities/${community.id}/invitations`, {
           method: "POST",
           body: JSON.stringify({ email, role: inviteRole }),
         });
-        created.push({ email, token: workspaceInvitationUrl(community.id, invitation.invitationToken) });
+        const created = {
+          email,
+          token: workspaceInvitationUrl(community.id, invitation.invitationToken),
+          deliveryMessage: invitationDeliveryMessage(invitation),
+        };
+        setInviteTokens((current) => [...current.filter((item) => item.email !== email), created]);
+        setInviteEmails(emails.slice(index + 1).join("\n"));
       }
-      setInviteTokens(created);
       setInviteEmails("");
       await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
       setNotice("Invitations created. Share each private invitation link with its recipient.");
@@ -3821,7 +3833,7 @@ function OnboardingPage() {
 
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">preparing your Relay setup…</div>;
   if (state?.nextStep === "start") {
-    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-8"><CheckCircle2 className="h-8 w-8 text-chart-4" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">setup complete</p><h1 className="mt-2 font-mono text-3xl font-bold">Your Relay is ready.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Your workspace has starter rooms and your first invitations are ready to share.</p>{inviteTokens.length > 0 && <div className="mt-6 space-y-2">{inviteTokens.map((item) => <div key={`${item.email}-${item.token}`} className="rounded-lg border border-border bg-background p-3 font-mono text-xs"><p className="text-muted-foreground">{item.email}</p><p className="mt-1 break-all text-primary">{item.token}</p></div>)}</div>}<button onClick={() => window.location.assign(`${basePath}/chat`)} className="mt-7 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground">start using Relay</button></div></div>;
+    return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-8"><CheckCircle2 className="h-8 w-8 text-chart-4" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">setup complete</p><h1 className="mt-2 font-mono text-3xl font-bold">Your Relay is ready.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Your workspace has starter rooms and your first invitations are ready to share.</p>{inviteTokens.length > 0 && <div className="mt-6 space-y-2">{inviteTokens.map((item) => <div key={`${item.email}-${item.token}`} className="rounded-lg border border-border bg-background p-3 font-mono text-xs"><p className="text-muted-foreground">{item.email}</p><p className="mt-1 text-muted-foreground">{item.deliveryMessage}</p><a href={item.token} className="mt-1 block break-all text-primary hover:underline">{item.token}</a></div>)}</div>}<button onClick={() => window.location.assign(`${basePath}/chat`)} className="mt-7 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground">start using Relay</button></div></div>;
   }
   const step = state?.nextStep ?? "create";
   return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10">
@@ -3833,7 +3845,7 @@ function OnboardingPage() {
        <CommunityUpgradePanel />
       {!community && <div className="mt-8 rounded-2xl border border-border bg-card p-6 font-mono text-sm text-muted-foreground">Preparing your free community…</div>}
       {community && step === "configure" && <form onSubmit={configureCommunity} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">step 02 / configure</p><h1 className="mt-2 font-mono text-3xl font-bold">Make it useful on day one.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Add the context people need before they join. You can change any of this later.</p><div className="mt-7 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace name</span><input required value={name} onChange={(event) => setName(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">description</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">services or focus</span><input value={services} onChange={(event) => setServices(event.target.value)} placeholder="Operations, design, support" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">service area</span><input value={serviceArea} onChange={(event) => setServiceArea(event.target.value)} placeholder="Chicago and suburbs" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">business hours</span><input value={businessHours} onChange={(event) => setBusinessHours(event.target.value)} placeholder="Mon–Fri, 8am–5pm" className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">contact email</span><input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} className="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" /></label></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">rules and expectations</span><textarea value={rules} onChange={(event) => setRules(event.target.value)} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label></div><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "saving…" : "save and invite people"}</button></form>}
-      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">optional / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter email addresses to create member invitations. You can also skip this and start using your free community right away.</p><label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create member invitations" : "skip and start using Relay"}</button></form>}
+      {community && step === "invite" && <form onSubmit={invitePeople} className="mt-8 rounded-2xl border border-border bg-card p-6 sm:p-8"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-primary">optional / invite</p><h1 className="mt-2 font-mono text-3xl font-bold">Bring your people in.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Enter email addresses to create member invitations. You can also skip this and start using your free community right away.</p>{inviteTokens.length > 0 && <div className="mt-6 space-y-2">{inviteTokens.map((item) => <div key={`${item.email}-${item.token}`} className="rounded-lg border border-border bg-background p-3 font-mono text-xs"><p className="text-muted-foreground">{item.email}</p><p className="mt-1 text-muted-foreground">{item.deliveryMessage}</p><a href={item.token} className="mt-1 block break-all text-primary hover:underline">{item.token}</a></div>)}</div>}<label className="mt-7 block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">email addresses</span><textarea value={inviteEmails} onChange={(event) => setInviteEmails(event.target.value)} placeholder="alex@example.com&#10;sam@example.com" className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs" /></label><button disabled={working} className="mt-6 w-full rounded-md bg-primary py-3 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "creating invitations…" : inviteEmails.trim() ? "create member invitations" : "skip and start using Relay"}</button></form>}
     </main>
   </div>;
 }

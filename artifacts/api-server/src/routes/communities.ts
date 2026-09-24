@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { clerkClient } from "@clerk/express";
 import { and, asc, count, desc, eq, exists, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
+import { sendInvitationEmail } from "../lib/invitation-email";
 import {
   blocksTable,
   adminAuditLogsTable,
@@ -1991,7 +1992,8 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     }).returning();
   await writeCommunityAudit(userId, "invited_workspace_employee", communityId, email);
-  res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken });
+  const emailDelivery = await sendInvitationEmail({ email, communityId, token: rawToken });
+  res.status(201).json({ ...invitation, tokenHash: undefined, invitationToken: rawToken, emailDelivery });
 });
 
 router.post("/communities/:communityId/invitations/accept", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -2293,7 +2295,8 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
     return;
   }
   await writeCommunityAudit(userId, "resent_workspace_invitation", communityId, resent.email);
-  res.json({ ...resent.invitation, tokenHash: undefined, invitationToken: rawToken });
+  const emailDelivery = await sendInvitationEmail({ email: resent.email, communityId, token: rawToken });
+  res.json({ ...resent.invitation, tokenHash: undefined, invitationToken: rawToken, emailDelivery });
 });
 
 router.post("/communities/:communityId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
