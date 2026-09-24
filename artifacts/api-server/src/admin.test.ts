@@ -6812,14 +6812,19 @@ describe("admin access controls", () => {
     }
   });
 
-  test("deletes categorized channels with moderation history atomically and rolls back on audit failure", async () => {
+  test("deletes every categorized channel and its dependencies, but preserves everything on denial or transaction failure", async () => {
     const ownerSession = await createTestSession("category_delete_atomic");
     const workspaceName = `Atomic delete ${randomUUID().slice(0, 8)}`;
     let communityId: number | null = null;
     let triggerName: string | null = null;
     let functionName: string | null = null;
+    let cleanupTriggerName: string | null = null;
+    let cleanupFunctionName: string | null = null;
+    const objectPaths: string[] = [];
     try {
       assert.equal((await apiRequest(ownerSession, "/me")).status, 200);
+      assert.equal((await apiRequest(firstSession, "/me")).status, 200);
+      assert.equal((await apiRequest(secondSession, "/me")).status, 200);
       const community = await apiRequest(ownerSession, "/communities", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -6828,7 +6833,7 @@ describe("admin access controls", () => {
       assert.equal(community.status, 201, JSON.stringify(community));
       communityId = (community.body as { id: number }).id;
 
-      const createCategoryWithChannel = async (label: string) => {
+      const createCategoryWithChannels = async (label: string) => {
         const category = await apiRequest(ownerSession, `/communities/${communityId}/categories`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -6837,48 +6842,128 @@ describe("admin access controls", () => {
         assert.equal(category.status, 201, JSON.stringify(category));
         const categoryId = (category.body as { id: number }).id;
         const categoryName = (category.body as { name: string }).name;
-        const channel = await apiRequest(ownerSession, `/communities/${communityId}/channels`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: `${label}-channel`, categoryId }),
-        });
-        assert.equal(channel.status, 201, JSON.stringify(channel));
-        const channelId = (channel.body as { id: number }).id;
-        const channelName = (channel.body as { name: string }).name;
-        await pool.query(
-          `INSERT INTO irc_moderation_actions
-             (actor_id, community_id, channel_id, action, details)
-           VALUES ($1, $2, $3, 'test_history', $4)`,
-          [ownerSession.userId, communityId, channelId, label],
-        );
-        return { categoryId, channelId, categoryName, channelName };
+        const channelIds: number[] = [];
+        const messageIds: string[] = [];
+        const joinRequestIds: number[] = [];
+        const paths: string[] = [];
+        for (let index = 0; index < 2; index++) {
+          const channel = await apiRequest(ownerSession, `/communities/${communityId}/channels`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: `${label}-${index}`, categoryId }),
+          });
+          assert.equal(channel.status, 201, JSON.stringify(channel));
+          const channelId = (channel.body as { id: number }).id;
+          channelIds.push(channelId);
+          const path = `/objects/category-delete/${randomUUID()}`;
+          paths.push(path);
+          objectPaths.push(path);
+          const message = await pool.query<{ id: string }>(
+            "INSERT INTO irc_messages (channel_id, sender_id, body) VALUES ($1, $2, $3) RETURNING id",
+            [channelId, ownerSession.userId, `Message ${index}`],
+          );
+          const messageId = message.rows[0].id;
+          messageIds.push(messageId);
+          const request = await pool.query<{ id: number }>(
+            "INSERT INTO irc_channel_join_requests (channel_id, user_id) VALUES ($1, $2) RETURNING id",
+            [channelId, secondSession.userId],
+          );
+          joinRequestIds.push(request.rows[0].id);
+          await pool.query(
+            `INSERT INTO irc_channel_invites (channel_id, user_id, invited_by) VALUES ($1, $2, $3)`,
+            [channelId, secondSession.userId, ownerSession.userId],
+          );
+          await pool.query(
+            `INSERT INTO irc_message_reactions (message_id, user_id, emoji) VALUES ($1, $2, '👍')`,
+            [messageId, secondSession.userId],
+          );
+          await pool.query(
+            `INSERT INTO irc_message_attachments (message_id, uploader_id, object_path, file_name, content_type, file_size)
+             VALUES ($1, $2, $3, 'test.txt', 'text/plain', 4)`,
+            [messageId, ownerSession.userId, path],
+          );
+          await pool.query(
+            `INSERT INTO irc_moderation_actions (actor_id, community_id, channel_id, action, details)
+             VALUES ($1, $2, $3, 'test_history', $4)`,
+            [ownerSession.userId, communityId, channelId, label],
+          );
+          await pool.query(
+            `INSERT INTO irc_notifications (user_id, type, category, body, entity_type, entity_id)
+             VALUES ($1, 'test', 'community', 'Channel notice', 'channel', $2),
+                    ($1, 'test', 'community', 'Request notice', 'channel_join_request', $3)`,
+            [secondSession.userId, String(channelId), String(request.rows[0].id)],
+          );
+        }
+        return { categoryId, categoryName, channelIds, messageIds, joinRequestIds, paths };
       };
 
-      const deletedFixture = await createCategoryWithChannel(`Delete ${randomUUID().slice(0, 8)}`);
-      const deleted = await apiRequest(
-        ownerSession,
-        `/communities/${communityId}/categories/${deletedFixture.categoryId}/with-channels`,
-        {
+      type Fixture = Awaited<ReturnType<typeof createCategoryWithChannels>>;
+      const snapshot = async (fixture: Fixture) => (await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM irc_categories WHERE id = $1) AS categories,
+           (SELECT count(*)::int FROM irc_channels WHERE id = ANY($2::int[]) AND category_id = $1) AS channels,
+           (SELECT count(*)::int FROM irc_messages WHERE id = ANY($3::uuid[])) AS messages,
+           (SELECT count(*)::int FROM irc_channel_members WHERE channel_id = ANY($2::int[])) AS memberships,
+           (SELECT count(*)::int FROM irc_channel_join_requests WHERE id = ANY($4::int[])) AS requests,
+           (SELECT count(*)::int FROM irc_channel_invites WHERE channel_id = ANY($2::int[])) AS invitations,
+           (SELECT count(*)::int FROM irc_message_reactions WHERE message_id = ANY($3::uuid[])) AS reactions,
+           (SELECT count(*)::int FROM irc_message_attachments WHERE message_id = ANY($3::uuid[])) AS attachments,
+           (SELECT count(*)::int FROM irc_moderation_actions WHERE channel_id = ANY($2::int[])) AS moderation,
+           (SELECT count(*)::int FROM irc_notifications
+             WHERE (entity_type = 'channel' AND entity_id = ANY($5::text[]))
+                OR (entity_type = 'channel_join_request' AND entity_id = ANY($6::text[]))) AS notifications,
+           (SELECT count(*)::int FROM irc_workspace_object_deletion_jobs WHERE object_path = ANY($7::text[])) AS jobs,
+           (SELECT count(*)::int FROM irc_admin_audit_logs
+             WHERE action = 'deleted_community_category_with_channels' AND target_id = $8) AS deletion_audits`,
+        [
+          fixture.categoryId, fixture.channelIds, fixture.messageIds, fixture.joinRequestIds,
+          fixture.channelIds.map(String), fixture.joinRequestIds.map(String), fixture.paths, String(communityId),
+        ],
+      )).rows[0] as Record<string, number>;
+      const deleteCategory = (session: TestSession, fixture: Fixture, confirmation: string) =>
+        apiRequest(session, `/communities/${communityId}/categories/${fixture.categoryId}/with-channels`, {
           method: "DELETE",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            confirmation: `DELETE CATEGORY ${deletedFixture.categoryName} AND CHANNELS FROM WORKSPACE ${workspaceName}`,
-          }),
-        },
-      );
-      assert.equal(deleted.status, 200, JSON.stringify(deleted));
-      assert.deepEqual(
-        (await pool.query(
-          `SELECT
-             (SELECT count(*)::int FROM irc_categories WHERE id = $1) AS categories,
-             (SELECT count(*)::int FROM irc_channels WHERE id = $2) AS channels,
-             (SELECT count(*)::int FROM irc_moderation_actions WHERE channel_id = $2) AS moderation`,
-          [deletedFixture.categoryId, deletedFixture.channelId],
-        )).rows,
-        [{ categories: 0, channels: 0, moderation: 0 }],
-      );
+          body: JSON.stringify({ confirmation }),
+        });
+      const confirmationFor = (fixture: Fixture) =>
+        `DELETE CATEGORY ${fixture.categoryName} AND CHANNELS FROM WORKSPACE ${workspaceName}`;
 
-      const rollbackFixture = await createCategoryWithChannel(`Rollback ${randomUUID().slice(0, 8)}`);
+      const deletedFixture = await createCategoryWithChannels(`Delete ${randomUUID().slice(0, 8)}`);
+      const beforeDeletion = await snapshot(deletedFixture);
+      assert.deepEqual(beforeDeletion, {
+        categories: 1, channels: 2, messages: 2, memberships: 2, requests: 2,
+        invitations: 2, reactions: 2, attachments: 2, moderation: 2,
+        notifications: 4, jobs: 0, deletion_audits: 0,
+      });
+      const wrongConfirmation = await deleteCategory(ownerSession, deletedFixture, "DELETE CATEGORY wrong");
+      assert.equal(wrongConfirmation.status, 400, JSON.stringify(wrongConfirmation));
+      assert.deepEqual(await snapshot(deletedFixture), beforeDeletion);
+      const notOwner = await deleteCategory(firstSession, deletedFixture, confirmationFor(deletedFixture));
+      assert.equal(notOwner.status, 403, JSON.stringify(notOwner));
+      assert.deepEqual(await snapshot(deletedFixture), beforeDeletion);
+
+      const deleted = await deleteCategory(ownerSession, deletedFixture, confirmationFor(deletedFixture));
+      assert.equal(deleted.status, 200, JSON.stringify(deleted));
+      assert.deepEqual(deleted.body, {
+        ok: true, categoryId: deletedFixture.categoryId, deletedChannelCount: 2,
+        cleanupPending: true, cleanupPendingCount: 2,
+      });
+      assert.deepEqual(await snapshot(deletedFixture), {
+        categories: 0, channels: 0, messages: 0, memberships: 0, requests: 0,
+        invitations: 0, reactions: 0, attachments: 0, moderation: 0,
+        notifications: 0, jobs: 2, deletion_audits: 1,
+      });
+      const jobs = await pool.query<{ object_path: string; status: string; context: string }>(
+        "SELECT object_path, status, context FROM irc_workspace_object_deletion_jobs WHERE object_path = ANY($1::text[]) ORDER BY object_path",
+        [deletedFixture.paths],
+      );
+      assert.deepEqual(jobs.rows, deletedFixture.paths.sort().map((path) => ({
+        object_path: path, status: "pending", context: `category:${deletedFixture.categoryId}`,
+      })));
+
+      const rollbackFixture = await createCategoryWithChannels(`Rollback ${randomUUID().slice(0, 8)}`);
+      const beforeFailure = await snapshot(rollbackFixture);
       triggerName = `fail_destructive_audit_${randomUUID().replaceAll("-", "")}`;
       functionName = `${triggerName}_fn`;
       await pool.query(
@@ -6898,41 +6983,44 @@ describe("admin access controls", () => {
          BEFORE INSERT ON irc_admin_audit_logs
          FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
       );
-      const failed = await apiRequest(
-        ownerSession,
-        `/communities/${communityId}/categories/${rollbackFixture.categoryId}/with-channels`,
-        {
-          method: "DELETE",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            confirmation: `DELETE CATEGORY ${rollbackFixture.categoryName} AND CHANNELS FROM WORKSPACE ${workspaceName}`,
-          }),
-        },
-      );
+       const failed = await deleteCategory(ownerSession, rollbackFixture, confirmationFor(rollbackFixture));
       assert.equal(failed.status, 500, JSON.stringify(failed));
-      const failedChannel = await apiRequest(
-        ownerSession,
-        `/communities/${communityId}/channels/${rollbackFixture.channelId}`,
-        {
-          method: "DELETE",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            confirmation: `DELETE CHANNEL ${rollbackFixture.channelName} FROM WORKSPACE ${workspaceName}`,
-          }),
-        },
-      );
-      assert.equal(failedChannel.status, 500, JSON.stringify(failedChannel));
-      assert.deepEqual(
-        (await pool.query(
-          `SELECT
-             (SELECT count(*)::int FROM irc_categories WHERE id = $1) AS categories,
-             (SELECT count(*)::int FROM irc_channels WHERE id = $2) AS channels,
-             (SELECT count(*)::int FROM irc_moderation_actions WHERE channel_id = $2) AS moderation`,
-          [rollbackFixture.categoryId, rollbackFixture.channelId],
-        )).rows,
-        [{ categories: 1, channels: 1, moderation: 1 }],
-      );
+       assert.deepEqual(await snapshot(rollbackFixture), beforeFailure);
+       await pool.query(
+         `DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs;
+          DROP FUNCTION "${functionName}"();`,
+       );
+       triggerName = null;
+       functionName = null;
+
+       const cleanupFixture = await createCategoryWithChannels(`Cleanup ${randomUUID().slice(0, 8)}`);
+       const beforeCleanupFailure = await snapshot(cleanupFixture);
+       cleanupTriggerName = `fail_category_cleanup_${randomUUID().replaceAll("-", "")}`;
+       cleanupFunctionName = `${cleanupTriggerName}_fn`;
+       await pool.query(
+         `CREATE FUNCTION "${cleanupFunctionName}"() RETURNS trigger
+          LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NEW.context = 'category:${cleanupFixture.categoryId}' THEN
+              RAISE EXCEPTION 'forced cleanup enqueue failure';
+            END IF;
+            RETURN NEW;
+          END;
+          $$;
+          CREATE TRIGGER "${cleanupTriggerName}"
+          BEFORE INSERT ON irc_workspace_object_deletion_jobs
+          FOR EACH ROW EXECUTE FUNCTION "${cleanupFunctionName}"();`,
+       );
+       const cleanupFailed = await deleteCategory(ownerSession, cleanupFixture, confirmationFor(cleanupFixture));
+       assert.equal(cleanupFailed.status, 500, JSON.stringify(cleanupFailed));
+       assert.deepEqual(await snapshot(cleanupFixture), beforeCleanupFailure);
     } finally {
+      if (cleanupTriggerName && cleanupFunctionName) {
+        await pool.query(
+          `DROP TRIGGER IF EXISTS "${cleanupTriggerName}" ON irc_workspace_object_deletion_jobs;
+           DROP FUNCTION IF EXISTS "${cleanupFunctionName}"();`,
+        );
+      }
       if (triggerName && functionName) {
         await pool.query(
           `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
@@ -6941,6 +7029,9 @@ describe("admin access controls", () => {
       }
       if (communityId !== null) {
         await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+      if (objectPaths.length) {
+        await pool.query("DELETE FROM irc_workspace_object_deletion_jobs WHERE object_path = ANY($1::text[])", [objectPaths]);
       }
     }
   });
