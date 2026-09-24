@@ -77,8 +77,36 @@ schema fixture from immediately before the first reviewed migration, applies
 every reviewed file, performs a real ledger no-op check, and runs a synthetic
 failing migration to confirm PostgreSQL rollback leaves both the schema and
 ledger consistent.
+The fixture is `lib/db/scripts/fixtures/pre-migration-schema.ts`; its pinned
+SHA-256 digest is stored beside it and verified before the rehearsal changes the
+database. The rehearsal's CI checkout is intentionally shallow, so this check
+also ensures it cannot rely on an ancestor commit being available.
 The child process receives only `TEST_DATABASE_URL`; persistent
 `DATABASE_URL` and admin connection variables are removed before it starts.
+
+### Updating the rehearsal starting schema
+
+The checked-in schema is a frozen input representing the database immediately
+before migration `0001`. Its checksum catches unreviewed or accidental fixture
+changes; it is not permission to replace the historical baseline with the
+current Drizzle schema.
+
+Only update it when an authoritative, reviewed pre-migration schema source
+shows that the intended starting point should change. Edit the fixture, then
+regenerate `lib/db/scripts/fixtures/pre-migration-schema.sha256` from its exact
+bytes with:
+
+```sh
+sha256sum lib/db/scripts/fixtures/pre-migration-schema.ts \
+  | cut -d ' ' -f 1 \
+  > lib/db/scripts/fixtures/pre-migration-schema.sha256
+```
+
+Review both files together. Do not derive the fixture by pushing the current
+Drizzle schema, since that would already include later changes and could hide
+migration errors. Run
+`pnpm --filter @workspace/db run test` and the disposable PostgreSQL migration
+rehearsal after updating it.
 
 The release command treats an explicitly reviewed destructive operation
 (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DELETE FROM`, or dropping `NOT NULL`)
