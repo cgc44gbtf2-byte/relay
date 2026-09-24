@@ -904,17 +904,90 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
     res.status(404).json(channelNotFoundError);
     return;
   }
-  await db.transaction(async (tx) => {
+  const leaveResult = await db.transaction(async (tx) => {
+    const [lockedChannel] = await tx
+      .select({
+        id: channelsTable.id,
+        ownerId: channelsTable.ownerId,
+        isPrivate: channelsTable.isPrivate,
+      })
+      .from(channelsTable)
+      .where(eq(channelsTable.id, channel.id))
+      .for("update");
+    if (!lockedChannel) return { outcome: "not_found" } as const;
+
+    const [member] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, lockedChannel.id),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+
+    if (lockedChannel.isPrivate) {
+      const isOwner = lockedChannel.ownerId === userId;
+      const isOperator = isOwner || ["owner", "moderator"].includes(member?.role ?? "");
+      if (isOperator) {
+        const operators = await tx
+          .select({
+            userId: channelMembersTable.userId,
+            role: channelMembersTable.role,
+          })
+          .from(channelMembersTable)
+          .where(and(
+            eq(channelMembersTable.channelId, lockedChannel.id),
+            inArray(channelMembersTable.role, ["owner", "moderator"]),
+          ))
+          .orderBy(asc(channelMembersTable.userId))
+          .for("update");
+        const remainingOperators = operators.filter((operator) => operator.userId !== userId);
+
+        if (isOwner) {
+          const successor = remainingOperators.find((operator) => operator.role === "moderator")
+            ?? remainingOperators.find((operator) => operator.role === "owner");
+          if (!successor) return { outcome: "last_operator" } as const;
+
+          await tx
+            .update(channelsTable)
+            .set({ ownerId: successor.userId })
+            .where(eq(channelsTable.id, lockedChannel.id));
+          if (successor.role !== "owner") {
+            await tx
+              .update(channelMembersTable)
+              .set({ role: "owner" })
+              .where(and(
+                eq(channelMembersTable.channelId, lockedChannel.id),
+                eq(channelMembersTable.userId, successor.userId),
+              ));
+          }
+        } else if (remainingOperators.length === 0) {
+          return { outcome: "last_operator" } as const;
+        }
+      }
+    }
+
     await tx.delete(channelMembersTable).where(and(
-      eq(channelMembersTable.channelId, channel.id),
+      eq(channelMembersTable.channelId, lockedChannel.id),
       eq(channelMembersTable.userId, userId),
     ));
     await tx.delete(channelJoinRequestsTable).where(and(
-      eq(channelJoinRequestsTable.channelId, channel.id),
+      eq(channelJoinRequestsTable.channelId, lockedChannel.id),
       eq(channelJoinRequestsTable.userId, userId),
     ));
+    return { outcome: "left", isPrivate: lockedChannel.isPrivate } as const;
   });
-  if (channel.isPrivate) wsHub.revokeChannelAccess(channel.id, userId);
+  if (leaveResult.outcome === "not_found") {
+    res.status(404).json(channelNotFoundError);
+    return;
+  }
+  if (leaveResult.outcome === "last_operator") {
+    res.status(409).json({
+      error: "A private channel must keep an owner or moderator. Promote another member before leaving.",
+    });
+    return;
+  }
+  if (leaveResult.isPrivate) wsHub.revokeChannelAccess(channel.id, userId);
   wsHub.broadcastChannel(channel.id, {
     type: "presence",
     eventId: randomUUID(),

@@ -6514,6 +6514,132 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps a private room reviewable when its owner leaves", async () => {
+    const ownerSession = await createTestSession("leave_handoff_owner");
+    const moderatorSession = await createTestSession("leave_handoff_moderator");
+    const requesterSession = await createTestSession("leave_handoff_requester");
+    const channelIds: number[] = [];
+
+    try {
+      for (const session of [moderatorSession, requesterSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `handoff-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [channelId, moderatorSession.userId],
+      );
+
+      const leave = await apiRequest(ownerSession, `/channels/${channelId}/leave`, {
+        method: "POST",
+      });
+      assert.equal(leave.status, 200, JSON.stringify(leave));
+      assert.deepEqual(leave.body, { ok: true });
+
+      const ownership = await pool.query(
+        `SELECT c.owner_id, m.role
+         FROM irc_channels c
+         JOIN irc_channel_members m ON m.channel_id = c.id AND m.user_id = $2
+         WHERE c.id = $1`,
+        [channelId, moderatorSession.userId],
+      );
+      assert.deepEqual(ownership.rows, [{
+        owner_id: moderatorSession.userId,
+        role: "owner",
+      }]);
+
+      const request = await apiRequest(requesterSession, `/channels/${channelId}/join`, {
+        method: "POST",
+      });
+      assert.equal(request.status, 202, JSON.stringify(request));
+
+      const requests = await apiRequest(moderatorSession, `/channels/${channelId}/join-requests`);
+      assert.equal(requests.status, 200, JSON.stringify(requests));
+      assert.ok(Array.isArray(requests.body));
+      assert.equal(requests.body.length, 1);
+      const requestId = (requests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof requestId, "number");
+
+      const approval = await apiRequest(
+        moderatorSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(approval.status, 200, JSON.stringify(approval));
+      assert.deepEqual(approval.body, { ok: true, status: "approved" });
+    } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        moderatorSession.userId,
+        requesterSession.userId,
+      ]);
+    }
+  });
+
+  test("prevents the last private-room operator from leaving", async () => {
+    const ownerSession = await createTestSession("last_operator_owner");
+    const requesterSession = await createTestSession("last_operator_requester");
+    const channelIds: number[] = [];
+
+    try {
+      const requesterProfile = await apiRequest(requesterSession, "/me");
+      assert.equal(requesterProfile.status, 200, JSON.stringify(requesterProfile));
+
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `last-operator-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const leave = await apiRequest(ownerSession, `/channels/${channelId}/leave`, {
+        method: "POST",
+      });
+      assert.equal(leave.status, 409, JSON.stringify(leave));
+      assert.deepEqual(leave.body, {
+        error: "A private channel must keep an owner or moderator. Promote another member before leaving.",
+      });
+
+      const request = await apiRequest(requesterSession, `/channels/${channelId}/join`, {
+        method: "POST",
+      });
+      assert.equal(request.status, 202, JSON.stringify(request));
+
+      const requests = await apiRequest(ownerSession, `/channels/${channelId}/join-requests`);
+      assert.equal(requests.status, 200, JSON.stringify(requests));
+      assert.ok(Array.isArray(requests.body));
+      assert.equal(requests.body.length, 1);
+    } finally {
+      await removeTestChannels(channelIds, [ownerSession.userId, requesterSession.userId]);
+    }
+  });
+
   test("scopes private-room join-request review to the moderator's channel", async () => {
     const ownerSession = await createTestSession("scoped_request_owner");
     const requesterSession = await createTestSession("scoped_request_requester");
