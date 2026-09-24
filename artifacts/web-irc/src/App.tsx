@@ -54,6 +54,11 @@ import { WorkspaceIndicator } from "./components/workspace-indicator";
 
 const queryClient = new QueryClient();
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+function workspaceInvitationUrl(communityId: number, token: string): string {
+  const query = new URLSearchParams({ communityId: String(communityId), token });
+  return `${window.location.origin}${basePath}/accept-invitation?${query.toString()}`;
+}
 const clerkPubKey = publishableKeyFromHost(
   window.location.hostname,
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
@@ -2792,6 +2797,9 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
   const [team, setTeam] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
+  const [inviteDepartmentId, setInviteDepartmentId] = useState("");
+  const [inviteLocationId, setInviteLocationId] = useState("");
+  const [inviteTeamId, setInviteTeamId] = useState("");
   const [inviteToken, setInviteToken] = useState("");
   const [ownershipTarget, setOwnershipTarget] = useState("");
   const [policyTitle, setPolicyTitle] = useState("");
@@ -2857,11 +2865,17 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     try {
       const created = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations`, {
         method: "POST",
-        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+        body: JSON.stringify({
+          email: inviteEmail,
+          role: inviteRole,
+          departmentId: inviteDepartmentId ? Number(inviteDepartmentId) : null,
+          locationId: inviteLocationId ? Number(inviteLocationId) : null,
+          teamId: inviteTeamId ? Number(inviteTeamId) : null,
+        }),
       });
-      setInviteToken(created.invitationToken);
+      setInviteToken(workspaceInvitationUrl(detail.community.id, created.invitationToken));
       setInviteEmail("");
-      setNotice("Invitation created. Share the one-time token with the employee.");
+      setNotice("Invitation created. Share the private invitation link with the employee.");
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create employee invitation");
@@ -2873,11 +2887,24 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     setWorking(true);
     try {
       const resent = await api<{ invitationToken: string }>(`/communities/${detail.community.id}/invitations/${invitationId}/resend`, { method: "POST", body: "{}" });
-      setInviteToken(resent.invitationToken);
-      setNotice("Invitation resent. Share the new one-time token with the employee.");
+      setInviteToken(workspaceInvitationUrl(detail.community.id, resent.invitationToken));
+      setNotice("Invitation renewed. Share the new private invitation link with the employee.");
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not resend invitation");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const revokeInvitation = async (invitationId: number) => {
+    if (!window.confirm("Revoke this invitation? Its link will stop working immediately.")) return;
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/invitations/${invitationId}/revoke`, { method: "POST", body: "{}" });
+      setNotice("Invitation revoked.");
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not revoke invitation");
     } finally {
       setWorking(false);
     }
@@ -2973,7 +3000,35 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
           })}{filteredEmployees.length === 0 && <EmptyAdminState label={directorySearch ? "No employees match that search." : "No employees yet."} />}</div>
       </section>
       {detail.canManage && <div className="space-y-5">
-        <form onSubmit={createInvitation} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">invite employee</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p><div className="mt-4 grid gap-2"><input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="employee">Employee</option><option value="contractor">Contractor</option><option value="member">Member</option></select></div><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button>{inviteToken && <div className="mt-4 rounded border border-primary/30 bg-primary/5 p-3"><p className="font-mono text-[9px] uppercase tracking-wider text-primary">one-time invitation token</p><code className="mt-2 block break-all text-[10px] text-foreground">{inviteToken}</code><p className="mt-2 text-[10px] leading-4 text-muted-foreground">Share this token securely. The recipient must be signed in with the invited email address before joining the private workspace.</p></div>}<div className="mt-4 space-y-2 border-t border-border pt-4">{detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2"><div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>{invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}</div>)}</div></form>
+        <form onSubmit={createInvitation} className="rounded-xl border border-border bg-card p-5">
+          <h2 className="font-mono text-sm font-bold">invite employee</h2>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.invitations.filter((item) => item.status === "pending").length} pending invitations</p>
+          <div className="mt-4 grid gap-2">
+            <input required type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="employee@company.com" className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
+            <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="employee">Employee</option><option value="contractor">Contractor</option><option value="member">Member</option></select>
+            <select value={inviteDepartmentId} onChange={(event) => setInviteDepartmentId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No department</option>{detail.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+            <select value={inviteLocationId} onChange={(event) => setInviteLocationId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No location</option>{detail.locations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+            <select value={inviteTeamId} onChange={(event) => setInviteTeamId(event.target.value)} className="h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="">No team</option>{detail.teams.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+          </div>
+          <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">create invitation</button>
+          {inviteToken && <div className="mt-4 rounded border border-primary/30 bg-primary/5 p-3">
+            <p className="font-mono text-[9px] uppercase tracking-wider text-primary">private invitation link</p>
+            <div className="mt-2 flex gap-2">
+              <input readOnly value={inviteToken} onFocus={(event) => event.currentTarget.select()} aria-label="Private invitation link" className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 font-mono text-[10px]" />
+              <button type="button" onClick={() => { void navigator.clipboard.writeText(inviteToken).then(() => setNotice("Invitation link copied."), () => setError("Could not copy the link. Select it and copy manually.")); }} className="shrink-0 rounded border border-border px-2 font-mono text-[9px]">copy link</button>
+            </div>
+            <p className="mt-2 text-[10px] leading-4 text-muted-foreground">The recipient must sign in with the verified email address that received the invitation.</p>
+          </div>}
+          <div className="mt-4 space-y-2 border-t border-border pt-4">
+            {detail.invitations.slice(0, 5).map((invitation) => <div key={invitation.id} className="flex items-center justify-between gap-3 rounded border border-border/70 px-3 py-2">
+              <div className="min-w-0"><p className="truncate font-mono text-[10px]">{invitation.email}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{invitation.role} · {invitation.status}{invitation.status === "pending" && ` · expires ${new Date(invitation.expiresAt).toLocaleDateString()}`}</p></div>
+              <div className="flex shrink-0 gap-2">
+                {invitation.status !== "accepted" && <button type="button" disabled={working} onClick={() => void resendInvitation(invitation.id)} className="rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:bg-muted">resend</button>}
+                {invitation.status === "pending" && <button type="button" disabled={working} onClick={() => void revokeInvitation(invitation.id)} className="rounded border border-destructive/30 px-2 py-1 font-mono text-[9px] text-destructive hover:bg-destructive/10">revoke</button>}
+              </div>
+            </div>)}
+          </div>
+        </form>
         <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/policies`, { title: policyTitle, body: policyBody }, "Workspace policy published."); setPolicyTitle(""); setPolicyBody(""); }} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">workspace policy</h2><input required value={policyTitle} onChange={(event) => setPolicyTitle(event.target.value)} placeholder="Safety policy" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /><textarea required value={policyBody} onChange={(event) => setPolicyBody(event.target.value)} placeholder="Policy details" className="mt-3 min-h-20 w-full rounded border border-input bg-background px-3 py-2 font-mono text-xs" /><button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">publish policy</button><div className="mt-4 space-y-2">{detail.policies.slice(0, 3).map((policy) => <div key={policy.id} className="rounded border border-border/70 p-2"><p className="font-mono text-xs">{policy.title} <span className="text-[9px] text-muted-foreground">v{policy.version}</span></p><p className="mt-1 line-clamp-2 text-[10px] text-muted-foreground">{policy.body}</p></div>)}</div></form>
         <form onSubmit={transferOwnership} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">ownership</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Transfer control to an existing workspace member.</p><select required value={ownershipTarget} onChange={(event) => setOwnershipTarget(event.target.value)} className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs"><option value="">Choose new owner</option>{detail.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select><button disabled={working || !ownershipTarget} className="mt-3 rounded border border-destructive/30 px-3 py-2 font-mono text-[10px] font-bold text-destructive disabled:opacity-50">transfer ownership</button></form>
       </div>}
@@ -3125,26 +3180,31 @@ function DeveloperConsole() {
 }
 
 function InvitationAcceptance() {
-  const [communityId, setCommunityId] = useState("");
-  const [token, setToken] = useState("");
+  const query = new URLSearchParams(window.location.search);
+  const [communityId, setCommunityId] = useState(query.get("communityId") ?? "");
+  const [token, setToken] = useState(query.get("token") ?? "");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const decide = async (decision: "accept" | "decline") => {
+    const parsedCommunityId = Number(communityId);
+    if (!Number.isSafeInteger(parsedCommunityId) || parsedCommunityId <= 0 || !token.trim()) {
+      setError("Open the invitation link or enter the workspace number and invitation token.");
+      return;
+    }
     setWorking(true);
     setError("");
     try {
-      await api(`/communities/${Number(communityId)}/invitations/accept`, { method: "POST", body: JSON.stringify({ token }) });
-      setNotice("Invitation accepted. Your employee profile is ready.");
-      window.setTimeout(() => { window.location.assign(`${basePath}/chat`); }, 500);
+      await api(`/communities/${parsedCommunityId}/invitations/${decision}`, { method: "POST", body: JSON.stringify({ token }) });
+      setNotice(decision === "accept" ? "Invitation accepted. Your employee profile is ready." : "Invitation declined.");
+      window.setTimeout(() => { window.location.assign(`${basePath}/chat`); }, 900);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not accept invitation");
+      setError(reason instanceof Error ? reason.message : `Could not ${decision} invitation`);
     } finally {
       setWorking(false);
     }
   };
-  return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-5 py-10 text-foreground"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-7"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><p className="mt-10 font-mono text-[10px] uppercase tracking-[.18em] text-primary">workspace invitation</p><h1 className="mt-2 font-mono text-2xl font-bold">Join a business workspace.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use the workspace number and one-time token while signed in with the verified email address that received the invitation.</p>{error && <p className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}{notice && <p className="mt-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4">{notice}</p>}<form onSubmit={submit} className="mt-6 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace number</span><input required inputMode="numeric" value={communityId} onChange={(event) => setCommunityId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="42" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">invitation token</span><input required value={token} onChange={(event) => setToken(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="paste the one-time token" /></label><button disabled={working} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "accepting…" : "accept invitation"}</button></form></div></div>;
+  return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-5 py-10 text-foreground"><div className="w-full max-w-lg rounded-2xl border border-border bg-card p-7"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><p className="mt-10 font-mono text-[10px] uppercase tracking-[.18em] text-primary">workspace invitation</p><h1 className="mt-2 font-mono text-2xl font-bold">Join a business workspace.</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Review the invitation while signed in with the verified email address that received it.</p>{error && <p className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-3 font-mono text-xs text-destructive">{error}</p>}{notice && <p className="mt-4 rounded border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4">{notice}</p>}<div className="mt-6 space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">workspace number</span><input inputMode="numeric" value={communityId} onChange={(event) => setCommunityId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="42" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase text-muted-foreground">invitation token</span><input value={token} onChange={(event) => setToken(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="paste the one-time token" /></label><div className="grid grid-cols-2 gap-3"><button type="button" disabled={working} onClick={() => void decide("accept")} className="rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{working ? "working…" : "accept invitation"}</button><button type="button" disabled={working} onClick={() => void decide("decline")} className="rounded-md border border-destructive/40 py-2.5 font-mono text-xs font-bold text-destructive disabled:opacity-50">decline</button></div></div></div></div>;
 }
 
 function ChatGate() {
@@ -3358,12 +3418,12 @@ function OnboardingPage() {
           method: "POST",
           body: JSON.stringify({ email, role: inviteRole }),
         });
-        created.push({ email, token: invitation.invitationToken });
+        created.push({ email, token: workspaceInvitationUrl(community.id, invitation.invitationToken) });
       }
       setInviteTokens(created);
       setInviteEmails("");
       await api(`/onboarding/${community.id}/progress`, { method: "POST", body: JSON.stringify({ step: 9 }) });
-      setNotice("Invitations created. Share each one-time token with its recipient.");
+      setNotice("Invitations created. Share each private invitation link with its recipient.");
       setState((current) => current ? { ...current, nextStep: "start" } : current);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create every invitation");
@@ -3802,15 +3862,38 @@ function AuthRoutes() {
   if (upgradeRoute) {
     return <><Show when="signed-in"><CommunityUpgradesPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></>;
   }
-  return <Switch><Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route><Route path="/sign-in/*?" component={SignInPage} /><Route path="/sign-up/*?" component={SignUpPage} /><Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/accept-invitation"><Show when="signed-in"><InvitationAcceptance /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route><Route path="/communities/:id"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route><Route component={NotFoundPage} /></Switch>;
+  return <Switch>
+    <Route path="/"><Show when="signed-in"><Redirect to="/chat" /></Show><Show when="signed-out"><Landing /></Show></Route>
+    <Route path="/sign-in/*?" component={SignInPage} />
+    <Route path="/sign-up/*?" component={SignUpPage} />
+    <Route path="/chat"><Show when="signed-in"><ChatGate /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route>
+    <Route path="/onboarding"><Show when="signed-in"><OnboardingPage /></Show><Show when="signed-out"><Redirect to="/sign-in" /></Show></Route>
+    <Route path="/accept-invitation">
+      <Show when="signed-in"><InvitationAcceptance /></Show>
+      <Show when="signed-out"><Redirect to={`/sign-in?redirect_url=${encodeURIComponent(`${basePath}/accept-invitation${window.location.search}`)}`} /></Show>
+    </Route>
+    <Route path="/communities/:id"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route>
+    <Route path="/communities"><Show when="signed-in"><CommunityConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route>
+    <Route path="/developer"><Show when="signed-in"><DeveloperConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route>
+    <Route path="/admin"><Show when="signed-in"><AdminConsole /></Show><Show when="signed-out"><Redirect to="/" /></Show></Route>
+    <Route component={NotFoundPage} />
+  </Switch>;
 }
 
 function NotFoundPage() {
   return <main className="flex min-h-[100dvh] items-center justify-center bg-background px-6 text-foreground"><div className="max-w-md text-center"><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">404 · route not found</p><h1 className="mt-3 font-mono text-3xl font-bold">Nothing here.</h1><p className="mt-4 text-sm leading-6 text-muted-foreground">That relay address does not exist.</p><a href={`${basePath}/`} className="mt-7 inline-block rounded-lg bg-primary px-4 py-2 font-mono text-xs font-bold text-primary-foreground">return home</a></div></main>;
 }
 
-function SignInPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
-function SignUpPage() { return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/chat`} fallbackRedirectUrl={`${basePath}/chat`} /></div>; }
+function SignInPage() {
+  const redirectUrl = authReturnUrl();
+  const redirectQuery = `?redirect_url=${encodeURIComponent(redirectUrl)}`;
+  return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up${redirectQuery}`} forceRedirectUrl={redirectUrl} fallbackRedirectUrl={redirectUrl} /></div>;
+}
+function SignUpPage() {
+  const redirectUrl = authReturnUrl();
+  const redirectQuery = `?redirect_url=${encodeURIComponent(redirectUrl)}`;
+  return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in${redirectQuery}`} forceRedirectUrl={redirectUrl} fallbackRedirectUrl={redirectUrl} /></div>;
+}
 
 const clerkAppearance = {
   theme: shadcn,
@@ -3857,3 +3940,8 @@ function App() {
 }
 
 export default App;
+
+function authReturnUrl(): string {
+  const requested = new URLSearchParams(window.location.search).get("redirect_url");
+  return requested?.startsWith(`${basePath}/accept-invitation?`) ? requested : `${basePath}/chat`;
+}

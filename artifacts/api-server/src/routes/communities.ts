@@ -1680,6 +1680,39 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     res.status(400).json({ error: "Invitation role must be member, employee, or contractor." });
     return;
   }
+  const assignmentIds = ["departmentId", "locationId", "teamId"].map((key) => {
+    const value = req.body?.[key];
+    if (value === undefined || value === null || value === "") return null;
+    const id = typeof value === "number" ? value : Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : Number.NaN;
+  });
+  if (assignmentIds.some(Number.isNaN)) {
+    res.status(400).json({ error: "Department, location, and team assignments must be valid workspace IDs." });
+    return;
+  }
+  const [departmentId, locationId, teamId] = assignmentIds as [number | null, number | null, number | null];
+  const [departments, locations, teams] = await Promise.all([
+    departmentId === null ? Promise.resolve([]) : db.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+      eq(departmentsTable.id, departmentId),
+      eq(departmentsTable.communityId, communityId),
+    )),
+    locationId === null ? Promise.resolve([]) : db.select({ id: locationsTable.id }).from(locationsTable).where(and(
+      eq(locationsTable.id, locationId),
+      eq(locationsTable.communityId, communityId),
+    )),
+    teamId === null ? Promise.resolve([]) : db.select({ id: teamsTable.id }).from(teamsTable).where(and(
+      eq(teamsTable.id, teamId),
+      eq(teamsTable.communityId, communityId),
+    )),
+  ]);
+  if (
+    (departmentId !== null && departments.length === 0)
+    || (locationId !== null && locations.length === 0)
+    || (teamId !== null && teams.length === 0)
+  ) {
+    res.status(400).json({ error: "Department, location, and team assignments must belong to this workspace." });
+    return;
+  }
   const rawToken = randomUUID();
   const tokenHash = createHash("sha256").update(rawToken).digest("hex");
   const [existingPending] = await db.select().from(workspaceInvitationsTable).where(and(
@@ -1690,15 +1723,22 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
   const [invitation] = existingPending
     ? await db.update(workspaceInvitationsTable).set({
       role: invitationRole,
+      departmentId,
+      locationId,
+      teamId,
       invitedBy: userId,
       tokenHash,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       revokedAt: null,
+      status: "pending",
     }).where(eq(workspaceInvitationsTable.id, existingPending.id)).returning()
     : await db.insert(workspaceInvitationsTable).values({
       communityId,
       email,
       role: invitationRole,
+      departmentId,
+      locationId,
+      teamId,
       invitedBy: userId,
       tokenHash,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
@@ -1728,8 +1768,15 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
     res.status(409).json({ error: `This invitation is ${invitation.status}.` });
     return;
   }
+  if (invitation.revokedAt) {
+    res.status(409).json({ error: "This invitation has been revoked." });
+    return;
+  }
   if (invitation.expiresAt <= new Date()) {
-    await db.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, invitation.id));
+    await db.update(workspaceInvitationsTable).set({ status: "expired" }).where(and(
+      eq(workspaceInvitationsTable.id, invitation.id),
+      eq(workspaceInvitationsTable.status, "pending"),
+    ));
     res.status(410).json({ error: "This invitation has expired. Ask a workspace manager to resend it." });
     return;
   }
@@ -1757,12 +1804,15 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
       eq(workspaceInvitationsTable.communityId, communityId),
       eq(workspaceInvitationsTable.tokenHash, tokenHash),
     )).for("update");
-    if (
-      !lockedInvitation
-      || lockedInvitation.status !== "pending"
-      || lockedInvitation.expiresAt <= now
-    ) {
-      return { status: "unavailable" as const };
+    if (!lockedInvitation || lockedInvitation.status !== "pending" || lockedInvitation.revokedAt) {
+      return {
+        status: "unavailable" as const,
+        invitationStatus: lockedInvitation?.revokedAt ? "revoked" : lockedInvitation?.status ?? "unavailable",
+      };
+    }
+    if (lockedInvitation.expiresAt <= now) {
+      await tx.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, lockedInvitation.id));
+      return { status: "expired" as const };
     }
     const [departments, locations, teams] = await Promise.all([
       lockedInvitation.departmentId
@@ -1837,12 +1887,124 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
     res.status(409).json({ error: "This invitation contains organization assignments from another workspace." });
     return;
   }
+  if (result.status === "expired") {
+    res.status(410).json({ error: "This invitation has expired. Ask a workspace manager to resend it." });
+    return;
+  }
   if (result.status === "unavailable") {
-    res.status(409).json({ error: "Invitation is no longer available." });
+    res.status(409).json({ error: `This invitation is ${result.invitationStatus}.` });
     return;
   }
   await writeCommunityAudit(userId, "accepted_workspace_invitation", communityId, `invitation:${result.invitation.id}`);
+  await writeCommunityAudit(userId, "started_employee_onboarding", communityId, {
+    resourceType: "employee",
+    resourceId: userId,
+    targetId: userId,
+    details: `invitation:${result.invitation.id}`,
+  });
   res.json({ ok: true, communityId, invitationId: result.invitation.id, employmentStatus: "onboarding" });
+});
+
+router.post("/communities/:communityId/invitations/decline", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+  if (!Number.isInteger(communityId) || !token) {
+    res.status(400).json({ error: "A workspace and invitation token are required." });
+    return;
+  }
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  let verifiedEmails: string[];
+  try {
+    verifiedEmails = await verifiedEmailAddressesForUser(userId);
+  } catch {
+    res.status(503).json({ error: "We could not verify your account email. Please try again." });
+    return;
+  }
+  const result = await db.transaction(async (tx) => {
+    const [invitation] = await tx.select().from(workspaceInvitationsTable).where(and(
+      eq(workspaceInvitationsTable.communityId, communityId),
+      eq(workspaceInvitationsTable.tokenHash, tokenHash),
+    )).for("update");
+    if (!invitation) return { status: "not_found" as const };
+    if (invitation.status !== "pending" || invitation.revokedAt) {
+      return { status: "unavailable" as const, invitationStatus: invitation.revokedAt ? "revoked" : invitation.status };
+    }
+    if (invitation.expiresAt <= new Date()) {
+      await tx.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, invitation.id));
+      return { status: "expired" as const };
+    }
+    if (!verifiedEmails.includes(invitation.email.trim().toLowerCase())) {
+      return { status: "wrong_email" as const };
+    }
+    const [declined] = await tx.update(workspaceInvitationsTable).set({ status: "declined" }).where(and(
+      eq(workspaceInvitationsTable.id, invitation.id),
+      eq(workspaceInvitationsTable.status, "pending"),
+    )).returning();
+    return declined ? { status: "declined" as const, invitationId: declined.id } : { status: "unavailable" as const, invitationStatus: "unavailable" };
+  });
+  if (result.status === "not_found") {
+    res.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  if (result.status === "wrong_email") {
+    res.status(403).json({ error: "Sign in with the verified email address that received this invitation." });
+    return;
+  }
+  if (result.status === "expired") {
+    res.status(410).json({ error: "This invitation has expired. Ask a workspace manager to resend it." });
+    return;
+  }
+  if (result.status === "unavailable") {
+    res.status(409).json({ error: `This invitation is ${result.invitationStatus}.` });
+    return;
+  }
+  await writeCommunityAudit(userId, "declined_workspace_invitation", communityId, `invitation:${result.invitationId}`);
+  res.json({ ok: true, communityId, invitationId: result.invitationId, status: "declined" });
+});
+
+router.post("/communities/:communityId/invitations/:invitationId/revoke", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const userId = getUserId(req);
+  const communityId = Number(param(req, "communityId"));
+  const invitationId = Number(param(req, "invitationId"));
+  if (!Number.isInteger(communityId) || !Number.isSafeInteger(invitationId) || !(await requireWorkspaceManager(userId, communityId))) {
+    res.status(403).json({ error: "You cannot revoke invitations in this workspace." });
+    return;
+  }
+  const result = await db.transaction(async (tx) => {
+    const [invitation] = await tx.select().from(workspaceInvitationsTable).where(and(
+      eq(workspaceInvitationsTable.id, invitationId),
+      eq(workspaceInvitationsTable.communityId, communityId),
+    )).for("update");
+    if (!invitation) return { status: "not_found" as const };
+    if (invitation.status !== "pending") return { status: "unavailable" as const, invitationStatus: invitation.status };
+    if (invitation.expiresAt <= new Date()) {
+      const [expired] = await tx.update(workspaceInvitationsTable).set({ status: "expired" }).where(eq(workspaceInvitationsTable.id, invitation.id)).returning();
+      return { status: "expired" as const, invitation: expired };
+    }
+    const [revoked] = await tx.update(workspaceInvitationsTable).set({
+      status: "revoked",
+      revokedAt: new Date(),
+    }).where(and(
+      eq(workspaceInvitationsTable.id, invitation.id),
+      eq(workspaceInvitationsTable.status, "pending"),
+    )).returning();
+    return revoked ? { status: "revoked" as const, invitation: revoked } : { status: "unavailable" as const, invitationStatus: "unavailable" };
+  });
+  if (result.status === "not_found") {
+    res.status(404).json({ error: "Invitation not found." });
+    return;
+  }
+  if (result.status === "expired") {
+    res.status(410).json({ error: "This invitation has expired and cannot be revoked." });
+    return;
+  }
+  if (result.status === "unavailable") {
+    res.status(409).json({ error: `This invitation is ${result.invitationStatus}.` });
+    return;
+  }
+  await writeCommunityAudit(userId, "revoked_workspace_invitation", communityId, `invitation:${invitationId}`);
+  res.json({ ok: true, invitation: result.invitation });
 });
 
 router.post("/communities/:communityId/invitations/:invitationId/resend", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -1853,28 +2015,34 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
     res.status(403).json({ error: "You cannot resend invitations in this workspace." });
     return;
   }
-  const [existing] = await db.select().from(workspaceInvitationsTable).where(and(
-    eq(workspaceInvitationsTable.id, invitationId),
-    eq(workspaceInvitationsTable.communityId, communityId),
-  ));
-  if (!existing) {
+  const rawToken = randomUUID();
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const resent = await db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(workspaceInvitationsTable).where(and(
+      eq(workspaceInvitationsTable.id, invitationId),
+      eq(workspaceInvitationsTable.communityId, communityId),
+    )).for("update");
+    if (!existing) return { status: "not_found" as const };
+    if (existing.status === "accepted") return { status: "accepted" as const };
+    const [updated] = await tx.update(workspaceInvitationsTable).set({
+      status: "pending",
+      tokenHash,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      invitedBy: userId,
+      revokedAt: null,
+    }).where(eq(workspaceInvitationsTable.id, invitationId)).returning();
+    return { status: "resent" as const, invitation: updated, email: existing.email };
+  });
+  if (resent.status === "not_found") {
     res.status(404).json({ error: "Invitation not found." });
     return;
   }
-  if (existing.status === "accepted") {
+  if (resent.status === "accepted") {
     res.status(409).json({ error: "Accepted invitations cannot be resent." });
     return;
   }
-  const rawToken = randomUUID();
-  const [updated] = await db.update(workspaceInvitationsTable).set({
-    status: "pending",
-    tokenHash: createHash("sha256").update(rawToken).digest("hex"),
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    invitedBy: userId,
-    revokedAt: null,
-  }).where(eq(workspaceInvitationsTable.id, invitationId)).returning();
-  await writeCommunityAudit(userId, "resent_workspace_invitation", communityId, existing.email);
-  res.json({ ...updated, tokenHash: undefined, invitationToken: rawToken });
+  await writeCommunityAudit(userId, "resent_workspace_invitation", communityId, resent.email);
+  res.json({ ...resent.invitation, tokenHash: undefined, invitationToken: rawToken });
 });
 
 router.post("/communities/:communityId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

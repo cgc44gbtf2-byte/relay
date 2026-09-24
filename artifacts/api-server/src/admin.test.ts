@@ -2407,6 +2407,148 @@ describe("admin access controls", () => {
     }
   });
 
+  test("accepts, declines, and revokes workspace invitations with onboarding audit events", async () => {
+    const recipient = await createTestSession("workspace_invitation_flow", "verified");
+    const workspaceIds: number[] = [];
+    try {
+      await apiRequest(recipient, "/me");
+      const recipientUser = await clerkClient.users.getUser(recipient.userId);
+      const recipientEmail = recipientUser.emailAddresses.find((address) => address.verification?.status === "verified")?.emailAddress;
+      assert.ok(recipientEmail);
+
+      const workspace = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ('Invitation Flow Workspace', $1, $2, 'paid_workspace', true)
+         RETURNING id`,
+        [`invitation-flow-${randomUUID()}`, adminSession.userId],
+      );
+      const communityId = workspace.rows[0]?.id;
+      assert.ok(communityId);
+      workspaceIds.push(communityId);
+      const department = await pool.query<{ id: number }>(
+        "INSERT INTO irc_departments (community_id, name) VALUES ($1, 'Operations') RETURNING id",
+        [communityId],
+      );
+      const location = await pool.query<{ id: number }>(
+        "INSERT INTO irc_locations (community_id, name) VALUES ($1, 'Main office') RETURNING id",
+        [communityId],
+      );
+      const team = await pool.query<{ id: number }>(
+        `INSERT INTO irc_teams (community_id, department_id, location_id, name)
+         VALUES ($1, $2, $3, 'Field team') RETURNING id`,
+        [communityId, department.rows[0]?.id, location.rows[0]?.id],
+      );
+      const departmentId = department.rows[0]?.id;
+      const locationId = location.rows[0]?.id;
+      const teamId = team.rows[0]?.id;
+      assert.ok(departmentId && locationId && teamId);
+
+      const createInvitation = async () => {
+        const response = await apiRequest(adminSession, `/communities/${communityId}/invitations`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email: recipientEmail, role: "employee" }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        return response.body as { id: number; invitationToken: string };
+      };
+      const created = await apiRequest(adminSession, `/communities/${communityId}/invitations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: recipientEmail,
+          role: "employee",
+          departmentId,
+          locationId,
+          teamId,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      const invitation = created.body as { id: number; invitationToken: string };
+      const accepted = await apiRequest(recipient, `/communities/${communityId}/invitations/accept`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: invitation.invitationToken }),
+      });
+      assert.equal(accepted.status, 200, JSON.stringify(accepted));
+      const [membership, profile, teamMembership, assignedRole, acceptedAudit] = await Promise.all([
+        pool.query("SELECT 1 FROM irc_community_members WHERE community_id = $1 AND user_id = $2", [communityId, recipient.userId]),
+        pool.query(
+          `SELECT employment_status, department_id, location_id, invited_at, onboarding_started_at
+           FROM irc_employee_profiles WHERE community_id = $1 AND user_id = $2`,
+          [communityId, recipient.userId],
+        ),
+        pool.query("SELECT 1 FROM irc_team_members WHERE team_id = $1 AND user_id = $2", [teamId, recipient.userId]),
+        pool.query(
+          "SELECT role FROM irc_user_roles WHERE user_id = $1 AND scope_type = 'community' AND community_id = $2",
+          [recipient.userId, communityId],
+        ),
+        pool.query(
+          "SELECT action FROM irc_admin_audit_logs WHERE community_id = $1 AND actor_id = $2",
+          [communityId, recipient.userId],
+        ),
+      ]);
+      assert.equal(membership.rowCount, 1);
+      const employeeProfile = profile.rows[0] as {
+        employment_status: string;
+        department_id: number;
+        location_id: number;
+        invited_at: Date | null;
+        onboarding_started_at: Date | null;
+      };
+      assert.equal(employeeProfile.employment_status, "onboarding");
+      assert.equal(employeeProfile.department_id, departmentId);
+      assert.equal(employeeProfile.location_id, locationId);
+      assert.ok(employeeProfile.invited_at instanceof Date);
+      assert.ok(employeeProfile.onboarding_started_at instanceof Date);
+      assert.equal(teamMembership.rowCount, 1);
+      assert.ok(assignedRole.rows.some((row) => row.role === "employee"));
+      assert.ok(acceptedAudit.rows.some((row) => row.action === "accepted_workspace_invitation"));
+      assert.ok(acceptedAudit.rows.some((row) => row.action === "started_employee_onboarding"));
+
+      const toDecline = await createInvitation();
+      const declined = await apiRequest(recipient, `/communities/${communityId}/invitations/decline`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: toDecline.invitationToken }),
+      });
+      assert.equal(declined.status, 200, JSON.stringify(declined));
+
+      const toRevoke = await createInvitation();
+      const revoke = await apiRequest(adminSession, `/communities/${communityId}/invitations/${toRevoke.id}/revoke`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(revoke.status, 200, JSON.stringify(revoke));
+      const revokedAcceptance = await apiRequest(recipient, `/communities/${communityId}/invitations/accept`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: toRevoke.invitationToken }),
+      });
+      assert.equal(revokedAcceptance.status, 409, JSON.stringify(revokedAcceptance));
+
+      const toExpire = await createInvitation();
+      await pool.query("UPDATE irc_workspace_invitations SET expires_at = now() - interval '1 minute' WHERE id = $1", [toExpire.id]);
+      const expiredAcceptance = await apiRequest(recipient, `/communities/${communityId}/invitations/accept`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: toExpire.invitationToken }),
+      });
+      assert.equal(expiredAcceptance.status, 410, JSON.stringify(expiredAcceptance));
+
+      const invitationStatuses = await pool.query<{ id: number; status: string }>(
+        "SELECT id, status FROM irc_workspace_invitations WHERE id = ANY($1::int[]) ORDER BY id",
+        [[invitation.id, toDecline.id, toRevoke.id, toExpire.id]],
+      );
+      assert.deepEqual(invitationStatuses.rows.map((row) => row.status), ["accepted", "declined", "revoked", "expired"]);
+    } finally {
+      if (workspaceIds.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [workspaceIds]);
+      }
+    }
+  });
+
   test("returns 404 without writing audit activity for unknown channel maintenance targets", async () => {
     const unknownChannelId = -1;
     const beforeAudit = await pool.query(
