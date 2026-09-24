@@ -10,7 +10,7 @@ import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
 import { sendCommunitySubscriptionReminders } from "./lib/community-subscription-reminders";
-import { hasPermission } from "./lib/permissions";
+import { ensurePermissionCatalog, hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
 type TestSession = {
@@ -9751,6 +9751,7 @@ describe("admin access controls", () => {
         try {
           let blocked = false;
           for (let attempt = 0; attempt < 100; attempt += 1) {
+            await revocation.query("SELECT pg_stat_clear_snapshot()");
             const waiting = await revocation.query(
               `SELECT 1 FROM pg_stat_activity
                WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
@@ -9787,6 +9788,154 @@ describe("admin access controls", () => {
       await revocation.query("ROLLBACK").catch(() => undefined);
       revocation.release();
       await removeTestChannels(channelIds, [owner.userId, moderator.userId, target.userId]);
+    }
+  });
+
+  test("serializes channel invites with primary, scoped, and custom-role authority revocation", async () => {
+    await ensurePermissionCatalog();
+    const owner = await createTestSession("invite_authority_owner");
+    const actor = await createTestSession("invite_authority_actor");
+    const target = await createTestSession("invite_authority_target");
+    const roleKey = `invite_${randomUUID().replaceAll("-", "")}`;
+    const channelIds: number[] = [];
+    const revocation = await pool.connect();
+    const broadcasts: unknown[][] = [];
+    const broadcast = mock.method(wsHub, "broadcastUser", (...args: unknown[]) => {
+      broadcasts.push(args);
+    });
+    try {
+      for (const session of [owner, actor, target]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const targetProfile = await apiRequest(target, "/me");
+      const created = await apiRequest(owner, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `invite-authority-${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      const channelId = (created.body as { id: number }).id;
+      channelIds.push(channelId);
+      // Ordinary room membership must never provide the operator shortcut.
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role) VALUES ($1, $2, 'member')`,
+        [channelId, actor.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_custom_roles (key, label, scope_type, created_by)
+         VALUES ($1, 'Invite authority test', 'channel', $2)`,
+        [roleKey, owner.userId],
+      );
+      const invite = () => apiRequest(actor, `/channels/${channelId}/invites`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: (targetProfile.body as { username: string }).username }),
+      });
+      const saved = async () => (await pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM irc_channel_invites WHERE channel_id = $1) AS invites,
+           (SELECT count(*)::int FROM irc_notifications
+            WHERE user_id = $2 AND type = 'channel_invite' AND entity_id = $3) AS notifications`,
+        [channelId, target.userId, String(channelId)],
+      )).rows;
+      const cases = [
+        { kind: "primary", permission: "moderate_channel", revoke: "primary", table: "irc_users" },
+        { kind: "scoped", permission: "manage_channel", revoke: "assignment", table: "irc_user_roles" },
+        ...["manage_channel", "moderate_channel"].flatMap((permission) => [
+          { kind: "custom", permission, revoke: "assignment", table: "irc_user_roles" },
+          { kind: "custom", permission, revoke: "permission", table: "irc_role_permissions" },
+          { kind: "custom", permission, revoke: "retirement", table: "irc_custom_roles" },
+        ]),
+      ];
+      for (const scenario of cases) {
+        const label = `${scenario.kind}/${scenario.permission}/${scenario.revoke}`;
+        await pool.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [actor.userId]);
+        await pool.query("DELETE FROM irc_user_roles WHERE user_id = $1", [actor.userId]);
+        await pool.query("DELETE FROM irc_role_permissions WHERE role = $1", [roleKey]);
+        await pool.query("UPDATE irc_custom_roles SET is_active = true WHERE key = $1", [roleKey]);
+        if (scenario.kind === "primary") {
+          await pool.query("UPDATE irc_users SET role = 'moderator' WHERE clerk_id = $1", [actor.userId]);
+        } else {
+          await pool.query(
+            `INSERT INTO irc_user_roles (user_id, role, scope_type, channel_id, granted_by)
+             VALUES ($1, $2, 'channel', $3, $4)`,
+            [actor.userId, scenario.kind === "custom" ? roleKey : "community_admin", channelId, owner.userId],
+          );
+        }
+        if (scenario.kind === "custom") {
+          const link = await pool.query(
+            `INSERT INTO irc_role_permissions (role, permission_id)
+             SELECT $1, id FROM irc_permission_definitions WHERE key = $2`,
+            [roleKey, scenario.permission],
+          );
+          assert.equal(link.rowCount, 1, label);
+        }
+        broadcasts.length = 0;
+        const allowed = await invite();
+        assert.equal(allowed.status, 201, `${label}: ${JSON.stringify(allowed)}`);
+        assert.deepEqual(await saved(), [{ invites: 1, notifications: 1 }], label);
+        assert.equal(broadcasts.length, 1, label);
+        assert.equal(broadcasts[0][0], target.userId, label);
+        assert.deepEqual((await pool.query(
+          "SELECT invited_by FROM irc_channel_invites WHERE channel_id = $1",
+          [channelId],
+        )).rows, [{ invited_by: actor.userId }], label);
+        // Remove only the successful control's effects before racing the same grant.
+        await pool.query("DELETE FROM irc_channel_invites WHERE channel_id = $1", [channelId]);
+        await pool.query(
+          "DELETE FROM irc_notifications WHERE user_id = $1 AND type = 'channel_invite' AND entity_id = $2",
+          [target.userId, String(channelId)],
+        );
+        broadcasts.length = 0;
+        await revocation.query("BEGIN");
+        if (scenario.revoke === "primary") {
+          await revocation.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [actor.userId]);
+        } else if (scenario.revoke === "assignment") {
+          await revocation.query("DELETE FROM irc_user_roles WHERE user_id = $1", [actor.userId]);
+        } else if (scenario.revoke === "permission") {
+          await revocation.query("DELETE FROM irc_role_permissions WHERE role = $1", [roleKey]);
+        } else {
+          await revocation.query("UPDATE irc_custom_roles SET is_active = false WHERE key = $1", [roleKey]);
+        }
+        const pendingInvite = invite();
+        let denied: ApiResponse;
+        try {
+          let blocked = false;
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            // The revocation transaction otherwise retains its first activity snapshot.
+            await revocation.query("SELECT pg_stat_clear_snapshot()");
+            const waiting = await revocation.query(
+              `SELECT 1 FROM pg_stat_activity
+               WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid)) AND query ILIKE $1`,
+              [`%${scenario.table}%`],
+            );
+            if (waiting.rowCount) { blocked = true; break; }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.equal(blocked, true, `${label}: invite must wait for the authority lock`);
+        } finally {
+          await revocation.query("COMMIT");
+          denied = await pendingInvite;
+        }
+        for (const response of [denied, await invite()]) {
+          assert.equal(response.status, 403, `${label}: ${JSON.stringify(response)}`);
+          assert.deepEqual(response.body, { error: "Only channel operators can invite users." }, label);
+        }
+        assert.deepEqual(await saved(), [{ invites: 0, notifications: 0 }], label);
+        assert.equal(broadcasts.length, 0, label);
+      }
+    } finally {
+      broadcast.mock.restore();
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
+      await pool.query("DELETE FROM irc_user_roles WHERE user_id = $1", [actor.userId]);
+      await pool.query("DELETE FROM irc_role_permissions WHERE role = $1", [roleKey]);
+      await pool.query("DELETE FROM irc_custom_roles WHERE key = $1", [roleKey]);
+      await removeTestChannels(channelIds, [owner.userId, actor.userId, target.userId]);
     }
   });
 

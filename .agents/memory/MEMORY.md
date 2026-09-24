@@ -34,3 +34,4 @@
 - [Message notification intent](message-notification-intent.md) — preserve alert intent without depending on notification-table availability or mutable usernames.
 - [Pagination test prerequisites](pagination-test-prerequisites.md) — focused authenticated tests need shared role setup selected and ordered before dependent cases.
 - [Filtered pnpm test globs](filtered-pnpm-test-globs.md) — shell globs expand before pnpm changes workspace, so run package-local patterns in the package shell.
+- [PostgreSQL race observation](postgres-race-observation.md) — refresh statistics snapshots when polling lock contention inside a blocker transaction.
