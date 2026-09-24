@@ -2811,7 +2811,7 @@ function TaskBoard({ detail, working, setWorking, setNotice, setError, onRefresh
   </section>;
 }
 
-function OrganizationPanel({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
+export function OrganizationPanel({ detail, working, setWorking, setNotice, setError, onRefresh }: { detail: CommunityDetail; working: boolean; setWorking: (value: boolean) => void; setNotice: (value: string) => void; setError: (value: string) => void; onRefresh: () => Promise<void> }) {
   const [department, setDepartment] = useState("");
   const [location, setLocation] = useState("");
   const [team, setTeam] = useState("");
@@ -2875,6 +2875,21 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       await onRefresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update team membership");
+    } finally {
+      setWorking(false);
+    }
+  };
+  const updateUnitManager = async (unitType: "departments" | "teams", unitId: number, managerId: string | null) => {
+    setWorking(true);
+    try {
+      await api(`/communities/${detail.community.id}/${unitType}/${unitId}/manager`, {
+        method: "PATCH",
+        body: JSON.stringify({ managerId }),
+      });
+      setNotice(`${unitType === "departments" ? "Department" : "Team"} manager assignment updated.`);
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update organization unit manager");
     } finally {
       setWorking(false);
     }
@@ -2949,8 +2964,17 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     }
   };
   const filteredEmployees = detail.employees.filter((employee) => {
-    const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name ?? "";
+    const department = detail.departments.find((item) => item.id === employee.departmentId);
+    const departmentName = department?.name ?? "";
     const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name ?? "";
+    const managerName = detail.employees.find((item) => item.userId === employee.managerId)?.displayName ?? "";
+    const departmentManagerName = detail.employees.find((item) => item.userId === department?.managerId)?.displayName ?? "";
+    const employeeTeams = detail.teams.filter((item) => employee.teamIds.includes(item.id));
+    const teamNames = employeeTeams.map((item) => item.name).join(" ");
+    const teamManagerNames = employeeTeams
+      .map((teamItem) => detail.employees.find((item) => item.userId === teamItem.managerId)?.displayName ?? "")
+      .filter(Boolean)
+      .join(" ");
     const roleNames = detail.assignments.filter((item) => item.userId === employee.userId).map((item) => item.role).join(" ");
     const searchable = [
       employee.displayName,
@@ -2958,6 +2982,10 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
       employee.jobTitle,
       departmentName,
       locationName,
+      managerName,
+      departmentManagerName,
+      teamNames,
+      teamManagerNames,
       roleNames,
       employee.presenceStatus,
       employee.employmentStatus,
@@ -2965,35 +2993,63 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
     return searchable.includes(directorySearch.trim().toLowerCase());
   });
   return <section className="space-y-5">
-    {detail.canManage && <div className="grid gap-5 xl:grid-cols-3">
-      <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/departments`, { name: department }, "Department created."); setDepartment(""); }} className="rounded-xl border border-border bg-card p-5">
+    {(detail.canManage || detail.canManageOrganization) && <div className="grid gap-5 xl:grid-cols-3">
+      <div className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-mono text-sm font-bold">departments</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.departments.length} departments</p>
-        <input required value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="Operations" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
-        <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add department</button>
-        <div className="mt-4 space-y-2">{detail.departments.map((item) => <div key={item.id} className="rounded border border-border/70 px-3 py-2 font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></div>)}</div>
-      </form>
-      <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/locations`, { name: location }, "Location created."); setLocation(""); }} className="rounded-xl border border-border bg-card p-5">
+        {detail.canManage && <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/departments`, { name: department }, "Department created."); setDepartment(""); }}>
+          <input required value={department} onChange={(event) => setDepartment(event.target.value)} placeholder="Operations" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
+          <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add department</button>
+        </form>}
+        <div className="mt-4 space-y-2">{detail.departments.map((item) => {
+          const managerName = detail.employees.find((employee) => employee.userId === item.managerId)?.displayName;
+          return <div key={item.id} className="rounded border border-border/70 px-3 py-2">
+            <p className="font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></p>
+            {detail.canManageOrganization
+              ? <label className="mt-2 block font-mono text-[9px] text-muted-foreground">Manager<select aria-label={`Manager for ${item.name}`} disabled={working} value={item.managerId ?? ""} onChange={(event) => void updateUnitManager("departments", item.id, event.target.value || null)} className="mt-1 h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.employees.filter((employee) => employee.employmentStatus === "active").map((employee) => <option key={employee.userId} value={employee.userId}>{employee.displayName}</option>)}</select></label>
+              : <p className="mt-1 font-mono text-[9px] text-muted-foreground">Manager: {managerName ?? "Unassigned"}</p>}
+          </div>;
+        })}</div>
+      </div>
+      <div className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-mono text-sm font-bold">locations</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.locations.length} locations</p>
-        <input required value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Downtown office" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
-        <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add location</button>
+        {detail.canManage && <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/locations`, { name: location }, "Location created."); setLocation(""); }}>
+          <input required value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Downtown office" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
+          <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add location</button>
+        </form>}
         <div className="mt-4 space-y-2">{detail.locations.map((item) => <div key={item.id} className="rounded border border-border/70 px-3 py-2 font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.timezone}</span></div>)}</div>
-      </form>
-      <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/teams`, { name: team }, "Team created."); setTeam(""); }} className="rounded-xl border border-border bg-card p-5">
+      </div>
+      <div className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-mono text-sm font-bold">teams</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{detail.teams.length} teams</p>
-        <input required value={team} onChange={(event) => setTeam(event.target.value)} placeholder="Field service team" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
-        <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add team</button>
-        <div className="mt-4 space-y-2">{detail.teams.map((item) => <div key={item.id} className="rounded border border-border/70 px-3 py-2 font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></div>)}</div>
-      </form>
+        {detail.canManage && <form onSubmit={(event) => { event.preventDefault(); void mutate(`/communities/${detail.community.id}/teams`, { name: team }, "Team created."); setTeam(""); }}>
+          <input required value={team} onChange={(event) => setTeam(event.target.value)} placeholder="Field service team" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" />
+          <button disabled={working} className="mt-3 rounded bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground">add team</button>
+        </form>}
+        <div className="mt-4 space-y-2">{detail.teams.map((item) => {
+          const managerName = detail.employees.find((employee) => employee.userId === item.managerId)?.displayName;
+          const departmentName = detail.departments.find((departmentItem) => departmentItem.id === item.departmentId)?.name;
+          return <div key={item.id} className="rounded border border-border/70 px-3 py-2">
+            <p className="font-mono text-xs">{item.name}<span className="ml-2 text-[9px] text-muted-foreground">{item.status}</span></p>
+            {(departmentName || managerName) && <p className="mt-1 font-mono text-[9px] text-muted-foreground">{[departmentName, managerName ? `Manager: ${managerName}` : null].filter(Boolean).join(" · ")}</p>}
+            {detail.canManageOrganization && <label className="mt-2 block font-mono text-[9px] text-muted-foreground">Manager<select aria-label={`Manager for ${item.name}`} disabled={working} value={item.managerId ?? ""} onChange={(event) => void updateUnitManager("teams", item.id, event.target.value || null)} className="mt-1 h-8 w-full rounded border border-input bg-background px-2 font-mono text-[10px]"><option value="">Unassigned</option>{detail.employees.filter((employee) => employee.employmentStatus === "active").map((employee) => <option key={employee.userId} value={employee.userId}>{employee.displayName}</option>)}</select></label>}
+          </div>;
+        })}</div>
+      </div>
     </div>}
     <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
-       <section className="rounded-xl border border-border bg-card">
-         <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
+        <section className="rounded-xl border border-border bg-card">
+          <div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">company directory</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{filteredEmployees.length} of {detail.employees.length} employees · search by name, position, department, location, manager, role, or status</p><input value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search employees…" className="mt-4 h-9 w-full rounded border border-input bg-background px-3 font-mono text-xs" /></div>
           <div className="divide-y divide-border">{filteredEmployees.map((employee) => {
             const departmentName = detail.departments.find((item) => item.id === employee.departmentId)?.name;
             const locationName = detail.locations.find((item) => item.id === employee.locationId)?.name;
+            const managerName = detail.employees.find((item) => item.userId === employee.managerId)?.displayName;
+            const departmentManagerId = detail.departments.find((item) => item.id === employee.departmentId)?.managerId;
+            const departmentManagerName = detail.employees.find((item) => item.userId === departmentManagerId)?.displayName;
             const role = detail.assignments.find((item) => item.userId === employee.userId && item.scopeType === "community")?.role ?? "member";
             const online = employee.presenceStatus === "online";
             const employeeTeams = detail.teams.filter((item) => employee.teamIds.includes(item.id));
+            const teamManagerNames = [...new Set(employeeTeams
+              .map((teamItem) => detail.employees.find((item) => item.userId === teamItem.managerId)?.displayName)
+              .filter((name): name is string => Boolean(name)))];
             const eligibleManagers = detail.employees.filter((item) => item.userId !== employee.userId && item.employmentStatus === "active");
             return <div key={employee.userId} className="px-5 py-4">
               <div className="flex flex-wrap items-center gap-3">
@@ -3001,7 +3057,7 @@ function OrganizationPanel({ detail, working, setWorking, setNotice, setError, o
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-mono text-xs font-bold">{employee.displayName}</p>
                   <p className="mt-1 font-mono text-[10px] text-muted-foreground">{employee.jobTitle || "Employee"}{departmentName && ` · ${departmentName}`}</p>
-                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Teams: {employeeTeams.map((item) => item.name).join(", ") || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p>
+                  <p className="mt-1 font-mono text-[10px] text-muted-foreground">Location: {locationName || "Unassigned"} · Teams: {employeeTeams.map((item) => item.name).join(", ") || "Unassigned"} · Reporting manager: {managerName || "Unassigned"} · Department manager: {departmentManagerName || "Unassigned"} · Team manager: {teamManagerNames.join(", ") || "Unassigned"} · Status: {online ? "Online" : "Offline"}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded bg-muted px-2 py-1 font-mono text-[9px] uppercase text-muted-foreground">{role.replaceAll("_", " ")}</span>

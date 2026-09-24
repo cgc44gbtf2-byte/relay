@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
 
 type Channel = {
   id: number;
@@ -90,9 +90,11 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
+    const { rerender } = render(<OrganizationPanel detail={detail} {...props} />);
+
+    const directoryLines = screen.getAllByText(/Reporting manager:/);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
-    const select = await screen.findByTestId("select-organize-category");
+    const select = await screen.findByTestId("select-public-space");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -112,7 +114,11 @@ describe("channel category organization", () => {
       channels: [{ id: 7, name: "#team", categoryId: null }],
       categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
-    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<OrganizationPanel detail={detail} {...props} />);
+
+    const directoryLines = screen.getAllByText(/Reporting manager:/);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
     fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
     fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
@@ -368,32 +374,9 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
 
-describe("deleted room recovery", () => {
-  beforeEach(() => {
-    vi.stubGlobal("alert", vi.fn());
-    vi.stubGlobal("prompt", vi.fn(() => "new topic"));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    cleanup();
-    latestWebSocket = null;
-    webSocketFrames = [];
-    vi.unstubAllGlobals();
-  });
-
-  it("moves an owned channel into a same-workspace category and back without hiding history", async () => {
-    await renderChat({
-      missingRequest: "event",
-      owner: true,
-      fallbackChannels: [room(1, "#deleted-room", "user-1"), room(2, "#fallback-room")],
-      categories: [
-        { id: 31, name: "project room", description: "", ownerId: "user-1", communityId: null },
-        { id: 32, name: "foreign workspace", description: "", ownerId: "user-1", communityId: 2 },
-      ],
-    });
-    await screen.findByText("stale history");
-    fireEvent.click(await screen.findByTestId("button-organize-current-channel"));
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      jsonResponse({ managerId: JSON.parse(String(init?.body)).managerId }),
+    );
     const category = screen.getByLabelText("category") as HTMLSelectElement;
     expect(category.querySelector('option[value="31"]')).not.toBeNull();
     expect(category.querySelector('option[value="32"]')).toBeNull();
@@ -890,3 +873,7 @@ describe("frontend route and document error hardening", () => {
   });
 
 });
+
+    const props = { working: false, setWorking: vi.fn(), setNotice: vi.fn(), setError: vi.fn(), onRefresh };
+
+    const updatedDirectoryLine = screen.getAllByText(/Reporting manager:/)[1];

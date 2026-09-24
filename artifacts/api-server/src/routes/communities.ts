@@ -1376,6 +1376,116 @@ router.post("/communities/:communityId/teams", requireAuth, async (req: Authenti
   res.status(201).json(team);
 });
 
+type OrganizationUnitKind = "departments" | "teams";
+
+async function updateOrganizationUnitManager(
+  userId: string,
+  communityId: number,
+  unitId: number,
+  managerId: string | null,
+  unitKind: OrganizationUnitKind,
+): Promise<
+  | { outcome: "forbidden" }
+  | { outcome: "not_found" }
+  | { outcome: "invalid_manager" }
+  | { outcome: "updated"; unit: typeof departmentsTable.$inferSelect | typeof teamsTable.$inferSelect }
+> {
+  return db.transaction(async (tx) => {
+    if (!(await hasPermission(userId, "manage_organization", { communityId }, tx, true))) {
+      return { outcome: "forbidden" } as const;
+    }
+
+    if (managerId !== null) {
+      const [manager] = await tx.select({ userId: employeeProfilesTable.userId })
+        .from(employeeProfilesTable)
+        .where(and(
+          eq(employeeProfilesTable.communityId, communityId),
+          eq(employeeProfilesTable.userId, managerId),
+          eq(employeeProfilesTable.employmentStatus, "active"),
+        ))
+        .for("update");
+      if (!manager) return { outcome: "invalid_manager" } as const;
+      const [membership] = await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+        .where(and(
+          eq(communityMembersTable.communityId, communityId),
+          eq(communityMembersTable.userId, managerId),
+        ))
+        .for("update");
+      if (!membership) return { outcome: "invalid_manager" } as const;
+    }
+
+    if (unitKind === "departments") {
+      const [unit] = await tx.select({ id: departmentsTable.id }).from(departmentsTable).where(and(
+        eq(departmentsTable.id, unitId),
+        eq(departmentsTable.communityId, communityId),
+      )).for("update");
+      if (!unit) return { outcome: "not_found" } as const;
+    } else {
+      const [unit] = await tx.select({ id: teamsTable.id }).from(teamsTable).where(and(
+        eq(teamsTable.id, unitId),
+        eq(teamsTable.communityId, communityId),
+      )).for("update");
+      if (!unit) return { outcome: "not_found" } as const;
+    }
+
+    const [unit] = unitKind === "departments"
+      ? await tx.update(departmentsTable).set({ managerId }).where(and(
+        eq(departmentsTable.id, unitId),
+        eq(departmentsTable.communityId, communityId),
+      )).returning()
+      : await tx.update(teamsTable).set({ managerId }).where(and(
+        eq(teamsTable.id, unitId),
+        eq(teamsTable.communityId, communityId),
+      )).returning();
+    if (!unit) return { outcome: "not_found" } as const;
+    return { outcome: "updated", unit } as const;
+  });
+}
+
+for (const unitKind of ["departments", "teams"] as const) {
+  router.patch(`/communities/:communityId/${unitKind}/:unitId/manager`, requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+    const userId = getUserId(req);
+    const communityId = Number(param(req, "communityId"));
+    const unitId = Number(param(req, "unitId"));
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+    const rawManagerId = body.managerId;
+    const managerId = rawManagerId === null || rawManagerId === ""
+      ? null
+      : typeof rawManagerId === "string" && rawManagerId.length > 0
+        ? rawManagerId
+        : undefined;
+    if (!Number.isSafeInteger(communityId) || communityId <= 0
+      || !Number.isSafeInteger(unitId) || unitId <= 0
+      || !Object.hasOwn(body, "managerId")
+      || managerId === undefined) {
+      res.status(400).json({ error: "Choose a valid manager or unassigned." });
+      return;
+    }
+
+    const result = await updateOrganizationUnitManager(userId, communityId, unitId, managerId, unitKind);
+    if (result.outcome === "forbidden") {
+      res.status(403).json({ error: "You cannot assign organization unit managers in this workspace." });
+      return;
+    }
+    if (result.outcome === "not_found") {
+      res.status(404).json({ error: "Organization unit not found in this workspace." });
+      return;
+    }
+    if (result.outcome === "invalid_manager") {
+      res.status(400).json({ error: "Manager must be an active employee in this workspace." });
+      return;
+    }
+    const unitLabel = unitKind === "departments" ? "department" : "team";
+    await writeCommunityAudit(userId, `assigned_${unitLabel}_manager`, communityId, {
+      resourceType: unitLabel,
+      resourceId: unitId,
+      targetId: managerId ?? undefined,
+      details: managerId ? `${unitLabel} manager assigned` : `${unitLabel} manager cleared`,
+    });
+    res.json(result.unit);
+  });
+}
+
 router.patch("/communities/:communityId/employees/:employeeId", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
   const communityId = Number(param(req, "communityId"));
@@ -1433,6 +1543,18 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
           inArray(teamMembersTable.teamId, workspaceTeams.map((team) => team.id)),
         ));
       }
+      await tx.update(departmentsTable).set({ managerId: null }).where(and(
+        eq(departmentsTable.communityId, communityId),
+        eq(departmentsTable.managerId, employeeId),
+      ));
+      await tx.update(teamsTable).set({ managerId: null }).where(and(
+        eq(teamsTable.communityId, communityId),
+        eq(teamsTable.managerId, employeeId),
+      ));
+      await tx.update(employeeProfilesTable).set({ managerId: null }).where(and(
+        eq(employeeProfilesTable.communityId, communityId),
+        eq(employeeProfilesTable.managerId, employeeId),
+      ));
       await tx.delete(userRolesTable).where(and(
         eq(userRolesTable.userId, employeeId),
         eq(userRolesTable.communityId, communityId),

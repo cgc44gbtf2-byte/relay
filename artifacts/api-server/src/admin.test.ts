@@ -5723,10 +5723,11 @@ describe("admin access controls", () => {
     const ownerSession = await createTestSession("organization_owner");
     const managerSession = await createTestSession("organization_manager");
     const employeeSession = await createTestSession("organization_employee");
+    const foreignManagerSession = await createTestSession("organization_foreign_manager");
     const communityIds: number[] = [];
 
     try {
-      for (const session of [managerSession, employeeSession]) {
+      for (const session of [managerSession, employeeSession, foreignManagerSession]) {
         const profile = await apiRequest(session, "/me");
         assert.equal(profile.status, 200, JSON.stringify(profile));
       }
@@ -5755,6 +5756,16 @@ describe("admin access controls", () => {
         `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
          VALUES ($1, $2, 'active'), ($1, $3, 'active')`,
         [communityId, managerSession.userId, employeeSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member')`,
+        [foreignCommunityId, foreignManagerSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
+         VALUES ($1, $2, 'active')`,
+        [foreignCommunityId, foreignManagerSession.userId],
       );
       await pool.query(
         `INSERT INTO irc_user_roles
@@ -5794,6 +5805,32 @@ describe("admin access controls", () => {
       assert.equal(teamResponse.status, 201, JSON.stringify(teamResponse));
       assert.ok(teamResponse.body && typeof teamResponse.body === "object");
       const teamId = (teamResponse.body as { id?: unknown }).id as number;
+      const assignDepartmentManager = await apiRequest(managerSession, `/communities/${communityId}/departments/${departmentId}/manager`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ managerId: managerSession.userId }),
+      });
+      assert.equal(assignDepartmentManager.status, 200, JSON.stringify(assignDepartmentManager));
+      assert.equal((assignDepartmentManager.body as { managerId?: string }).managerId, managerSession.userId);
+      const assignTeamManager = await apiRequest(managerSession, `/communities/${communityId}/teams/${teamId}/manager`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ managerId: managerSession.userId }),
+      });
+      assert.equal(assignTeamManager.status, 200, JSON.stringify(assignTeamManager));
+      assert.equal((assignTeamManager.body as { managerId?: string }).managerId, managerSession.userId);
+      const crossWorkspaceUnitManager = await apiRequest(managerSession, `/communities/${communityId}/departments/${departmentId}/manager`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ managerId: foreignManagerSession.userId }),
+      });
+      assert.equal(crossWorkspaceUnitManager.status, 400, JSON.stringify(crossWorkspaceUnitManager));
+      const unauthorizedUnitManager = await apiRequest(employeeSession, `/communities/${communityId}/teams/${teamId}/manager`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ managerId: employeeSession.userId }),
+      });
+      assert.equal(unauthorizedUnitManager.status, 403, JSON.stringify(unauthorizedUnitManager));
       const foreignTeamResponse = await apiRequest(ownerSession, `/communities/${foreignCommunityId}/teams`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -5859,9 +5896,16 @@ describe("admin access controls", () => {
       const detail = await apiRequest(managerSession, `/communities/${communityId}`);
       assert.equal(detail.status, 200, JSON.stringify(detail));
       assert.ok(detail.body && typeof detail.body === "object");
-      const detailEmployee = (detail.body as { employees?: Array<{ userId: string; teamIds: number[] }> }).employees
+      const detailBody = detail.body as {
+        employees?: Array<{ userId: string; teamIds: number[] }>;
+        departments?: Array<{ id: number; managerId: string | null }>;
+        teams?: Array<{ id: number; managerId: string | null }>;
+      };
+      const detailEmployee = detailBody.employees
         ?.find((employee) => employee.userId === employeeSession.userId);
       assert.deepEqual(detailEmployee?.teamIds, [teamId]);
+      assert.equal(detailBody.departments?.find((department) => department.id === departmentId)?.managerId, managerSession.userId);
+      assert.equal(detailBody.teams?.find((team) => team.id === teamId)?.managerId, managerSession.userId);
 
       const foreignTeamAssignment = await apiRequest(
         managerSession,
@@ -5876,6 +5920,22 @@ describe("admin access controls", () => {
         { method: "DELETE" },
       );
       assert.equal(removeFromTeam.status, 200, JSON.stringify(removeFromTeam));
+      const offboardManager = await apiRequest(ownerSession, `/communities/${communityId}/employees/${managerSession.userId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ employmentStatus: "terminated" }),
+      });
+      assert.equal(offboardManager.status, 200, JSON.stringify(offboardManager));
+      const updatedDirectory = await apiRequest(ownerSession, `/communities/${communityId}`);
+      assert.equal(updatedDirectory.status, 200, JSON.stringify(updatedDirectory));
+      const updatedDirectoryBody = updatedDirectory.body as {
+        employees?: Array<{ userId: string; managerId: string | null }>;
+        departments?: Array<{ id: number; managerId: string | null }>;
+        teams?: Array<{ id: number; managerId: string | null }>;
+      };
+      assert.equal(updatedDirectoryBody.departments?.find((department) => department.id === departmentId)?.managerId, null);
+      assert.equal(updatedDirectoryBody.teams?.find((team) => team.id === teamId)?.managerId, null);
+      assert.equal(updatedDirectoryBody.employees?.find((employee) => employee.userId === employeeSession.userId)?.managerId, null);
     } finally {
       if (communityIds.length) {
         await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
