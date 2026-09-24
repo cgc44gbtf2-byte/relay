@@ -13,4 +13,14 @@ On a fresh local cluster, schema push can try to create composite foreign keys b
 
 When the push encounters multiple composite-FK ordering failures in succession, another safe option is to clone only the development database's schema (no data) into a fresh disposable test database. The dump must be read-only on development; remove the empty target database's default `public` schema before restoring a schema-only dump that creates it. This verifies route behavior against the current development shape, but does not prove Drizzle can bootstrap a fresh schema.
 
-A migration rehearsal passing on its own disposable database does not prove the CI runner can initialize a separate fresh database: Drizzle's subsequent schema push may request an interactive rename decision and fail without a TTY, which also makes the strict no-op check fail. Preserve the no-op gate; diagnose schema initialization separately against an isolated database rather than treating the rehearsal result as CI success.
+Keep migration rehearsal and current-schema bootstrap on separate disposable databases.
+
+**Why:** Rehearsal leaves its migration ledger and historical schema in its target. Reusing that target for a current-schema push can trigger interactive rename decisions, even though a genuinely empty database bootstraps correctly.
+
+**How to apply:** Preserve the strict read-only no-op gate and clean up both databases on success and failure. Derive the forced-failure rehearsal migration number and expected ledger size from the reviewed sequence, rather than hardcoding them as migrations grow.
+
+Cached Clerk test-session JWTs must be refreshed before their expiration.
+
+**Why:** Longer authenticated suites can outlive short-lived tokens; indefinite caching produced late-suite 401 failures unrelated to the endpoint being tested.
+
+**How to apply:** Check the cached token's expiry with a small safety margin before ordinary authenticated test requests. Keep explicit expired-token and revocation tests separate; never relax production verification.

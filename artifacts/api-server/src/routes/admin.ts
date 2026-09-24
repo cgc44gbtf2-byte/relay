@@ -855,10 +855,6 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     res.status(403).json({ error: "Admin access required." });
     return;
   }
-  if (req.body.confirm !== true) {
-    res.status(400).json({ error: "Explicit confirmation is required to clear channel history." });
-    return;
-  }
   const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
   const channelId = Number(rawId);
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
@@ -901,6 +897,19 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
       })
       .where(eq(channelsTable.id, channelId))
       .returning();
+    const auditDetails = hasCategoryId
+      ? categoryId === null
+        ? "Moved to unassigned channels"
+        : `Moved to room ${categoryId}`
+      : topic || "Cleared channel topic";
+    await tx.insert(adminAuditLogsTable).values({
+      actorId: actor.clerkId,
+      actorDisplayName: actor.displayName,
+      action: hasCategoryId ? "moved_channel_room" : "updated_channel_topic",
+      targetId: String(channelId),
+      targetLabel: updated.name,
+      details: auditDetails,
+    });
     return { outcome: "updated", updated } as const;
   });
   if (result.outcome === "forbidden") {
@@ -917,11 +926,6 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
   }
   const { updated } = result;
 
-  const auditDetails = hasCategoryId
-    ? categoryId === null
-      ? "Moved to unassigned channels"
-      : `Moved to room ${categoryId}`
-    : topic || "Cleared channel topic";
   const { passwordHash: _passwordHash, ...safeChannel } = updated;
   wsHub.broadcastChannel(channelId, { type: "channel", channel: safeChannel });
   if (hasCategoryId) wsHub.broadcastChannelListChanged();
@@ -946,21 +950,28 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
   const result = await db.transaction(async (tx) => {
     const [currentActor] = await tx.select({ role: usersTable.role })
       .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
-    if (currentActor?.role !== "admin") return "forbidden";
-    const [channel] = await tx.select({ id: channelsTable.id }).from(channelsTable)
+    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
+    const [channel] = await tx.select({ id: channelsTable.id, name: channelsTable.name }).from(channelsTable)
       .where(eq(channelsTable.id, channelId)).for("update");
-    if (!channel) return "not_found";
-    await tx.delete(messagesTable).where(eq(messagesTable.channelId, channelId));
+    if (!channel) return { outcome: "not_found" } as const;
+    const deleted = await tx
+      .delete(messagesTable)
+      .where(eq(messagesTable.channelId, channelId))
+      .returning({ id: messagesTable.id });
     await tx.insert(adminAuditLogsTable).values({
       actorId: actor.clerkId, actorDisplayName: actor.displayName,
-      action: "cleared_channel_history", targetId: String(channelId), details: "Channel message history cleared",
+      action: "cleared_channel_history", targetId: String(channelId), targetLabel: channel.name,
+      details: `${deleted.length} messages deleted`,
     });
-    return "cleared";
+    return { outcome: "cleared", deleted: deleted.length } as const;
   });
-  if (result !== "cleared") {
-    res.status(result === "forbidden" ? 403 : 404).json({ error: result === "forbidden" ? "Admin access required." : "Channel not found." }); return;
+  if (result.outcome === "forbidden") {
+    res.status(403).json({ error: "Admin access required." }); return;
   }
-  res.json({ ok: true });
+  if (result.outcome === "not_found") {
+    res.status(404).json(channelNotFoundError); return;
+  }
+  res.json({ ok: true, deleted: result.deleted });
 });
 
 export default router;

@@ -35,9 +35,10 @@ TEST_DATABASE_URL='postgres://.../web_irc_test' \
 
 CI should provide `CI_TEST_DATABASE_ADMIN_URL` as a protected environment secret for a
 PostgreSQL server where the validation job may create and drop databases. Run
-`pnpm --filter @workspace/api-server run test:ci`; this creates a unique database for
-the run, pushes the schema with `push:test`, runs the API tests, and drops the database
-even when setup or tests fail. The command never reads `DATABASE_URL` or a pre-existing
+`pnpm --filter @workspace/api-server run test:ci`; this creates separate disposable
+databases for migration rehearsal and current-schema API tests, pushes the current
+schema with `push:test`, checks for a strict read-only no-op, runs the API tests, and
+drops both databases even when setup or tests fail. The command never reads `DATABASE_URL` or a pre-existing
 `TEST_DATABASE_URL`, so development and preview databases cannot be used by accident.
 
 The supported PostgreSQL CI runner versions are defined in

@@ -87,7 +87,11 @@ async function apiRequest(
   init: RequestInit = {},
 ): Promise<ApiResponse> {
   let token = sessionTokens.get(session.sessionId);
-  if (!token) {
+  // Long integration runs must not reuse short-lived session JWTs past expiry.
+  const expiresAt = token
+    ? Number(JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).exp) * 1000
+    : 0;
+  if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now() + 10_000) {
     token = (await withClerkRateLimitRetry(
       () => clerkClient.sessions.getToken(session.sessionId),
     )).jwt;
@@ -2483,11 +2487,11 @@ describe("admin access controls", () => {
          VALUES ($1, $2, $3)`,
         [actorId, username, displayName],
       );
-      const inserted = await pool.query<{ id: number }>(
+      const inserted = await pool.query<{ id: number; created_at: Date }>(
         `INSERT INTO irc_admin_audit_logs
            (actor_id, actor_display_name, action, target_id, target_label, details)
          VALUES ($1, $2, 'audit_actor_deleted', 'preserved-target', 'Preserved target', 'Preserved details')
-         RETURNING id`,
+         RETURNING id, created_at`,
         [actorId, displayName],
       );
       auditId = inserted.rows[0]?.id;
@@ -2524,10 +2528,14 @@ describe("admin access controls", () => {
         }>;
       }).activity;
       assert.deepEqual(activity?.find((entry) => entry.action === "audit_actor_deleted"), {
+        id: auditId,
         actorId,
         actor: displayName,
         action: "audit_actor_deleted",
+        targetId: "preserved-target",
         targetLabel: "Preserved target",
+        details: "Preserved details",
+        createdAt: inserted.rows[0].created_at.toISOString(),
       });
     } finally {
       if (auditId !== undefined) {
@@ -2851,7 +2859,7 @@ describe("admin access controls", () => {
   });
 
   test("returns 404 without writing audit activity for unknown channel maintenance targets", async () => {
-    const unknownChannelId = -1;
+    const unknownChannelId = 2147483647;
     const beforeAudit = await pool.query(
       "SELECT id, actor_id, action, target_id, target_label, details FROM irc_admin_audit_logs ORDER BY id",
     );
@@ -2993,6 +3001,7 @@ describe("admin access controls", () => {
             `SELECT actor_id, action, target_id, target_label, details
              FROM irc_admin_audit_logs
              WHERE target_id = ANY($1::text[])
+               AND action IN ('updated_channel_topic', 'cleared_channel_history')
              ORDER BY id`,
             [channelIds.map(String)],
           ),
@@ -3036,7 +3045,7 @@ describe("admin access controls", () => {
   });
 
   test("uses the same missing-channel response across public and admin routes", async () => {
-    const unknownChannelId = -1;
+    const unknownChannelId = 2147483647;
     const requests: Array<Promise<ApiResponse>> = [
       apiRequest(memberSession, `/channels/${unknownChannelId}/join`, { method: "POST" }),
       apiRequest(memberSession, `/channels/${unknownChannelId}/leave`, { method: "POST" }),
