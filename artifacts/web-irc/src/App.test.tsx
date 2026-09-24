@@ -169,6 +169,7 @@ function installApi({
   fallbackChannels,
   owner = false,
   reconnectedMessages,
+  dmMessages,
   notifications = [],
   notificationsFailure = false,
   channelFailureOnce = false,
@@ -185,6 +186,7 @@ function installApi({
   fallbackChannels: Channel[];
   owner?: boolean;
   reconnectedMessages?: unknown[];
+  dmMessages?: () => unknown[];
   notifications?: Array<{
     id: number;
     type: string;
@@ -272,7 +274,7 @@ function installApi({
     }
     if (url === "/api/dm/user-2/messages" && method === "GET") {
       return jsonResponse({
-        messages: Array.from({ length: 100 }, (_, index) => ({
+        messages: dmMessages?.() ?? Array.from({ length: 100 }, (_, index) => ({
           ...message(1, `dm message ${index}`, `dm-message-${String(index).padStart(3, "0")}`),
           channelId: null,
           recipientId: "user-1",
@@ -704,6 +706,58 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
   });
 
+  it("refreshes direct messages after reconnecting without duplicating stale reactions or deletions", async () => {
+    const dmMessage = (id: string, body: string) => ({
+      ...message(1, body, id),
+      channelId: null,
+      recipientId: "user-1",
+      sender: members()[1],
+    });
+    let serverMessages: unknown[] = [
+      { ...dmMessage("dm-reaction", "reaction before reconnect"), reactions: [{ emoji: "👍", count: 1, reacted: false }] },
+      dmMessage("dm-deleted", "message before deletion"),
+    ];
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      dmMessages: () => serverMessages,
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    expect(await screen.findByText("reaction before reconnect")).toBeTruthy();
+    expect(screen.getByText("message before deletion")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "👍 1" })).toBeTruthy();
+    await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());
+    const firstSocket = latestWebSocket;
+    await act(async () => { firstSocket?.onopen?.(); });
+
+    serverMessages = [
+      { ...dmMessage("dm-reaction", "reaction after reconnect"), reactions: [{ emoji: "👍", count: 2, reacted: true }] },
+      { ...dmMessage("dm-deleted", "[message deleted]"), kind: "deleted", deletedAt: "2026-09-21T12:01:00.000Z" },
+    ];
+    vi.useFakeTimers();
+    await act(async () => {
+      firstSocket?.onclose?.();
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    vi.useRealTimers();
+    const reconnectedSocket = latestWebSocket;
+    expect(reconnectedSocket).toBeTruthy();
+    expect(reconnectedSocket).not.toBe(firstSocket);
+    await act(async () => { reconnectedSocket?.onopen?.(); });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
+      expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+    });
+    expect(screen.queryByText("reaction before reconnect")).toBeNull();
+    expect(screen.queryByText("message before deletion")).toBeNull();
+    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
+  });
+
   it("requests a fresh socket and resubscribes after a connection drops", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
@@ -872,6 +926,19 @@ describe("frontend route and document error hardening", () => {
     expect(screen.queryByText("Real rooms.")).toBeNull();
   });
 
+  it("surfaces document loading failures instead of showing an empty state", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse({ error: "documents unavailable" }, 503)));
+    const detail = {
+      community: { id: 7 },
+      canManage: false,
+    } as Parameters<typeof DocumentCenter>[0]["detail"];
+
+    const setError = vi.fn();
+    render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={setError} />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "documents unavailable");
+    expect(setError).toHaveBeenCalledWith("documents unavailable");
+    expect(screen.queryByText("No documents match this search.")).toBeNull();
+  });
 });
 
     const props = { working: false, setWorking: vi.fn(), setNotice: vi.fn(), setError: vi.fn(), onRefresh };
