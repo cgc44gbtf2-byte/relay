@@ -3464,6 +3464,114 @@ describe("admin access controls", () => {
     }
   });
 
+  test("enforces every built-in workspace role boundary on community role changes", async () => {
+    const ownerSession = await createTestSession("role_matrix_owner");
+    const actorSession = await createTestSession("role_matrix_actor");
+    const targetSession = await createTestSession("role_matrix_target");
+    const communityIds: number[] = [];
+    const assignableRoles = [
+      "member", "moderator", "manager", "department_admin",
+      "workspace_admin", "workspace_owner",
+    ] as const;
+    const actorCases: Array<{
+      role: typeof assignableRoles[number];
+      allowed: readonly (typeof assignableRoles[number])[];
+    }> = [
+      { role: "member", allowed: [] },
+      { role: "moderator", allowed: [] },
+      { role: "manager", allowed: ["member", "moderator"] },
+      { role: "department_admin", allowed: ["member", "moderator", "manager"] },
+      { role: "workspace_admin", allowed: ["member", "moderator", "manager", "department_admin"] },
+      { role: "workspace_owner", allowed: ["member", "moderator", "manager", "department_admin", "workspace_admin"] },
+    ];
+
+    try {
+      for (const session of [actorSession, targetSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const created = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `Role matrix ${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const communityId = (created.body as { id?: number }).id;
+      assert.ok(typeof communityId === "number");
+      communityIds.push(communityId);
+      const other = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [`Other role scope ${randomUUID()}`, `other-role-scope-${randomUUID()}`, ownerSession.userId],
+      );
+      communityIds.push(other.rows[0].id);
+      for (const scopeId of communityIds) {
+        await pool.query(
+          `INSERT INTO irc_community_members (community_id, user_id, status)
+           VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+          [scopeId, actorSession.userId, targetSession.userId],
+        );
+      }
+      const otherCommunityId = other.rows[0].id;
+      const changeRole = (session: TestSession, scopeId: number, role: string) =>
+        apiRequest(session, `/communities/${scopeId}/members/${targetSession.userId}/role`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role }),
+        });
+      const assignedRole = async (scopeId: number) =>
+        (await pool.query<{ role: string }>(
+          `SELECT role FROM irc_user_roles
+           WHERE user_id = $1 AND community_id = $2 AND scope_type = 'community'
+           ORDER BY role`,
+          [targetSession.userId, scopeId],
+        )).rows.map(({ role }) => role);
+
+      for (const { role: actorRole, allowed } of actorCases) {
+        await pool.query(
+          `DELETE FROM irc_user_roles WHERE user_id = $1 AND community_id = $2`,
+          [actorSession.userId, communityId],
+        );
+        if (actorRole !== "member") {
+          await pool.query(
+            `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+             VALUES ($1, $2, 'community', $3, $4)`,
+            [actorSession.userId, actorRole, communityId, ownerSession.userId],
+          );
+        }
+        for (const targetRole of assignableRoles) {
+          const before = await assignedRole(communityId);
+          const response = await changeRole(actorSession, communityId, targetRole);
+          const permitted = allowed.includes(targetRole);
+          assert.equal(response.status, permitted ? 200 : 403,
+            `${actorRole} -> ${targetRole}: ${JSON.stringify(response)}`);
+          assert.deepEqual(await assignedRole(communityId),
+            permitted ? (targetRole === "member" ? [] : [targetRole]) : before,
+            `${actorRole} -> ${targetRole} must ${permitted ? "update" : "preserve"} the assignment`);
+        }
+      }
+
+      // A high-ranking role in one workspace must not authorize changes in another.
+      const beforeOther = await assignedRole(otherCommunityId);
+      const crossWorkspace = await changeRole(actorSession, otherCommunityId, "manager");
+      assert.equal(crossWorkspace.status, 403, JSON.stringify(crossWorkspace));
+      assert.deepEqual(await assignedRole(otherCommunityId), beforeOther);
+
+      // The platform administrator bypasses workspace rank, including owner.
+      for (const targetRole of assignableRoles) {
+        const response = await changeRole(adminSession, communityId, targetRole);
+        assert.equal(response.status, 200, `platform admin -> ${targetRole}: ${JSON.stringify(response)}`);
+        assert.deepEqual(await assignedRole(communityId),
+          targetRole === "member" ? [] : [targetRole]);
+      }
+    } finally {
+      for (const communityId of communityIds.reverse()) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("prevents workspace administrators from promoting at or above their own rank", async () => {
     const ownerSession = await createTestSession("role_guard_owner");
     const actorSession = await createTestSession("role_guard_actor");

@@ -32,26 +32,33 @@ describe("workspace role grant policy", () => {
   });
 
   test("never lets a workspace role grant an equal or higher role", () => {
-    const cases: Array<[string, string, boolean]> = [
-      ["manager", "moderator", true],
-      ["manager", "manager", false],
-      ["manager", "department_admin", false],
-      ["department_admin", "manager", true],
-      ["department_admin", "community_admin", false],
-      ["community_admin", "department_admin", false],
-      ["workspace_admin", "department_admin", true],
-      ["workspace_admin", "workspace_admin", false],
-      ["workspace_admin", "workspace_owner", false],
-      ["workspace_owner", "workspace_admin", true],
-      ["workspace_owner", "workspace_owner", false],
+    const levels = [
+      ["member", "employee", "contractor"],
+      ["moderator"],
+      ["manager", "business_manager"],
+      ["department_admin", "community_admin"],
+      ["workspace_admin"],
+      ["workspace_owner", "business_owner"],
+      ["platform_moderator"],
+      ["admin"],
     ];
-    for (const [actorRole, targetRole, expected] of cases) {
-      assert.equal(
-        canGrantWorkspaceRole([actorRole], targetRole),
-        expected,
-        `${actorRole} -> ${targetRole}`,
-      );
+    for (const [actorLevel, actorRoles] of levels.entries()) {
+      for (const actorRole of actorRoles) {
+        for (const [targetLevel, targetRoles] of levels.entries()) {
+          for (const targetRole of targetRoles) {
+            assert.equal(
+              canGrantWorkspaceRole([actorRole], targetRole),
+              actorLevel > targetLevel && targetLevel < 6,
+              `${actorRole} -> ${targetRole}`,
+            );
+          }
+        }
+      }
     }
+    assert.equal(canGrantWorkspaceRole(["manager"], "moderator"), true);
+    assert.equal(canGrantWorkspaceRole(["manager"], "member"), true);
+    assert.equal(canGrantWorkspaceRole(["manager"], "department_admin"), false);
+    assert.equal(canGrantWorkspaceRole(["workspace_admin"], "workspace_owner"), false);
   });
 
   test("does not treat an unknown or custom permission role as ranked authority", () => {
