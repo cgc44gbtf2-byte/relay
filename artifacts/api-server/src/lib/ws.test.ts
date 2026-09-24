@@ -32,6 +32,123 @@ function client(userId: string, fakeSocket: FakeSocket) {
   };
 }
 
+describe("websocket channel-list invalidation", () => {
+  test("notifies authorized private-workspace users but not another workspace or unauthorized user", async () => {
+    const channel = { id: 42, isPrivate: true, communityId: 7 };
+    const allowedUsers = new Set(["workspace-member", "private-channel-member"]);
+    const checkedUsers: string[] = [];
+    const hub = new Hub(
+      async (channelId) => channelId === channel.id ? channel : null,
+      async (_channel, userId) => {
+        checkedUsers.push(userId);
+        return allowedUsers.has(userId);
+      },
+    );
+    const workspaceMemberSocket = socket();
+    const privateChannelMemberSocket = socket();
+    const otherWorkspaceSocket = socket();
+    const unauthorizedSocket = socket();
+    const duplicateWorkspaceMemberSocket = socket();
+    const internals = hub as any;
+    internals.clients.add(client("workspace-member", workspaceMemberSocket));
+    internals.clients.add(client("private-channel-member", privateChannelMemberSocket));
+    internals.clients.add(client("other-workspace-member", otherWorkspaceSocket));
+    internals.clients.add(client("unauthorized", unauthorizedSocket));
+    internals.clients.add(client("workspace-member", duplicateWorkspaceMemberSocket));
+
+    await hub.broadcastChannelListChanged(channel.id);
+
+    const event = [{ type: "channel_list_changed" }];
+    assert.deepEqual(workspaceMemberSocket.events, event);
+    assert.deepEqual(privateChannelMemberSocket.events, event);
+    assert.deepEqual(duplicateWorkspaceMemberSocket.events, event);
+    assert.deepEqual(otherWorkspaceSocket.events, []);
+    assert.deepEqual(unauthorizedSocket.events, []);
+    assert.deepEqual(checkedUsers.sort(), [
+      "other-workspace-member",
+      "private-channel-member",
+      "unauthorized",
+      "workspace-member",
+    ]);
+    hub.dispose();
+  });
+
+  test("keeps public global community discovery invalidation available to every legitimate reader", async () => {
+    const channel = { id: 84, isPrivate: false, communityId: 9 };
+    const hub = new Hub(
+      async () => channel,
+      async () => true,
+    );
+    const communityMemberSocket = socket();
+    const globalCommunityUserSocket = socket();
+    const internals = hub as any;
+    internals.clients.add(client("community-member", communityMemberSocket));
+    internals.clients.add(client("global-community-user", globalCommunityUserSocket));
+
+    await hub.broadcastChannelListChanged(channel.id);
+
+    const event = [{ type: "channel_list_changed" }];
+    assert.deepEqual(communityMemberSocket.events, event);
+    assert.deepEqual(globalCommunityUserSocket.events, event);
+    hub.dispose();
+  });
+
+  test("does not globally invalidate a channel that no longer exists", async () => {
+    const hub = new Hub(
+      async () => null,
+      async () => true,
+    );
+    const connectedSocket = socket();
+    (hub as any).clients.add(client("connected", connectedSocket));
+
+    await hub.broadcastChannelListChanged(404);
+
+    assert.deepEqual(connectedSocket.events, []);
+    hub.dispose();
+  });
+
+  test("bounds concurrent authorization checks and skips clients disconnected while checking", async () => {
+    const channel = { id: 85, isPrivate: true, communityId: 10 };
+    let activeChecks = 0;
+    let maximumActiveChecks = 0;
+    const releases: Array<() => void> = [];
+    const hub = new Hub(
+      async () => channel,
+      async () => {
+        activeChecks++;
+        maximumActiveChecks = Math.max(maximumActiveChecks, activeChecks);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        activeChecks--;
+        return true;
+      },
+    );
+    const internals = hub as any;
+    const clients = Array.from({ length: 12 }, (_, index) => {
+      const connected = client(`user-${index}`, socket());
+      internals.clients.add(connected);
+      return connected;
+    });
+
+    const broadcast = hub.broadcastChannelListChanged(channel.id);
+    while (releases.length < 8) await new Promise((resolve) => setImmediate(resolve));
+    internals.clients.delete(clients[0]);
+    while (releases.length > 0 || activeChecks > 0) {
+      releases.shift()?.();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await broadcast;
+
+    assert.equal(maximumActiveChecks, 8);
+    assert.deepEqual((clients[0].socket as unknown as FakeSocket).events, []);
+    for (const connected of clients.slice(1)) {
+      assert.deepEqual((connected.socket as unknown as FakeSocket).events, [
+        { type: "channel_list_changed" },
+      ]);
+    }
+    hub.dispose();
+  });
+});
+
 describe("websocket channel removal", () => {
   test("notifies only authorized subscribers before cleaning subscriptions", () => {
     const hub = new Hub();

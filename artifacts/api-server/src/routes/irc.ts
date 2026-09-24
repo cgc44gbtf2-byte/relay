@@ -1272,7 +1272,7 @@ router.patch("/channels/:channelId/public-space", requireAuth, async (req: Authe
   }
   const moved = { ...publicChannel(result.updated), communityName: result.destinationName };
   wsHub.broadcastChannel(channelId, { type: "channel", channel: moved });
-  wsHub.broadcastChannelListChanged();
+  void wsHub.broadcastChannelListChanged(channelId);
   res.json(moved);
 });
 
@@ -1348,7 +1348,7 @@ router.patch("/channels/:channelId", requireAuth, async (req: AuthenticatedReque
     return;
   }
   wsHub.broadcastChannel(channelId, { type: "channel", channel: publicChannel(result.updated) });
-  if (hasCategoryId) wsHub.broadcastChannelListChanged();
+  if (hasCategoryId) void wsHub.broadcastChannelListChanged(channelId);
   res.json(publicChannel(result.updated));
 });
 

@@ -928,7 +928,7 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
 
   const { passwordHash: _passwordHash, ...safeChannel } = updated;
   wsHub.broadcastChannel(channelId, { type: "channel", channel: safeChannel });
-  if (hasCategoryId) wsHub.broadcastChannelListChanged();
+  if (hasCategoryId) void wsHub.broadcastChannelListChanged(channelId);
   res.json(safeChannel);
 });
 

@@ -18,10 +18,13 @@ type Client = {
   sessionCheck: ReturnType<typeof setInterval>;
 };
 type Ticket = { userId: string; sessionId: string; expiresAt: number };
+type ChannelReader = typeof channelForRead;
+type ChannelAccessChecker = typeof canReadChannel;
 
 const TICKET_LIFETIME_MS = 60_000;
 const TICKET_CLEANUP_INTERVAL_MS = 60_000;
 const MAX_TICKETS_CLEANED_PER_SWEEP = 1_000;
+const CHANNEL_LIST_ACCESS_CONCURRENCY = 8;
 
 export class Hub {
   private clients = new Set<Client>();
@@ -30,7 +33,10 @@ export class Hub {
   private presenceWrites = new Map<string, Promise<void>>();
   private readonly ticketCleanupTimer: ReturnType<typeof setInterval>;
 
-  constructor() {
+  constructor(
+    private readonly readChannel: ChannelReader = channelForRead,
+    private readonly userCanReadChannel: ChannelAccessChecker = canReadChannel,
+  ) {
     this.ticketCleanupTimer = setInterval(
       () => this.cleanupExpiredTickets(),
       TICKET_CLEANUP_INTERVAL_MS,
@@ -102,9 +108,36 @@ export class Hub {
     }
   }
 
-  broadcastChannelListChanged(): void {
-    for (const client of this.clients) {
-      this.send(client.socket, { type: "channel_list_changed" });
+  async broadcastChannelListChanged(channelId: number): Promise<void> {
+    let channel: Awaited<ReturnType<ChannelReader>>;
+    try {
+      channel = await this.readChannel(channelId);
+    } catch {
+      return;
+    }
+    if (!channel) return;
+
+    const clients = [...this.clients];
+    const userIds = [...new Set(clients.map((client) => client.userId))];
+    const accessByUser = new Map<string, boolean>();
+    let nextUserIndex = 0;
+    const checkAccess = async (): Promise<void> => {
+      while (nextUserIndex < userIds.length) {
+        const userId = userIds[nextUserIndex++];
+        const allowed = await this.userCanReadChannel(channel, userId).catch(() => false);
+        accessByUser.set(userId, allowed);
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(CHANNEL_LIST_ACCESS_CONCURRENCY, userIds.length) },
+        () => checkAccess(),
+      ),
+    );
+    for (const client of clients) {
+      if (this.clients.has(client) && accessByUser.get(client.userId) === true) {
+        this.send(client.socket, { type: "channel_list_changed" });
+      }
     }
   }
 

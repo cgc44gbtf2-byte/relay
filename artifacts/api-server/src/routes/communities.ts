@@ -2917,7 +2917,7 @@ router.patch("/communities/:communityId/channels/:channelId/category", requireAu
     details: categoryId === null ? "Moved to uncategorized" : `Moved to category ${categoryId}`,
   });
   wsHub.broadcastChannel(channelId, { type: "channel", channel: { ...result.updated, passwordHash: undefined } });
-  wsHub.broadcastChannelListChanged();
+  void wsHub.broadcastChannelListChanged(channelId);
   res.json({ ...result.updated, passwordHash: undefined });
 });
 
