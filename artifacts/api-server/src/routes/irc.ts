@@ -41,7 +41,7 @@ import { wsHub } from "../lib/ws";
 import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
 import { isValidUploadedObjectPath, signedObjectUrlForPath, validateUploadMetadata } from "./storage";
-import { channelNotFoundError } from "./errors";
+import { channelAccessRequiredError, channelNotFoundError } from "./errors";
 import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
 import { logger } from "../lib/logger";
@@ -924,7 +924,7 @@ router.get("/channels/:channelId/members", requireAuth, async (req: Authenticate
     return;
   }
   if (!(await canReadChannel(channel, userId))) {
-    res.status(403).json({ error: "Join the private channel before viewing its members." });
+    res.status(403).json(channelAccessRequiredError("Join the private channel before viewing its members."));
     return;
   }
   const page = listPage(req);
@@ -962,7 +962,7 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
     return;
   }
   if (!(await canReadChannel(channel, userId))) {
-    res.status(403).json({ error: "Join the private channel before reading its history." });
+    res.status(403).json(channelAccessRequiredError("Join the private channel before reading its history."));
     return;
   }
   const rawQuery = req.query.q;
@@ -987,7 +987,7 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
   }
   const member = await membership(channel.id, userId);
   if (!member) {
-    res.status(403).json({ error: "Join the channel before sending messages." });
+    res.status(403).json(channelAccessRequiredError("Join the channel before sending messages."));
     return;
   }
   if (member.mutedUntil && member.mutedUntil > new Date()) {
@@ -1028,7 +1028,7 @@ router.post("/channels/:channelId/file-messages", requireAuth, async (req: Authe
   }
   const member = await membership(channel.id, userId);
   if (!member) {
-    res.status(403).json({ error: "Join the channel before sending messages." });
+    res.status(403).json(channelAccessRequiredError("Join the channel before sending messages."));
     return;
   }
   if (member.mutedUntil && member.mutedUntil > new Date()) {

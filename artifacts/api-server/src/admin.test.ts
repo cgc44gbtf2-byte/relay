@@ -5450,6 +5450,7 @@ describe("admin access controls", () => {
       assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
       assert.deepEqual(deniedHistory.body, {
         error: "Join the private channel before reading its history.",
+        code: "CHANNEL_ACCESS_REQUIRED",
       });
 
       const deniedMembers = await apiRequest(
@@ -5459,6 +5460,29 @@ describe("admin access controls", () => {
       assert.equal(deniedMembers.status, 403, JSON.stringify(deniedMembers));
       assert.deepEqual(deniedMembers.body, {
         error: "Join the private channel before viewing its members.",
+        code: "CHANNEL_ACCESS_REQUIRED",
+      });
+
+      const deniedMessage = await apiRequest(requesterSession, `/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Not authorized" }),
+      });
+      assert.equal(deniedMessage.status, 403, JSON.stringify(deniedMessage));
+      assert.deepEqual(deniedMessage.body, {
+        error: "Join the channel before sending messages.",
+        code: "CHANNEL_ACCESS_REQUIRED",
+      });
+
+      const deniedFileMessage = await apiRequest(requesterSession, `/channels/${channelId}/file-messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(deniedFileMessage.status, 403, JSON.stringify(deniedFileMessage));
+      assert.deepEqual(deniedFileMessage.body, {
+        error: "Join the channel before sending messages.",
+        code: "CHANNEL_ACCESS_REQUIRED",
       });
 
       const pendingJoin = await apiRequest(
@@ -5828,12 +5852,14 @@ describe("admin access controls", () => {
       assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
       assert.deepEqual(deniedHistory.body, {
         error: "Join the private channel before reading its history.",
+        code: "CHANNEL_ACCESS_REQUIRED",
       });
 
       const deniedMembers = await apiRequest(memberSession, `/channels/${channelId}/members`);
       assert.equal(deniedMembers.status, 403, JSON.stringify(deniedMembers));
       assert.deepEqual(deniedMembers.body, {
         error: "Join the private channel before viewing its members.",
+        code: "CHANNEL_ACCESS_REQUIRED",
       });
 
       postLeaveSocket.send(JSON.stringify({ type: "subscribe", channelId }));
@@ -6038,6 +6064,7 @@ describe("admin access controls", () => {
       assert.equal(deniedHistory.status, 403, JSON.stringify(deniedHistory));
       assert.deepEqual(deniedHistory.body, {
         error: "Join the private channel before reading its history.",
+        code: "CHANNEL_ACCESS_REQUIRED",
       });
 
       const pendingSocket = await openWebSocket(requesterSession);

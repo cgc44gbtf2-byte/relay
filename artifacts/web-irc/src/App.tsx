@@ -202,8 +202,9 @@ async function pagedApi<T>(path: string): Promise<T[]> {
   return results;
 }
 
-function isMissingChannelError(error: unknown): boolean {
-  return error instanceof ApiError && error.code === "CHANNEL_NOT_FOUND";
+function isRecoverableChannelError(error: unknown): boolean {
+  return error instanceof ApiError
+    && (error.code === "CHANNEL_NOT_FOUND" || error.code === "CHANNEL_ACCESS_REQUIRED");
 }
 
 function preferredChannel(channels: Channel[]): Channel | null {
@@ -343,14 +344,14 @@ const MessageRow = memo(function MessageRow({
   </div>;
 });
 
-function useRoomData(channelId: number | null, activeDm: Profile | null, onMissingChannel?: (channelId: number) => void) {
+function useRoomData(channelId: number | null, activeDm: Profile | null, onUnavailableChannel?: (channelId: number) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasOlder, setHasOlder] = useState(false);
   const [olderMessagesError, setOlderMessagesError] = useState("");
-  const onMissingChannelRef = useRef(onMissingChannel);
+  const onUnavailableChannelRef = useRef(onUnavailableChannel);
   const messageRefreshRef = useRef(0);
   const messagesRef = useRef(messages);
   const messageVersionRef = useRef(0);
@@ -358,7 +359,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
   const roomKey = activeDm ? `dm:${activeDm.id}` : channelId ? `channel:${channelId}` : "none";
   const roomKeyRef = useRef(roomKey);
   roomKeyRef.current = roomKey;
-  onMissingChannelRef.current = onMissingChannel;
+  onUnavailableChannelRef.current = onUnavailableChannel;
   messagesRef.current = messages;
 
   const updateMessages = useCallback((updater: ChatMessage[] | ((items: ChatMessage[]) => ChatMessage[])) => {
@@ -416,7 +417,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
     } catch (error) {
       if (refreshId !== messageRefreshRef.current || roomKeyRef.current !== refreshRoomKey) return;
       setMessages([]);
-      if (channelId && !activeDm && isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
+      if (channelId && !activeDm && isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
     } finally {
       if (showLoading && refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) setLoading(false);
     }
@@ -467,7 +468,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onMissi
       }).catch((error) => {
         if (cancelled || roomKeyRef.current !== membersRoomKey) return;
         setMembers([]);
-        if (isMissingChannelError(error)) onMissingChannelRef.current?.(channelId);
+        if (isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
       });
     }
     return () => { cancelled = true; };
@@ -562,7 +563,7 @@ function ChatApp() {
     await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
   };
 
-  const recoverFromMissingChannel = async (channelId: number) => {
+  const recoverFromUnavailableChannel = async (channelId: number) => {
     if (currentChannelIdRef.current !== channelId) return;
     currentChannelIdRef.current = null;
     setCurrentChannelId(null);
@@ -591,7 +592,7 @@ function ChatApp() {
     }
   };
 
-  const room = useRoomData(currentChannelId, activeDm, recoverFromMissingChannel);
+  const room = useRoomData(currentChannelId, activeDm, recoverFromUnavailableChannel);
   const setRoomMessages = room.setMessages;
   const currentChannel = channels.find((channel) => channel.id === currentChannelId) ?? null;
   const actorRole = room.members.find((member) => member.id === profile?.id)?.role;
@@ -693,7 +694,7 @@ function ChatApp() {
            if (data.type === "channel_list_changed") void refreshChannelOrganization().catch(() => setChannelRefreshError("Could not refresh the channel list."));
           if (data.type === "channel_removed" && Number.isInteger(data.channelId)) {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
-            if (currentChannelIdRef.current === data.channelId) void recoverFromMissingChannel(data.channelId);
+            if (currentChannelIdRef.current === data.channelId) void recoverFromUnavailableChannel(data.channelId);
           }
            if (
              data.type === "typing" &&
@@ -831,9 +832,9 @@ function ChatApp() {
           : upsertBoundedMessage(items, sent, 100));
       }
     } catch (error) {
-      if (channelId !== null && isMissingChannelError(error)) {
+      if (channelId !== null && isRecoverableChannelError(error)) {
         setDraft("");
-        await recoverFromMissingChannel(channelId);
+        await recoverFromUnavailableChannel(channelId);
       } else {
         setDraft(body);
         window.alert(error instanceof Error ? error.message : "Message could not be sent");
@@ -921,7 +922,7 @@ function ChatApp() {
       setCurrentChannelId(channel.id);
       setActiveDm(null);
     } catch (error) {
-      if (isMissingChannelError(error)) {
+      if (isRecoverableChannelError(error)) {
         try {
           await refreshChannels();
         } catch {
@@ -1012,8 +1013,8 @@ function ChatApp() {
         setChannels((items) => items.map((item) => item.id === updated.id ? { ...item, topic: updated.topic } : item));
       }
     } catch (error) {
-      if (isMissingChannelError(error)) {
-        await recoverFromMissingChannel(channelId);
+      if (isRecoverableChannelError(error)) {
+        await recoverFromUnavailableChannel(channelId);
       } else {
         window.alert(error instanceof Error ? error.message : "Channel topic could not be saved");
       }
@@ -1120,8 +1121,8 @@ function ChatApp() {
         });
       }
     } catch (error) {
-      if (isMissingChannelError(error)) {
-        await recoverFromMissingChannel(channelId);
+      if (isRecoverableChannelError(error)) {
+        await recoverFromUnavailableChannel(channelId);
       } else {
         window.alert(error instanceof Error ? error.message : "File could not be shared");
       }
