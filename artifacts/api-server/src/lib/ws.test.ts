@@ -230,6 +230,91 @@ describe("websocket ticket cleanup", () => {
 });
 
 describe("websocket multi-connection presence", () => {
+  test("serializes delayed presence writes across out-of-order tab closes and reconnects", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    type Status = "online" | "offline";
+    let storedStatus: Status = "offline";
+    const writes: Array<{ status: Status; commit: () => void }> = [];
+
+    // Capture the status at query execution, but persist it only when released.
+    // An unserialized replacement online write could otherwise finish before
+    // an older offline write and leave a connected user stored as offline.
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: ({ status }: { status: Status }) => ({
+          where: () => new Promise<void>((resolve) => {
+            writes.push({
+              status,
+              commit: () => {
+                storedStatus = status;
+                resolve();
+              },
+            });
+          }),
+        }),
+      };
+    });
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const connect = () => {
+      const connected = client("same-user", socket());
+      internals.registerClient(connected);
+      internals.updatePresence(connected.userId);
+      return connected;
+    };
+    const disconnect = (connected: ReturnType<typeof client>) => {
+      internals.unregisterClient(connected);
+      internals.updatePresence(connected.userId);
+    };
+    const commit = async (index: number, expected: Status) => {
+      assert.equal(writes[index]?.status, expected);
+      writes[index].commit();
+      await flush();
+    };
+
+    const first = connect();
+    await flush();
+    assert.equal(writes.length, 1);
+    const second = connect();
+    disconnect(second); // The newer tab closes before the original tab.
+    await flush();
+    assert.equal(writes.length, 1, "overlapping writes must wait for the delayed first write");
+    await commit(0, "online");
+    await commit(1, "online");
+    await commit(2, "online");
+    assert.equal(writes.length, 3);
+    assert.equal(storedStatus, "online");
+    assert.equal(internals.hasConnectedUser("same-user"), true);
+
+    disconnect(first);
+    await flush();
+    assert.equal(writes[3]?.status, "offline");
+    const replacement = connect();
+    const extraTab = connect();
+    disconnect(extraTab);
+    await flush();
+    assert.equal(writes.length, 4, "replacement online writes cannot overtake a delayed offline write");
+    await commit(3, "offline");
+    await commit(4, "online");
+    await commit(5, "online");
+    await commit(6, "online");
+    assert.equal(writes.length, 7);
+    assert.equal(storedStatus, "online", "the remaining replacement tab must restore persisted presence");
+    assert.equal(internals.hasConnectedUser("same-user"), true);
+    assert.equal(internals.presenceWrites.size, 0);
+
+    disconnect(replacement);
+    await flush();
+    await commit(7, "offline");
+    assert.equal(writes.length, 8);
+    assert.equal(storedStatus, "offline", "only closing the last tab leaves the user offline");
+    assert.equal(internals.hasConnectedUser("same-user"), false);
+    assert.equal(internals.presenceWrites.size, 0);
+  });
+
   test("keeps a user connected while another socket remains", () => {
     const hub = new Hub();
     const internals = hub as any;
