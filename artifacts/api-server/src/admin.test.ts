@@ -1976,6 +1976,152 @@ describe("admin access controls", () => {
     assert.deepEqual(afterAudit.rows, beforeAudit.rows);
   });
 
+  test("admin channel maintenance changes only the selected channel", async () => {
+    const targetName = `maintenance-target-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const neighborName = `maintenance-neighbor-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const created = await pool.query<{ id: number; name: string; topic: string }>(
+      `INSERT INTO irc_channels (name, topic, owner_id)
+       VALUES ($1, $2, $5), ($3, $4, $5)
+       RETURNING id, name, topic`,
+      [
+        targetName,
+        "Original target topic",
+        neighborName,
+        "Original neighbor topic",
+        adminSession.userId,
+      ],
+    );
+    const target = created.rows.find(({ name }) => name === targetName);
+    const neighbor = created.rows.find(({ name }) => name === neighborName);
+    assert.ok(target);
+    assert.ok(neighbor);
+    const channelIds = [target.id, neighbor.id];
+    const targetBodies = ["Target message one", "Target message two"];
+    const neighborBodies = ["Neighbor message one", "Neighbor message two"];
+
+    try {
+      await pool.query(
+        `INSERT INTO irc_messages (channel_id, sender_id, body)
+         VALUES ($1, $3, $4), ($1, $3, $5), ($2, $3, $6), ($2, $3, $7)`,
+        [
+          target.id,
+          neighbor.id,
+          adminSession.userId,
+          ...targetBodies,
+          ...neighborBodies,
+        ],
+      );
+      const [targetMessagesBefore, neighborMessagesBefore] = await Promise.all([
+        pool.query<{ id: string; body: string }>(
+          "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+          [target.id],
+        ),
+        pool.query<{ id: string; body: string }>(
+          "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+          [neighbor.id],
+        ),
+      ]);
+      assert.deepEqual(
+        targetMessagesBefore.rows.map(({ body }) => body).sort(),
+        [...targetBodies].sort(),
+      );
+      assert.deepEqual(
+        neighborMessagesBefore.rows.map(({ body }) => body).sort(),
+        [...neighborBodies].sort(),
+      );
+
+      const topicUpdate = await apiRequest(
+        adminSession,
+        `/admin/channels/${target.id}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ topic: "Updated target topic" }),
+        },
+      );
+      assert.equal(topicUpdate.status, 200, JSON.stringify(topicUpdate));
+      assert.ok(topicUpdate.body && typeof topicUpdate.body === "object");
+      assert.equal(
+        (topicUpdate.body as { topic?: unknown }).topic,
+        "Updated target topic",
+      );
+
+      const clearHistory = await apiRequest(
+        adminSession,
+        `/admin/channels/${target.id}/messages`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        },
+      );
+      assert.equal(clearHistory.status, 200, JSON.stringify(clearHistory));
+      assert.deepEqual(clearHistory.body, { ok: true, deleted: targetBodies.length });
+
+      const [targetChannel, neighborChannel, targetMessages, neighborMessages, audit] =
+        await Promise.all([
+          pool.query<{ id: number; topic: string }>(
+            "SELECT id, topic FROM irc_channels WHERE id = $1",
+            [target.id],
+          ),
+          pool.query<{ id: number; topic: string }>(
+            "SELECT id, topic FROM irc_channels WHERE id = $1",
+            [neighbor.id],
+          ),
+          pool.query<{ id: string; body: string }>(
+            "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+            [target.id],
+          ),
+          pool.query<{ id: string; body: string }>(
+            "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
+            [neighbor.id],
+          ),
+          pool.query(
+            `SELECT actor_id, action, target_id, target_label, details
+             FROM irc_admin_audit_logs
+             WHERE target_id = ANY($1::text[])
+             ORDER BY id`,
+            [channelIds.map(String)],
+          ),
+        ]);
+
+      assert.deepEqual(targetChannel.rows, [{
+        id: target.id,
+        topic: "Updated target topic",
+      }]);
+      assert.deepEqual(neighborChannel.rows, [{
+        id: neighbor.id,
+        topic: "Original neighbor topic",
+      }]);
+      assert.deepEqual(targetMessages.rows, []);
+      assert.deepEqual(neighborMessages.rows, neighborMessagesBefore.rows);
+      assert.deepEqual(audit.rows, [
+        {
+          actor_id: adminSession.userId,
+          action: "updated_channel_topic",
+          target_id: String(target.id),
+          target_label: targetName,
+          details: "Updated target topic",
+        },
+        {
+          actor_id: adminSession.userId,
+          action: "cleared_channel_history",
+          target_id: String(target.id),
+          target_label: targetName,
+          details: `${targetBodies.length} messages deleted`,
+        },
+      ]);
+    } finally {
+      await pool.query(
+        `DELETE FROM irc_admin_audit_logs
+         WHERE target_id = ANY($1::text[])
+           AND action IN ('updated_channel_topic', 'cleared_channel_history')`,
+        [channelIds.map(String)],
+      );
+      await removeTestChannels(channelIds);
+    }
+  });
+
   test("uses the same missing-channel response across public and admin routes", async () => {
     const unknownChannelId = -1;
     const requests: Array<Promise<ApiResponse>> = [
