@@ -8580,6 +8580,111 @@ describe("admin access controls", () => {
     }
   });
 
+  for (const firstOperation of ["approval", "deletion"] as const) {
+    test(`serializes private-room deletion with pending approval (${firstOperation} first)`, async () => {
+      const ownerSession = await createTestSession("delete_approval_owner");
+      const requesterSession = await createTestSession("delete_approval_requester");
+      const channelIds: number[] = [];
+      const inFlight: Promise<ApiResponse>[] = [];
+      const blocker = await pool.connect();
+      try {
+        const created = await apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `delete-approval-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            isPrivate: true,
+          }),
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        const channelId = (created.body as { id: number }).id;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId);
+        const pending = await apiRequest(requesterSession, `/channels/${channelId}/join`, { method: "POST" });
+        assert.equal(pending.status, 202, JSON.stringify(pending));
+        const requests = await pool.query<{ id: number; status: string }>(
+          "SELECT id, status FROM irc_channel_join_requests WHERE channel_id = $1",
+          [channelId],
+        );
+        assert.equal(requests.rows.length, 1);
+        assert.equal(requests.rows[0].status, "pending");
+        const requestId = requests.rows[0].id;
+        const approve = () => apiRequest(ownerSession, `/channels/${channelId}/join-requests/${requestId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        });
+        const remove = () => apiRequest(ownerSession, `/channels/${channelId}`, { method: "DELETE" });
+
+        // Pause the first route AFTER it owns the channel row. The second route
+        // must then wait on that exact backend, not merely some unrelated lock.
+        await blocker.query("BEGIN");
+        const { rows: [{ pid: blockerPid }] } = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        if (firstOperation === "approval") {
+          await blocker.query("SELECT id FROM irc_channel_join_requests WHERE id = $1 FOR UPDATE", [requestId]);
+        } else {
+          await blocker.query(
+            "SELECT user_id FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2 FOR UPDATE",
+            [channelId, ownerSession.userId],
+          );
+        }
+        const waitForBlockedBackend = async (blockingPid: number, table: string): Promise<number> => {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            const waiting = await pool.query<{ pid: number }>(
+              `SELECT pid FROM pg_stat_activity
+               WHERE $1::integer = ANY(pg_blocking_pids(pid))
+                 AND wait_event_type = 'Lock' AND query ILIKE $2`,
+              [blockingPid, `%${table}%`],
+            );
+            if (waiting.rows.length === 1) return waiting.rows[0].pid;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.fail(`Expected a ${table} query blocked by backend ${blockingPid}`);
+        };
+        const first = firstOperation === "approval" ? approve() : remove();
+        inFlight.push(first);
+        const firstPid = await waitForBlockedBackend(
+          blockerPid,
+          firstOperation === "approval" ? "irc_channel_join_requests" : "irc_channel_members",
+        );
+        const second = firstOperation === "approval" ? remove() : approve();
+        inFlight.push(second);
+        await waitForBlockedBackend(firstPid, "irc_channels");
+        await blocker.query("COMMIT");
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        const approval = firstOperation === "approval" ? firstResult : secondResult;
+        const deletion = firstOperation === "deletion" ? firstResult : secondResult;
+        assert.equal(deletion.status, 200, JSON.stringify(deletion));
+        assert.equal(approval.status, firstOperation === "approval" ? 200 : 404, JSON.stringify(approval));
+        if (firstOperation === "approval") {
+          assert.deepEqual(approval.body, { ok: true, status: "approved" });
+        }
+        const assertRoomGone = async () => {
+          for (const table of ["irc_channels", "irc_channel_join_requests", "irc_channel_members"]) {
+            const rows = await pool.query(
+              `SELECT 1 FROM ${table} WHERE ${table === "irc_channels" ? "id" : "channel_id"} = $1`,
+              [channelId],
+            );
+            assert.deepEqual(rows.rows, [], `${table} must be empty for the deleted room`);
+          }
+        };
+        await assertRoomGone();
+        const staleApproval = await approve();
+        assert.equal(staleApproval.status, 400, JSON.stringify(staleApproval));
+        const history = await apiRequest(requesterSession, `/channels/${channelId}/messages`);
+        assert.equal(history.status, 404, JSON.stringify(history));
+        await assertRoomGone();
+      } finally {
+        // Always release the barrier and drain HTTP work before deleting fixtures.
+        await blocker.query("ROLLBACK");
+        blocker.release();
+        await Promise.allSettled(inFlight);
+        await removeTestChannels(channelIds, [ownerSession.userId, requesterSession.userId]);
+      }
+    });
+  }
+
   test("removes pending private-room requests when the room is deleted", async () => {
     const ownerSession = await createTestSession("request_cleanup_owner");
     const requesterSession = await createTestSession("request_cleanup_requester");
