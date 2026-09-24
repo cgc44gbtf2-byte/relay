@@ -10,7 +10,12 @@
     "audit:licenses": "node ./scripts/check-third-party-licenses.mjs",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
-    "release:validate": "pnpm run typecheck:libs && pnpm --filter @workspace/api-server run typecheck && pnpm --filter @workspace/api-server run test:unit && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/web-irc run typecheck && pnpm --filter @workspace/web-irc run test && PORT=4173 BASE_PATH=/web-irc/ pnpm --filter @workspace/web-irc run build && pnpm run audit:licenses"
+    "db:check:migrations": "pnpm --filter @workspace/db run check:migrations",
+    "db:migrate:release": "pnpm --filter @workspace/db run migrate:release",
+    "db:migrate:release:baseline": "pnpm --filter @workspace/db run migrate:release:baseline",
+    "db:migrate:release:check": "pnpm --filter @workspace/db run migrate:release:check",
+    "release:start": "pnpm run db:migrate:release && pnpm --filter @workspace/api-server run start",
+    "release:validate": "pnpm run db:check:migrations && pnpm run typecheck:libs && pnpm --filter @workspace/api-server run typecheck && pnpm --filter @workspace/api-server run test:unit && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/web-irc run typecheck && pnpm --filter @workspace/web-irc run test && PORT=4173 BASE_PATH=/web-irc/ pnpm --filter @workspace/web-irc run build && pnpm run audit:licenses"
   },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.3"

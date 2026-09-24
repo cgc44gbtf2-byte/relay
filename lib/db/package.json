@@ -12,6 +12,10 @@
     "push:test": "NODE_ENV=test drizzle-kit push --config ./drizzle.config.ts",
     "push-force": "drizzle-kit push --force --config ./drizzle.config.ts",
     "check:noop": "node ./scripts/assert-noop-push.mjs",
+    "check:migrations": "node ./scripts/apply-migrations.mjs --validate",
+    "migrate:release": "node ./scripts/apply-migrations.mjs",
+    "migrate:release:baseline": "node ./scripts/apply-migrations.mjs --baseline",
+    "migrate:release:check": "node ./scripts/apply-migrations.mjs --check",
     "test": "node --test ./scripts/*.test.mjs",
     "test:ci": "node ./scripts/run-ci-tests.mjs"
   },

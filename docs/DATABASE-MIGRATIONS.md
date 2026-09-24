@@ -13,6 +13,56 @@ Every production schema change must update the Drizzle schema and add the next
 zero-padded SQL migration. Applied migration files are immutable: do not edit,
 rename, reorder, or delete a migration that may already have been applied.
 
+The release runner records applied files in `irc_schema_migrations`. It verifies
+the filename sequence and SHA-256 checksum, takes a PostgreSQL advisory lock so
+two releases cannot migrate concurrently, applies each file in order, and
+exits non-zero on any failure. The application must be started only after the
+migration command succeeds:
+
+```sh
+RELEASE_MIGRATION_TARGET=production \
+RELEASE_MIGRATION_BACKUP_CONFIRMED=true \
+RELEASE_MIGRATION_BACKUP_REFERENCE='provider-snapshot-2026-09-23' \
+pnpm run release:start
+```
+
+The backup reference is an operator-supplied label, not a credential. The
+runner never prints `DATABASE_URL` or any other secret. A second run with no
+pending files performs a ledger and checksum no-op verification. A changed
+applied file, missing file, gap in the sequence, or partial history stops the
+release with an actionable diagnostic.
+
+For an existing installation that predates the migration ledger, do not run
+the migration files again. First inspect the production catalog and data,
+confirm which reviewed migrations are already present, and take a current
+backup. Then run the explicit baseline command with the last verified file:
+
+```sh
+RELEASE_MIGRATION_TARGET=production \
+RELEASE_MIGRATION_BACKUP_CONFIRMED=true \
+RELEASE_MIGRATION_BACKUP_REFERENCE='provider-snapshot-2026-09-23' \
+RELEASE_MIGRATION_BASELINE_CONFIRMED=true \
+RELEASE_MIGRATION_BASELINE=0012_query_path_indexes.sql \
+pnpm run db:migrate:release:baseline
+```
+
+Baselining records history only; it applies no SQL. Never use it to skip an
+unverified migration. After baselining, run
+`pnpm run db:migrate:release:check` and use `pnpm run release:start` for future
+deployments.
+
+CI can validate the reviewed migration set without a database:
+
+```sh
+pnpm run db:check:migrations
+```
+
+The release command treats an explicitly reviewed destructive operation
+(`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DELETE FROM`, or dropping `NOT NULL`)
+as a stop condition. After inspecting the SQL and its backup impact, an
+operator must additionally provide `RELEASE_MIGRATION_DESTRUCTIVE_APPROVED=true`
+and a non-secret `RELEASE_MIGRATION_DESTRUCTIVE_REFERENCE`.
+
 ## Authoring a migration
 
 1. Inspect the current production schema and data shape before writing SQL.
