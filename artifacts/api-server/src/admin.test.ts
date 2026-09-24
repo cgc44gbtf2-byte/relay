@@ -1157,6 +1157,34 @@ describe("admin access controls", () => {
     assert.deepEqual(profiles.rows, [{ count: "1", userId: revokedSession.userId }]);
   });
 
+  test("returns a stable conflict when PATCH /me claims an existing username", async () => {
+    const firstProfile = await apiRequest(firstSession, "/me");
+    const secondProfile = await apiRequest(secondSession, "/me");
+    assert.equal(firstProfile.status, 200, JSON.stringify(firstProfile));
+    assert.equal(secondProfile.status, 200, JSON.stringify(secondProfile));
+    const claimedUsername = (firstProfile.body as { username?: unknown }).username;
+    const originalUsername = (secondProfile.body as { username?: unknown }).username;
+    assert.equal(typeof claimedUsername, "string");
+    assert.equal(typeof originalUsername, "string");
+
+    const conflict = await apiRequest(secondSession, "/me", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: claimedUsername }),
+    });
+    assert.equal(conflict.status, 409, JSON.stringify(conflict));
+    assert.deepEqual(conflict.body, {
+      error: "That username is already taken.",
+      code: "USERNAME_TAKEN",
+    });
+
+    const unchanged = await pool.query<{ username: string }>(
+      "SELECT username FROM irc_users WHERE clerk_id = $1",
+      [secondSession.userId],
+    );
+    assert.deepEqual(unchanged.rows, [{ username: originalUsername }]);
+  });
+
   test("does not create duplicate chat identities during concurrent session refreshes", async () => {
     const session = await createTestSession("profile_bootstrap_race");
     const responses = await Promise.all(
@@ -1610,6 +1638,51 @@ describe("admin access controls", () => {
         );
       }
     }
+  });
+
+  test("denies every release endpoint to the actor's current non-developer role without side effects", async () => {
+    const releaseMarker = `denied-${randomUUID().slice(0, 8)}`;
+    const before = await pool.query<{ releases: number; audits: number; announcements: number; notifications: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM irc_developer_releases WHERE version = $1) AS releases,
+         (SELECT count(*)::int FROM irc_admin_audit_logs WHERE actor_id = $2 AND action LIKE '%release%') AS audits,
+         (SELECT count(*)::int FROM irc_server_announcements WHERE author_id = $2) AS announcements,
+         (SELECT count(*)::int FROM irc_notifications WHERE user_id = $2) AS notifications`,
+      [releaseMarker, memberSession.userId],
+    );
+    const requests: Array<[string, RequestInit]> = [
+      ["/developer/releases", {}],
+      ["/developer/releases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: releaseMarker, title: "Must not be created" }),
+      }],
+      ["/developer/releases/2147483647/status", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "review" }),
+      }],
+      ["/developer/releases/2147483647/announcement", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "published" }),
+      }],
+    ];
+
+    for (const [path, init] of requests) {
+      const denied = await apiRequest(memberSession, path, init);
+      assert.equal(denied.status, 403, JSON.stringify(denied));
+      assert.deepEqual(denied.body, { error: "Developer access required." });
+    }
+    const after = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM irc_developer_releases WHERE version = $1) AS releases,
+         (SELECT count(*)::int FROM irc_admin_audit_logs WHERE actor_id = $2 AND action LIKE '%release%') AS audits,
+         (SELECT count(*)::int FROM irc_server_announcements WHERE author_id = $2) AS announcements,
+         (SELECT count(*)::int FROM irc_notifications WHERE user_id = $2) AS notifications`,
+      [releaseMarker, memberSession.userId],
+    );
+    assert.deepEqual(after.rows, before.rows);
   });
 
   test("keeps release announcements hidden until approved and notifies each account once", async () => {
@@ -4519,6 +4592,17 @@ describe("admin access controls", () => {
         [targetSession.userId, communityId],
       );
       assert.deepEqual(targetRoles.rows, []);
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT action
+           FROM irc_admin_audit_logs
+           WHERE actor_id = $1
+             AND community_id = $2
+             AND action = 'changed_community_role'`,
+          [actorSession.userId, communityId],
+        )).rows,
+        [],
+      );
     } finally {
       await revocation.query("ROLLBACK").catch(() => undefined);
       revocation.release();
@@ -4527,6 +4611,84 @@ describe("admin access controls", () => {
           communityId,
         ]);
       }
+    }
+  });
+
+  test("does not let revoked developer authority win a scoped-role assignment race", async () => {
+    const revocation = await pool.connect();
+    let assignmentId: number | null = null;
+    try {
+      await apiRequest(adminSession, "/me");
+      await revocation.query("BEGIN");
+      await revocation.query(
+        "SELECT clerk_id FROM irc_users WHERE clerk_id = $1 FOR UPDATE",
+        [adminSession.userId],
+      );
+
+      const assignment = apiRequest(adminSession, "/admin/role-assignments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: memberSession.userId,
+          role: "platform_moderator",
+          scopeType: "platform",
+        }),
+      });
+      let blocked = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const waiting = await pool.query(
+          `SELECT pid
+           FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid()
+             AND state = 'active'
+             AND wait_event_type = 'Lock'
+             AND query ILIKE '%irc_users%'`,
+        );
+        if (waiting.rows.length > 0) {
+          blocked = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(blocked, true, "assignment should wait for the actor authorization lock");
+      await revocation.query(
+        "UPDATE irc_users SET role = 'member' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
+      await revocation.query("COMMIT");
+
+      const denied = await assignment;
+      assert.equal(denied.status, 409, JSON.stringify(denied));
+      assert.deepEqual(denied.body, {
+        error: "Role or administrator access changed. Reload and try again.",
+      });
+      const assignments = await pool.query<{ id: number }>(
+        `SELECT id FROM irc_user_roles
+         WHERE user_id = $1 AND role = 'platform_moderator' AND scope_type = 'platform'`,
+        [memberSession.userId],
+      );
+      assignmentId = assignments.rows[0]?.id ?? null;
+      assert.deepEqual(assignments.rows, []);
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT action FROM irc_admin_audit_logs
+           WHERE actor_id = $1 AND target_id = $2
+             AND action = 'granted_scoped_role'
+             AND details = 'platform_moderator on platform'`,
+          [adminSession.userId, memberSession.userId],
+        )).rows,
+        [],
+      );
+    } finally {
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
+      if (assignmentId !== null) {
+        await pool.query("DELETE FROM irc_user_roles WHERE id = $1", [assignmentId]);
+      }
+      await pool.query(
+        "UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1",
+        [adminSession.userId],
+      );
     }
   });
 
@@ -6202,23 +6364,172 @@ describe("admin access controls", () => {
         const channelId = (created.body as { id?: unknown }).id as number;
         assert.equal(typeof channelId, "number");
         channelIds.push(channelId);
+        await pool.query(
+          `INSERT INTO irc_moderation_actions
+             (actor_id, channel_id, action, details)
+           VALUES ($1, $2, 'test_delete_history', $3)`,
+          [ownerSession.userId, channelId, suffix],
+        );
       }
 
+      const ownerDeletedId = channelIds[0];
       const ownerDeleted = await apiRequest(ownerSession, `/channels/${channelIds[0]}`, {
         method: "DELETE",
       });
       assert.equal(ownerDeleted.status, 200, JSON.stringify(ownerDeleted));
+      assert.equal(
+        (await pool.query("SELECT 1 FROM irc_moderation_actions WHERE channel_id = $1", [ownerDeletedId])).rowCount,
+        0,
+      );
       channelIds.shift();
 
+      const adminDeletedId = channelIds[0];
       const adminDeleted = await apiRequest(adminSession, `/channels/${channelIds[0]}`, {
         method: "DELETE",
       });
       assert.equal(adminDeleted.status, 200, JSON.stringify(adminDeleted));
+      assert.equal(
+        (await pool.query("SELECT 1 FROM irc_moderation_actions WHERE channel_id = $1", [adminDeletedId])).rowCount,
+        0,
+      );
       channelIds.shift();
     } finally {
       for (const channelId of channelIds) {
         await pool.query("DELETE FROM irc_channel_members WHERE channel_id = $1", [channelId]);
         await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      }
+    }
+  });
+
+  test("deletes categorized channels with moderation history atomically and rolls back on audit failure", async () => {
+    const ownerSession = await createTestSession("category_delete_atomic");
+    const workspaceName = `Atomic delete ${randomUUID().slice(0, 8)}`;
+    let communityId: number | null = null;
+    let triggerName: string | null = null;
+    let functionName: string | null = null;
+    try {
+      assert.equal((await apiRequest(ownerSession, "/me")).status, 200);
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: workspaceName, isPrivate: true }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      communityId = (community.body as { id: number }).id;
+
+      const createCategoryWithChannel = async (label: string) => {
+        const category = await apiRequest(ownerSession, `/communities/${communityId}/categories`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: label }),
+        });
+        assert.equal(category.status, 201, JSON.stringify(category));
+        const categoryId = (category.body as { id: number }).id;
+        const categoryName = (category.body as { name: string }).name;
+        const channel = await apiRequest(ownerSession, `/communities/${communityId}/channels`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `${label}-channel`, categoryId }),
+        });
+        assert.equal(channel.status, 201, JSON.stringify(channel));
+        const channelId = (channel.body as { id: number }).id;
+        const channelName = (channel.body as { name: string }).name;
+        await pool.query(
+          `INSERT INTO irc_moderation_actions
+             (actor_id, community_id, channel_id, action, details)
+           VALUES ($1, $2, $3, 'test_history', $4)`,
+          [ownerSession.userId, communityId, channelId, label],
+        );
+        return { categoryId, channelId, categoryName, channelName };
+      };
+
+      const deletedFixture = await createCategoryWithChannel(`Delete ${randomUUID().slice(0, 8)}`);
+      const deleted = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/categories/${deletedFixture.categoryId}/with-channels`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            confirmation: `DELETE CATEGORY ${deletedFixture.categoryName} AND CHANNELS FROM WORKSPACE ${workspaceName}`,
+          }),
+        },
+      );
+      assert.equal(deleted.status, 200, JSON.stringify(deleted));
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT
+             (SELECT count(*)::int FROM irc_categories WHERE id = $1) AS categories,
+             (SELECT count(*)::int FROM irc_channels WHERE id = $2) AS channels,
+             (SELECT count(*)::int FROM irc_moderation_actions WHERE channel_id = $2) AS moderation`,
+          [deletedFixture.categoryId, deletedFixture.channelId],
+        )).rows,
+        [{ categories: 0, channels: 0, moderation: 0 }],
+      );
+
+      const rollbackFixture = await createCategoryWithChannel(`Rollback ${randomUUID().slice(0, 8)}`);
+      triggerName = `fail_destructive_audit_${randomUUID().replaceAll("-", "")}`;
+      functionName = `${triggerName}_fn`;
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action IN (
+             'deleted_community_category_with_channels',
+             'deleted_community_channel'
+           ) THEN
+             RAISE EXCEPTION 'forced destructive audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;
+         CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      const failed = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/categories/${rollbackFixture.categoryId}/with-channels`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            confirmation: `DELETE CATEGORY ${rollbackFixture.categoryName} AND CHANNELS FROM WORKSPACE ${workspaceName}`,
+          }),
+        },
+      );
+      assert.equal(failed.status, 500, JSON.stringify(failed));
+      const failedChannel = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/channels/${rollbackFixture.channelId}`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            confirmation: `DELETE CHANNEL ${rollbackFixture.channelName} FROM WORKSPACE ${workspaceName}`,
+          }),
+        },
+      );
+      assert.equal(failedChannel.status, 500, JSON.stringify(failedChannel));
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT
+             (SELECT count(*)::int FROM irc_categories WHERE id = $1) AS categories,
+             (SELECT count(*)::int FROM irc_channels WHERE id = $2) AS channels,
+             (SELECT count(*)::int FROM irc_moderation_actions WHERE channel_id = $2) AS moderation`,
+          [rollbackFixture.categoryId, rollbackFixture.channelId],
+        )).rows,
+        [{ categories: 1, channels: 1, moderation: 1 }],
+      );
+    } finally {
+      if (triggerName && functionName) {
+        await pool.query(
+          `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+           DROP FUNCTION IF EXISTS "${functionName}"();`,
+        );
+      }
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
       }
     }
   });
@@ -6923,6 +7234,26 @@ describe("admin access controls", () => {
         [channelId, requesterSession.userId],
       );
       assert.equal(requesterMembership.rowCount, 0);
+
+      const recovered = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(recovered.status, 200, JSON.stringify(recovered));
+      assert.deepEqual(recovered.body, { ok: true, status: "approved" });
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT role FROM irc_channel_members
+           WHERE channel_id = $1 AND user_id = $2`,
+          [channelId, requesterSession.userId],
+        )).rows,
+        [{ role: "member" }],
+      );
     } finally {
       await removeTestChannels(channelIds, [
         ownerSession.userId,

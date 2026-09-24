@@ -187,19 +187,20 @@ type CommunityAuditMetadata = {
   targetLabel?: string;
 };
 
-async function writeCommunityAudit(
+type CommunityTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function insertCommunityAudit(
+  executor: typeof db | CommunityTransaction,
   actorId: string,
   action: string,
   communityId: number,
-  metadata?: string | CommunityAuditMetadata,
-  options: { notifyActor?: boolean } = {},
+  audit: CommunityAuditMetadata,
 ): Promise<void> {
-  const audit = typeof metadata === "string" ? { details: metadata } : (metadata ?? {});
-  const [actor] = await db.select({ displayName: usersTable.displayName })
+  const [actor] = await executor.select({ displayName: usersTable.displayName })
     .from(usersTable)
     .where(eq(usersTable.clerkId, actorId))
     .limit(1);
-  await db.insert(adminAuditLogsTable).values({
+  await executor.insert(adminAuditLogsTable).values({
     actorId,
     actorDisplayName: actor?.displayName,
     communityId,
@@ -212,12 +213,21 @@ async function writeCommunityAudit(
     targetLabel: audit.targetLabel ?? audit.resourceLabel ?? `community:${communityId}`,
     details: audit.details,
   });
+}
+
+async function notifyCommunityAudit(
+  actorId: string,
+  action: string,
+  communityId: number,
+  audit: CommunityAuditMetadata,
+  notifyActor = true,
+): Promise<void> {
   const managers = await db.select({ userId: userRolesTable.userId }).from(userRolesTable).where(and(
     eq(userRolesTable.communityId, communityId),
     inArray(userRolesTable.role, ["workspace_owner", "workspace_admin", "community_admin", "department_admin"]),
   ));
   await createNotifications(managers
-    .filter((manager) => options.notifyActor !== false || manager.userId !== actorId)
+    .filter((manager) => notifyActor || manager.userId !== actorId)
     .map((manager) => manager.userId), {
     type: "administrative_action",
     category: "administrative_action",
@@ -227,6 +237,18 @@ async function writeCommunityAudit(
     entityId: communityId,
     actionUrl: `/communities/${communityId}`,
   });
+}
+
+async function writeCommunityAudit(
+  actorId: string,
+  action: string,
+  communityId: number,
+  metadata?: string | CommunityAuditMetadata,
+  options: { notifyActor?: boolean } = {},
+): Promise<void> {
+  const audit = typeof metadata === "string" ? { details: metadata } : (metadata ?? {});
+  await insertCommunityAudit(db, actorId, action, communityId, audit);
+  await notifyCommunityAudit(actorId, action, communityId, audit, options.notifyActor !== false);
 }
 
 function param(req: AuthenticatedRequest, key: string): string {
@@ -2597,8 +2619,13 @@ router.delete("/communities/:communityId/categories/:categoryId", requireAuth, a
       .set({ categoryId: null })
       .where(and(eq(channelsTable.communityId, communityId), eq(channelsTable.categoryId, categoryId)));
     await tx.delete(categoriesTable).where(eq(categoriesTable.id, categoryId));
+    await insertCommunityAudit(tx, userId, "deleted_community_category", communityId, {
+      details: category.name,
+    });
   });
-  await writeCommunityAudit(userId, "deleted_community_category", communityId, category.name);
+  await notifyCommunityAudit(userId, "deleted_community_category", communityId, {
+    details: category.name,
+  });
   res.json({ ok: true, categoryId });
 });
 
@@ -2667,6 +2694,9 @@ router.delete("/communities/:communityId/categories/:categoryId/with-channels", 
       await tx.delete(channelsTable).where(inArray(channelsTable.id, removedChannelIds));
     }
     await tx.delete(categoriesTable).where(eq(categoriesTable.id, categoryId));
+    await insertCommunityAudit(tx, userId, "deleted_community_category_with_channels", communityId, {
+      details: category.name,
+    });
     return { outcome: "deleted", category } as const;
   });
   if (deletion.outcome === "forbidden") {
@@ -2682,7 +2712,9 @@ router.delete("/communities/:communityId/categories/:categoryId/with-channels", 
     return;
   }
   for (const channelId of removedChannelIds) wsHub.broadcastChannelRemoved(channelId);
-  await writeCommunityAudit(userId, "deleted_community_category_with_channels", communityId, deletion.category.name);
+  await notifyCommunityAudit(userId, "deleted_community_category_with_channels", communityId, {
+    details: deletion.category.name,
+  });
   res.json({
     ok: true,
     categoryId,
@@ -2955,6 +2987,11 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
       .delete(channelsTable)
       .where(and(eq(channelsTable.id, channelId), eq(channelsTable.communityId, communityId)))
       .returning({ id: channelsTable.id });
+    if (deleted) {
+      await insertCommunityAudit(tx, userId, "deleted_community_channel", communityId, {
+        details: channel.name,
+      });
+    }
     return deleted
       ? { outcome: "deleted", channel } as const
       : { outcome: "not_found" } as const;
@@ -2972,7 +3009,9 @@ router.delete("/communities/:communityId/channels/:channelId", requireAuth, asyn
     return;
   }
   wsHub.broadcastChannelRemoved(channelId);
-  await writeCommunityAudit(userId, "deleted_community_channel", communityId, deletion.channel.name);
+  await notifyCommunityAudit(userId, "deleted_community_channel", communityId, {
+    details: deletion.channel.name,
+  });
   res.json({ ok: true, channelId, cleanupPending: cleanupPendingCount > 0, cleanupPendingCount });
 });
 

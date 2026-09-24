@@ -56,6 +56,26 @@ const userSearchLimiter = new FixedWindowLimiter(60, 60_000);
 const messageSearchLimiter = new FixedWindowLimiter(60, 60_000);
 const MAX_LIST_PAGE_SIZE = 100;
 
+function isUsernameUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (
+      typeof current === "object"
+      && current !== null
+      && "code" in current
+      && current.code === "23505"
+      && "constraint" in current
+      && current.constraint === "irc_users_username_idx"
+    ) {
+      return true;
+    }
+    current = typeof current === "object" && current !== null && "cause" in current
+      ? current.cause
+      : undefined;
+  }
+  return false;
+}
+
 function listPage(req: AuthenticatedRequest): { limit: number; offset: number } {
   const requestedLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : MAX_LIST_PAGE_SIZE;
   const requestedOffset = typeof req.query.offset === "string" ? Number(req.query.offset) : 0;
@@ -375,12 +395,22 @@ router.patch("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise
     res.status(400).json({ error: "Display name must be 1–48 characters." });
     return;
   }
-  const [updated] = await db.update(usersTable).set({
-    ...(username ? { username } : {}),
-    ...(displayName !== undefined ? { displayName } : {}),
-    status: "online",
-    lastSeenAt: new Date(),
-  }).where(eq(usersTable.clerkId, userId)).returning();
+  let updated: typeof usersTable.$inferSelect | undefined;
+  try {
+    [updated] = await db.update(usersTable).set({
+      ...(username ? { username } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+      status: "online",
+      lastSeenAt: new Date(),
+    }).where(eq(usersTable.clerkId, userId)).returning();
+  } catch (error) {
+    if (!isUsernameUniqueViolation(error)) throw error;
+    res.status(409).json({
+      error: "That username is already taken.",
+      code: "USERNAME_TAKEN",
+    });
+    return;
+  }
   res.json(updated);
 });
 

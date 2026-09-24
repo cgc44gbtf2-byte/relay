@@ -212,6 +212,10 @@ function isRecoverableChannelError(error: unknown): boolean {
     && (error.code === "CHANNEL_NOT_FOUND" || error.code === "CHANNEL_ACCESS_REQUIRED");
 }
 
+function isForbiddenError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403;
+}
+
 function preferredChannel(channels: Channel[]): Channel | null {
   return channels.find((channel) => channel.joined)
     ?? channels.find((channel) => !channel.isPrivate && channel.accessStatus !== "pending")
@@ -534,7 +538,7 @@ function ChatApp() {
   const [ws, setWs] = useState<WebSocket | null>(null);
   const wsRef = useRef<WebSocket | null>(ws);
   const onSocketMessageRef = useRef<(event: MessageEvent) => void>(() => undefined);
-  const refreshChannelOrganizationRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const refreshChannelOrganizationRef = useRef<() => Promise<Channel[]>>(() => Promise.resolve([]));
   const reconnectForRoomChangeRef = useRef<() => void>(() => undefined);
   const typingStartTimerRef = useRef<number | null>(null);
   const typingIdleTimerRef = useRef<number | null>(null);
@@ -545,6 +549,7 @@ function ChatApp() {
   const [returnOwnerError, setReturnOwnerError] = useState("");
   const [returningToOwner, setReturningToOwner] = useState(false);
   const [channelRefreshError, setChannelRefreshError] = useState("");
+  const [profileError, setProfileError] = useState("");
   const currentChannelIdRef = useRef<number | null>(currentChannelId);
   const activeDmIdRef = useRef<string | null>(activeDm?.id ?? null);
   const channelRefreshRef = useRef<Promise<Channel[]> | null>(null);
@@ -567,13 +572,39 @@ function ChatApp() {
     channelRefreshRef.current = request;
     return request;
   };
-  const refreshChannelOrganization = async (): Promise<void> => {
-    await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
+  const selectPreferredChannel = (list: Channel[]) => {
+    const next = preferredChannel(list);
+    if (!next) return;
+    currentChannelIdRef.current = next.id;
+    setCurrentChannelId(next.id);
+    setActiveDm(null);
+    if (!next.joined && !next.isPrivate) {
+      void api<{ status: "member" | "pending" }>(`/channels/${next.id}/join`, { method: "POST", body: "{}" })
+        .then((result) => {
+          if (result.status === "member") {
+            setChannels((items) => items.map((item) => item.id === next.id ? { ...item, joined: true, accessStatus: "member" } : item));
+          }
+        })
+        .catch(() => undefined);
+    }
+  };
+  const retryChannelRecovery = async () => {
+    setChannelRefreshError("");
+    try {
+      const list = await refreshChannels();
+      if (currentChannelIdRef.current === null && !activeDmIdRef.current) selectPreferredChannel(list);
+    } catch (error) {
+      setChannelRefreshError(error instanceof Error ? error.message : "Could not refresh the channel list.");
+    }
+  };
+  const refreshChannelOrganization = async (): Promise<Channel[]> => {
+    const [list] = await Promise.all([refreshChannels(), api<Category[]>("/categories").then(setCategories)]);
+    return list;
   };
   refreshChannelOrganizationRef.current = refreshChannelOrganization;
 
   const recoverFromUnavailableChannel = async (channelId: number) => {
-    if (currentChannelIdRef.current !== channelId) return;
+    if (currentChannelIdRef.current !== channelId || activeDmIdRef.current) return;
     currentChannelIdRef.current = null;
     setCurrentChannelId(null);
     setActiveDm(null);
@@ -582,22 +613,10 @@ function ChatApp() {
     setTypingUsers({});
     try {
       const list = await refreshChannels();
-      if (currentChannelIdRef.current !== null) return;
-      const next = preferredChannel(list);
-      if (!next) return;
-      currentChannelIdRef.current = next.id;
-      setCurrentChannelId(next.id);
-      if (!next.joined && !next.isPrivate) {
-        api<{ status: "member" | "pending" }>(`/channels/${next.id}/join`, { method: "POST", body: "{}" })
-          .then((result) => {
-            if (result.status === "member") {
-              setChannels((items) => items.map((item) => item.id === next.id ? { ...item, joined: true, accessStatus: "member" } : item));
-            }
-          })
-          .catch(() => undefined);
-      }
-    } catch {
-      setChannelRefreshError("Could not refresh the channel list.");
+      if (currentChannelIdRef.current !== null || activeDmIdRef.current) return;
+      selectPreferredChannel(list);
+    } catch (error) {
+      setChannelRefreshError(error instanceof Error ? error.message : "Could not refresh the channel list.");
     }
   };
 
@@ -749,7 +768,15 @@ function ChatApp() {
           setConnection("live");
           wsRef.current = connectedSocket;
           setWs(connectedSocket);
-          if (wasReconnect) void refreshChannelOrganizationRef.current().catch(() => setChannelRefreshError("Could not refresh the channel list."));
+          if (wasReconnect) {
+            void refreshChannelOrganizationRef.current()
+              .then((list) => {
+                const selectedId = currentChannelIdRef.current;
+                if (selectedId === null || activeDmIdRef.current) return;
+                if (!list.some((item) => item.id === selectedId)) void recoverFromUnavailableChannel(selectedId);
+              })
+              .catch((error) => setChannelRefreshError(error instanceof Error ? error.message : "Could not refresh the channel list."));
+          }
         };
         connectedSocket.onclose = () => {
           if (cancelled || socket !== connectedSocket) return;
@@ -1027,8 +1054,17 @@ function ChatApp() {
   const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const updated = await api<Profile>("/me", { method: "PATCH", body: JSON.stringify({ username: form.get("username"), displayName: form.get("displayName") }) });
-    setProfile(updated); setPanel(null);
+    setProfileError("");
+    try {
+      const updated = await api<Profile>("/me", { method: "PATCH", body: JSON.stringify({ username: form.get("username"), displayName: form.get("displayName") }) });
+      setProfile(updated); setPanel(null);
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 409 || error.code === "USERNAME_TAKEN")) {
+        setProfileError("That username is already taken. Choose another username and try again.");
+      } else {
+        setProfileError(error instanceof Error ? error.message : "Your profile could not be saved.");
+      }
+    }
   };
   const searchHistory = async (event: FormEvent) => {
     event.preventDefault();
@@ -1279,7 +1315,7 @@ function ChatApp() {
         <div className="flex min-h-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-              {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p><button onClick={() => void refreshChannels().catch(() => setChannelRefreshError("Could not refresh the channel list."))} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />refresh channels</button>{channelRefreshError && <p className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}</div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <div className="text-center"><button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>{room.olderMessagesError && <p className="mt-2 font-mono text-[10px] text-destructive">{room.olderMessagesError}</p>}</div>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
+               {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p>{channelRefreshError && <p role="alert" className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}<button onClick={() => void retryChannelRecovery()} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />{channelRefreshError ? "retry channel refresh" : "refresh channels"}</button></div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <div className="text-center"><button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>{room.olderMessagesError && <p className="mt-2 font-mono text-[10px] text-destructive">{room.olderMessagesError}</p>}</div>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
               {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}
               {!activeDm && Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>
@@ -1311,7 +1347,7 @@ function ChatApp() {
 
       {panel === "notifications" && <NotificationCenter notifications={notifications} setNotifications={setNotifications} request={api} revision={notificationRevision} onClose={() => setPanel(null)} onNavigate={(url) => { setPanel(null); setLocation(url); }} onOpenMessage={openNotificationMessage} />}
        {organizeChannelOpen && currentChannel && <Overlay title={`Organize ${currentChannel.name}`} onClose={() => { if (!organizeWorking) setOrganizeChannelOpen(false); }}><form onSubmit={moveCurrentChannel} className="space-y-4"><p className="text-xs text-muted-foreground">Move this channel to a category without affecting its members or messages.</p><label className="block font-mono text-xs">category<select value={organizeCategoryId} onChange={(event) => setOrganizeCategoryId(event.target.value)} className="mt-2 block h-10 w-full rounded-md border border-input bg-background px-3"><option value="">uncategorized</option>{categories.filter((category) => category.communityId === currentChannel.communityId).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{organizeError && <p role="alert" className="text-xs text-destructive">{organizeError}</p>}<div className="flex justify-end gap-2"><button type="button" disabled={organizeWorking} onClick={() => setOrganizeChannelOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-xs">cancel</button><button disabled={organizeWorking || organizeCategoryId === (currentChannel.categoryId === null ? "" : String(currentChannel.categoryId))} className="rounded-md bg-primary px-3 py-2 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{organizeWorking ? "moving…" : "save category"}</button></div></form></Overlay>}
-        {panel === "profile" && <Overlay title="Your profile" onClose={() => setPanel(null)}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a><a href={`${basePath}/community-upgrades`} data-testid="link-community-upgrades" className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10">request public community</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
+         {panel === "profile" && <Overlay title="Your profile" onClose={() => { setProfileError(""); setPanel(null); }}><form onSubmit={saveProfile} className="space-y-4"><div className="flex items-center gap-3"><Avatar user={profile} size="lg" /><div><p className="font-mono text-sm font-bold">{profile.displayName}</p><p className="font-mono text-xs text-muted-foreground">Account profile · {profile.role === "admin" ? "platform admin / developer" : profile.role?.replaceAll("_", " ") || "member"}</p></div></div><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">username</span><input name="username" defaultValue={profile.username} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">display name</span><input name="displayName" defaultValue={profile.displayName} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{profileError && <p role="alert" className="font-mono text-[10px] leading-4 text-destructive">{profileError}</p>}<button className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground"><Check className="h-4 w-4" /> save profile</button><a href={`${basePath}/communities`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Users className="h-4 w-4" /> open communities</a><a href={`${basePath}/community-upgrades`} data-testid="link-community-upgrades" className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10">request public community</a>{profile.role === "admin" && <a href={`${basePath}/developer`} className="flex w-full items-center justify-center gap-2 rounded-md border border-primary/40 py-2.5 font-mono text-xs text-primary hover:bg-primary/10"><Zap className="h-4 w-4" /> open developer studio</a>}<a href={`${basePath}/admin`} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><Shield className="h-4 w-4" /> open platform console</a><button type="button" onClick={() => signOut({ redirectUrl: basePath || "/" })} className="flex w-full items-center justify-center gap-2 rounded-md border border-border py-2.5 font-mono text-xs text-muted-foreground hover:bg-muted"><LogOut className="h-4 w-4" /> sign out</button></form></Overlay>}
        {showRequests && <Overlay title={`Join requests · ${currentChannel?.name ?? ""}`} onClose={() => setShowRequests(false)}><div className="space-y-2">{joinRequests.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No pending requests.</p> : joinRequests.map((request) => <div key={request.id} className="flex items-center gap-3 rounded-lg border border-border p-3"><Avatar user={request.user} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs font-bold">{request.user.displayName}</p><p className="font-mono text-[10px] text-muted-foreground">@{request.user.username}</p></div><button onClick={() => void decideJoinRequest(request, "reject")} className="rounded border border-border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-destructive">decline</button><button onClick={() => void decideJoinRequest(request, "approve")} className="rounded bg-primary px-2 py-1 font-mono text-[10px] font-bold text-primary-foreground">approve</button></div>)}</div></Overlay>}
       {panel === "search" && <Overlay title={`Search results for “${search}”`} onClose={() => setPanel(null)}><div className="space-y-4">{searchResults.length === 0 ? <p className="font-mono text-xs text-muted-foreground">No messages found.</p> : searchResults.map((message) => <div key={message.id} className="border-b border-border pb-3"><div className="flex justify-between font-mono text-[10px] text-muted-foreground"><span className="text-secondary-foreground">{message.sender?.displayName}</span><span>{timeLabel(message.createdAt)}</span></div><p className="mt-1 text-sm">{message.body}</p></div>)}</div></Overlay>}
        {newChannelOpen && <Overlay title="Create a room" onClose={() => { if (!creatingChannel) { setNewChannelOpen(false); setCreateChannelError(""); } }}><form onSubmit={createChannel} className="space-y-4"><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">channel name</span><input autoFocus required value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="#room-name" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">topic</span><input value={newChannelTopic} onChange={(event) => setNewChannelTopic(event.target.value)} placeholder="What is this room about?" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">description</span><input value={newChannelDescription} onChange={(event) => setNewChannelDescription(event.target.value)} placeholder="A short description for members" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{categories.length > 0 && <label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">category</span><select value={newChannelCategoryId} onChange={(event) => setNewChannelCategoryId(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary"><option value="">no category</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>}<label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelPrivate} onChange={(event) => setNewChannelPrivate(event.target.checked)} /> private room (owner approval)</label><label className="flex items-center gap-2 font-mono text-xs"><input type="checkbox" checked={newChannelInviteOnly} onChange={(event) => setNewChannelInviteOnly(event.target.checked)} /> invite-only</label><label className="block"><span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">optional password</span><input type="password" minLength={4} value={newChannelPassword} onChange={(event) => setNewChannelPassword(event.target.value)} placeholder="at least 4 characters" className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-xs outline-none focus:border-primary" /></label>{createChannelError && <p className="rounded border border-destructive/30 bg-destructive/10 p-2 font-mono text-[10px] text-destructive">{createChannelError}</p>}<button disabled={creatingChannel} className="w-full rounded-md bg-primary py-2.5 font-mono text-xs font-bold text-primary-foreground disabled:opacity-50">{creatingChannel ? "creating room…" : "create room"}</button></form></Overlay>}
@@ -3222,6 +3258,7 @@ function DeveloperConsole() {
       const nextReleases = await api<DeveloperRelease[]>("/developer/releases");
       setReleases(nextReleases);
     } catch (reason) {
+      setReleases([]);
       setError(reason instanceof Error ? reason.message : "Could not load release history");
     }
   };
@@ -3235,6 +3272,17 @@ function DeveloperConsole() {
         api<AppConfig>("/developer/settings"),
         api<DeveloperRelease[]>("/developer/releases"),
       ]);
+      if (
+        (nextConfig.status === "rejected" && isForbiddenError(nextConfig.reason))
+        || (nextReleases.status === "rejected" && isForbiddenError(nextReleases.reason))
+      ) {
+        setConfig(defaultAppConfig);
+        setDraft(defaultAppConfig);
+        setReleases([]);
+        setStatus({ ...nextStatus, isAdmin: false });
+        setError("");
+        return;
+      }
       if (nextConfig.status === "fulfilled") {
         setConfig(nextConfig.value);
         setDraft(nextConfig.value);

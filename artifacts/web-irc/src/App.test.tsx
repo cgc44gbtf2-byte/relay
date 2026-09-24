@@ -168,6 +168,9 @@ function installApi({
   notifications = [],
   notificationsFailure = false,
   channelFailureOnce = false,
+  recoveryChannelFailureOnce = false,
+  recoveryChannelsResponse,
+  denyHistoryAfterFirst = false,
   dmPaginationFailureOnce = false,
   joinFailureOnce = false,
   createChannelFailureOnce = false,
@@ -194,6 +197,9 @@ function installApi({
   }>;
   notificationsFailure?: boolean;
   channelFailureOnce?: boolean;
+  recoveryChannelFailureOnce?: boolean;
+  recoveryChannelsResponse?: Promise<Response>;
+  denyHistoryAfterFirst?: boolean;
   dmPaginationFailureOnce?: boolean;
   joinFailureOnce?: boolean;
   createChannelFailureOnce?: boolean;
@@ -281,6 +287,8 @@ function installApi({
     if (url === "/api/channels" && method === "GET") {
       channelListCalls += 1;
       if (channelFailureOnce && channelListCalls === 1) return jsonResponse({ error: "channels unavailable" }, 500);
+      if (recoveryChannelFailureOnce && channelListCalls === 2) return jsonResponse({ error: "Channel list is temporarily unavailable." }, 503);
+      if (recoveryChannelsResponse && channelListCalls === 2) return recoveryChannelsResponse;
       const initialCall = channelFailureOnce ? 2 : 1;
       return jsonResponse(channelListCalls === initialCall ? [deleted, fallback] : fallbackChannels);
     }
@@ -293,6 +301,7 @@ function installApi({
     }
     if (url === "/api/channels/1/messages" && method === "GET") {
       historyCalls += 1;
+      if (denyHistoryAfterFirst && historyCalls > 1) return channelAccessRequired();
       if (accessRequiredRequest === "history") return channelAccessRequired();
       return missingRequest === "history"
         ? channelNotFound(missingChannelMessage)
@@ -611,6 +620,97 @@ describe("deleted room recovery", () => {
       expect(screen.queryByText("stale history")).toBeNull();
       expect(screen.queryByText("Orion")).toBeNull();
     });
+  });
+
+  it("clears inaccessible room content and retries a failed channel-list recovery", async () => {
+    await renderChat({
+      missingRequest: "history",
+      fallbackChannels: [room(2, "#fallback-room")],
+      recoveryChannelFailureOnce: true,
+    });
+
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Channel list is temporarily unavailable.");
+    expect(screen.queryByText("stale history")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "#deleted-room" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "retry channel refresh" }));
+
+    expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("recovers when reconnect discovers access to the active room was revoked", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      denyHistoryAfterFirst: true,
+    });
+    expect(await screen.findByText("stale history")).toBeTruthy();
+    await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());
+    const firstSocket = latestWebSocket;
+    act(() => firstSocket?.onopen?.());
+
+    vi.useFakeTimers();
+    act(() => firstSocket?.onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    act(() => latestWebSocket?.onopen?.());
+    vi.useRealTimers();
+
+    expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
+    expect(screen.queryByText("stale history")).toBeNull();
+  });
+
+  it("does not replace a DM selected while unavailable-room recovery is refreshing", async () => {
+    let resolveRecovery!: (response: Response) => void;
+    const recoveryChannelsResponse = new Promise<Response>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    await renderChat({
+      missingRequest: "history",
+      fallbackChannels: [room(2, "#fallback-room")],
+      recoveryChannelsResponse,
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
+
+    await act(async () => {
+      resolveRecovery(await jsonResponse([room(2, "#fallback-room")]));
+      await recoveryChannelsResponse;
+    });
+
+    expect(screen.getByRole("heading", { name: "@orion" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "#fallback-room" })).toBeNull();
+  });
+
+  it("shows an actionable duplicate-username error and preserves the profile draft", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+    });
+    const baseFetch = vi.mocked(fetch);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/me" && init?.method === "PATCH") {
+        return jsonResponse({ error: "Username already exists", code: "USERNAME_TAKEN" }, 409);
+      }
+      return baseFetch(input, init);
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /Mira.*@mira/ }));
+    const username = screen.getByLabelText("username") as HTMLInputElement;
+    const displayName = screen.getByLabelText("display name") as HTMLInputElement;
+    fireEvent.change(username, { target: { value: "already-used" } });
+    fireEvent.change(displayName, { target: { value: "Mira Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "save profile" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "That username is already taken. Choose another username and try again.",
+    );
+    expect(username.value).toBe("already-used");
+    expect(displayName.value).toBe("Mira Draft");
+    expect(screen.getByRole("heading", { name: "Your profile" })).toBeTruthy();
   });
 
   it.each([
@@ -970,5 +1070,33 @@ describe("frontend route and document error hardening", () => {
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "documents unavailable");
     expect(setError).toHaveBeenCalledWith("documents unavailable");
     expect(screen.queryByText("No documents match this search.")).toBeNull();
+  });
+
+  it("does not render developer data when either owner-only request is forbidden", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/admin/status") {
+        return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
+      }
+      if (url === "/api/developer/settings") {
+        return jsonResponse({
+          siteName: "Leaked private setting",
+          landingEyebrow: "secret",
+          landingTitle: "secret",
+          landingDescription: "secret",
+          networkStatusLabel: "secret",
+        });
+      }
+      if (url === "/api/developer/releases") {
+        return jsonResponse({ error: "Developer access denied" }, 403);
+      }
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/developer");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "This studio is owner-only." })).toBeTruthy();
+    expect(screen.queryByText("Leaked private setting")).toBeNull();
+    expect(screen.queryByText("Developer access denied")).toBeNull();
   });
 });
