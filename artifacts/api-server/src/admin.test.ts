@@ -4386,6 +4386,65 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back custom-role creation when audit logging fails", async () => {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const label = `Audit Failure ${suffix}`;
+    const key = `custom_${label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40)}`;
+    const triggerName = `fail_custom_role_audit_${suffix}`;
+    const functionName = `fail_custom_role_audit_fn_${suffix}`;
+
+    try {
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'created_custom_role' AND NEW.target_id = '${key}' THEN
+             RAISE EXCEPTION 'forced custom-role audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+
+      const response = await apiRequest(adminSession, "/admin/custom-roles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          label,
+          description: "Role must roll back if its audit entry fails",
+          scopeType: "community",
+          permissions: ["view_business"],
+        }),
+      });
+      assert.equal(response.status, 500, JSON.stringify(response));
+      assert.deepEqual(response.body, {
+        error: "An unexpected error occurred while processing the admin request.",
+      });
+
+      const [roles, permissionLinks, auditEntries] = await Promise.all([
+        pool.query("SELECT key FROM irc_custom_roles WHERE key = $1", [key]),
+        pool.query("SELECT role FROM irc_role_permissions WHERE role = $1", [key]),
+        pool.query("SELECT target_id FROM irc_admin_audit_logs WHERE target_id = $1", [key]),
+      ]);
+      assert.deepEqual(roles.rows, []);
+      assert.deepEqual(permissionLinks.rows, []);
+      assert.deepEqual(auditEntries.rows, []);
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+         DROP FUNCTION IF EXISTS "${functionName}"();`,
+      );
+      await pool.query("DELETE FROM irc_role_permissions WHERE role = $1", [key]);
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = $1", [key]);
+      await pool.query("DELETE FROM irc_custom_roles WHERE key = $1", [key]);
+    }
+  });
+
   test("creates, edits, assigns, and retires custom roles with scoped authority and audit history", async () => {
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const communityIds: number[] = [];
