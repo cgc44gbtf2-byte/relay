@@ -535,6 +535,7 @@ function ChatApp() {
   const wsRef = useRef<WebSocket | null>(ws);
   const onSocketMessageRef = useRef<(event: MessageEvent) => void>(() => undefined);
   const refreshChannelOrganizationRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const reconnectForRoomChangeRef = useRef<() => void>(() => undefined);
   const typingStartTimerRef = useRef<number | null>(null);
   const typingIdleTimerRef = useRef<number | null>(null);
   const typingAdvertisedRef = useRef(false);
@@ -724,10 +725,20 @@ function ChatApp() {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
+    const scheduleReconnect = () => {
+      if (cancelled || !session?.id || reconnectTimer !== null) return;
+      const delay = Math.min(30_000, 500 * 2 ** Math.min(reconnectAttempt, 6)) + Math.floor(Math.random() * 250);
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
+    };
     const connect = async () => {
+      if (cancelled || !session?.id) return;
       try {
         const { ticket } = await api<{ ticket: string }>("/ws-ticket");
-        if (cancelled) return;
+        if (cancelled || !session?.id) return;
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const connectedSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`);
         socket = connectedSocket;
@@ -746,9 +757,7 @@ function ChatApp() {
           wsRef.current = null;
           setConnection("offline");
           setWs((current) => current === connectedSocket ? null : current);
-          const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
-          reconnectAttempt += 1;
-          reconnectTimer = window.setTimeout(() => void connect(), delay);
+          scheduleReconnect();
         };
         connectedSocket.onerror = () => {
           if (!cancelled && socket === connectedSocket) setConnection("offline");
@@ -756,17 +765,24 @@ function ChatApp() {
         connectedSocket.onmessage = (event) => {
           if (!cancelled && socket === connectedSocket) onSocketMessageRef.current(event);
         };
-      } catch {
+      } catch (error) {
         if (cancelled) return;
         setConnection("offline");
-        const delay = Math.min(30_000, 500 * 2 ** reconnectAttempt) + Math.floor(Math.random() * 250);
-        reconnectAttempt += 1;
-        reconnectTimer = window.setTimeout(() => void connect(), delay);
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return;
+        scheduleReconnect();
       }
+    };
+    reconnectForRoomChangeRef.current = () => {
+      if (reconnectTimer === null) return;
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      reconnectAttempt = 0;
+      void connect();
     };
     void connect();
     return () => {
       cancelled = true;
+      reconnectForRoomChangeRef.current = () => undefined;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       const closingSocket = socket;
       if (!closingSocket) return;
@@ -775,7 +791,11 @@ function ChatApp() {
         setWs((current) => current === closingSocket ? null : current);
       }
     };
-  }, []);
+  }, [session?.id]);
+
+  useEffect(() => {
+    reconnectForRoomChangeRef.current();
+  }, [currentChannelId, activeDm?.id]);
 
   useEffect(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;

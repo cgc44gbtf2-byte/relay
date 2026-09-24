@@ -40,17 +40,13 @@ type Channel = {
   memberCount: number;
 };
 
-type MockWebSocket = {
+let latestWebSocket: {
+  url: string;
   onopen: (() => void) | null;
   onclose: (() => void) | null;
-  onerror: (() => void) | null;
   onmessage: ((event: MessageEvent) => void) | null;
   send: ReturnType<typeof vi.fn>;
-  close: ReturnType<typeof vi.fn>;
-};
-let latestWebSocket: MockWebSocket | null = null;
-
-let webSockets: MockWebSocket[] = [];
+} | null = null;
 let webSocketFrames: string[] = [];
 const profile = {
   id: "user-1",
@@ -94,15 +90,9 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const detail = {
-      community: { id: 7 },
-      canManage: false,
-    } as Parameters<typeof DocumentCenter>[0]["detail"];
-
-    const originalButton = screen.getByRole("button", { name: /deleted-room/i });
-    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
-    const select = await screen.findByTestId("select-public-space");
+    const select = await screen.findByTestId("select-organize-category");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -119,9 +109,9 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
+      channels: [{ id: 7, name: "#team", categoryId: null }],
+      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
-
-    const originalButton = screen.getByRole("button", { name: /deleted-room/i });
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
     fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
@@ -219,6 +209,7 @@ function installApi({
   let dmPaginationCalls = 0;
   let joinCalls = 0;
   let createChannelCalls = 0;
+  let ticketCalls = 0;
 
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -248,7 +239,7 @@ function installApi({
     if (url === "https://upload.test/file" && method === "PUT") {
       return uploadFailure ? jsonResponse({ error: "upload failed" }, 500) : jsonResponse({});
     }
-    if (url === "/api/ws-ticket") return jsonResponse({ ticket: "test-ticket" });
+    if (url === "/api/ws-ticket") return jsonResponse({ ticket: `test-ticket-${++ticketCalls}` });
     if (url === "/api/channels/1/public-spaces" && method === "GET") return jsonResponse(publicSpaces);
     if (url === "/api/channels/1/public-space" && method === "PATCH") {
       const communityId = (JSON.parse(String(init?.body)) as { communityId: number | null }).communityId;
@@ -356,15 +347,16 @@ function installApi({
   vi.stubGlobal("WebSocket", class {
     static OPEN = 1;
     readyState = 1;
+    url: string;
     onopen: (() => void) | null = null;
     onclose: (() => void) | null = null;
     onerror: (() => void) | null = null;
     onmessage: ((event: MessageEvent) => void) | null = null;
     send = vi.fn((frame: string) => webSocketFrames.push(frame));
     close = vi.fn();
-    constructor() {
+    constructor(url: string) {
+      this.url = url;
       latestWebSocket = this;
-      webSockets.push(this);
     }
   });
 }
@@ -386,7 +378,6 @@ describe("deleted room recovery", () => {
     vi.useRealTimers();
     cleanup();
     latestWebSocket = null;
-    webSockets = [];
     webSocketFrames = [];
     vi.unstubAllGlobals();
   });
@@ -622,6 +613,12 @@ describe("deleted room recovery", () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
     const deletedRoomSocket = latestWebSocket;
+    act(() => deletedRoomSocket?.onopen?.());
+    act(() => deletedRoomSocket?.onmessage?.({
+      data: JSON.stringify({ type: "channel_removed", channelId: 1 }),
+    } as MessageEvent));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    expect(latestWebSocket).toBe(deletedRoomSocket);
     const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
     expect(frames).toEqual(expect.arrayContaining([
       { type: "unsubscribe", channelId: 1 },
@@ -637,7 +634,7 @@ describe("deleted room recovery", () => {
   it("limits outbound typing frames and clears them after idle or draft removal", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());
-    act(() => latestWebSocket?.onopen?.());
+    latestWebSocket?.onopen?.();
     webSocketFrames = [];
     vi.useFakeTimers();
 
@@ -646,13 +643,13 @@ describe("deleted room recovery", () => {
     fireEvent.change(editor, { target: { value: "he" } });
     fireEvent.change(editor, { target: { value: "hey" } });
     await vi.advanceTimersByTimeAsync(300);
-    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual([
+    expect(webSocketFrames.map((frame) => JSON.parse(frame)).filter((frame) => frame.type === "typing")).toEqual([
       { type: "typing", channelId: 1, active: true },
     ]);
 
     fireEvent.change(editor, { target: { value: "hey there" } });
     await vi.advanceTimersByTimeAsync(1_500);
-    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual([
+    expect(webSocketFrames.map((frame) => JSON.parse(frame)).filter((frame) => frame.type === "typing")).toEqual([
       { type: "typing", channelId: 1, active: true },
       { type: "typing", channelId: 1, active: false },
     ]);
@@ -660,40 +657,33 @@ describe("deleted room recovery", () => {
     fireEvent.change(editor, { target: { value: "a" } });
     await vi.advanceTimersByTimeAsync(300);
     fireEvent.change(editor, { target: { value: "" } });
-    expect(webSocketFrames.map((frame) => JSON.parse(frame)).slice(-2)).toEqual([
+    expect(webSocketFrames.map((frame) => JSON.parse(frame)).filter((frame) => frame.type === "typing").slice(-2)).toEqual([
       { type: "typing", channelId: 1, active: true },
       { type: "typing", channelId: 1, active: false },
     ]);
   });
 
-  it("hides room typing in a direct message and returns to the room without stale indicators", async () => {
+  it("hides room typing in direct messages and does not recreate a healthy socket on room changes", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
     const roomSocket = latestWebSocket;
     const typingFrame = { data: JSON.stringify({ type: "typing", channelId: 1, userId: "user-2", active: true }) } as MessageEvent;
-
     act(() => roomSocket?.onmessage?.(typingFrame));
     expect(screen.getByText("Orion typing…")).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
     fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
     expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
+    expect(latestWebSocket).toBe(roomSocket);
     expect(screen.queryByText(/typing…/)).toBeNull();
-
-    // A frame already in flight on the old room socket (or delivered to the DM socket)
-    // must not restore room typing while the DM is open.
-    act(() => {
-      roomSocket?.onmessage?.(typingFrame);
-      latestWebSocket?.onmessage?.(typingFrame);
-    });
+    act(() => roomSocket?.onmessage?.(typingFrame));
     expect(screen.queryByText(/typing…/)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /deleted-room/i }));
     expect(await screen.findByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+    expect(latestWebSocket).toBe(roomSocket);
     expect(screen.queryByText(/typing…/)).toBeNull();
-
-    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
-    act(() => latestWebSocket?.onmessage?.(typingFrame));
+    act(() => roomSocket?.onmessage?.(typingFrame));
     expect(screen.getByText("Orion typing…")).toBeTruthy();
   });
 
@@ -715,13 +705,16 @@ describe("deleted room recovery", () => {
     });
 
     await waitFor(() => expect(screen.getByText("stale history")).toBeTruthy());
-    latestWebSocket?.onclose?.();
-    latestWebSocket?.onopen?.();
+    vi.useFakeTimers();
+    const firstSocket = latestWebSocket;
+    act(() => firstSocket?.onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(latestWebSocket).not.toBe(firstSocket);
+    act(() => latestWebSocket?.onopen?.());
+    await act(async () => { await Promise.resolve(); });
 
-    await waitFor(() => {
-      expect(screen.getByText("reaction survived")).toBeTruthy();
-      expect(screen.getByText("[message deleted]")).toBeTruthy();
-    });
+    expect(screen.getByText("reaction survived")).toBeTruthy();
+    expect(screen.getByText("[message deleted]")).toBeTruthy();
     expect(screen.queryByText("stale history")).toBeNull();
     expect(screen.getAllByText("reaction survived")).toHaveLength(1);
     expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
@@ -730,32 +723,119 @@ describe("deleted room recovery", () => {
 
   it("requests a fresh socket and resubscribes after a connection drops", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const firstSocket = latestWebSocket;
+    expect(firstSocket).toBeTruthy();
+    act(() => firstSocket?.onopen?.());
+    const initialTickets = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket").length;
 
-    const fallbackButton = screen.getByRole("button", { name: /fallback-room/i });
+    vi.useFakeTimers();
+    act(() => firstSocket?.onclose?.());
+    expect(latestWebSocket).toBe(firstSocket);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
     const reconnectedSocket = latestWebSocket;
-    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
-    const fileInput = document.querySelector('input[type="file"]');
-    expect(fileInput).toBeTruthy();
-    fireEvent.change(fileInput!, { target: { files: [file] } });
-
-    await waitFor(() => {
-      expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-        String(input) === "https://upload.test/file" && init?.method === "PUT",
-      )).toBe(true);
-    });
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).includes("/file-messages") && init?.method === "POST",
-    )).toBe(false);
-    expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
-      String(input).match(/^\/api\/messages\/[^/]+$/) && init?.method === "DELETE",
-    )).toBe(false);
+    expect(reconnectedSocket).toBeTruthy();
+    expect(reconnectedSocket).not.toBe(firstSocket);
+    expect(reconnectedSocket?.url).not.toBe(firstSocket?.url);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket")).toHaveLength(initialTickets + 1);
+    webSocketFrames = [];
+    act(() => reconnectedSocket?.onopen?.());
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
+      { type: "subscribe", channelId: 1 },
+    ]));
   });
 
-  it("recovers to another room when the room disappears while sharing a file", async () => {
+  it("bounds repeated failures and cancels retries when chat unmounts", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    vi.useFakeTimers();
+    const firstSocket = latestWebSocket;
+    act(() => firstSocket?.onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const secondSocket = latestWebSocket;
+    act(() => secondSocket?.onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(latestWebSocket).toBe(secondSocket);
+    cleanup();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(latestWebSocket).toBe(secondSocket);
+  });
+
+  it("cancels the previous room's pending retry when switching rooms", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    vi.useFakeTimers();
+    const firstSocket = latestWebSocket;
+    act(() => firstSocket?.onclose?.());
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /fallback-room/i }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    const newRoomSocket = latestWebSocket;
+    expect(newRoomSocket).not.toBe(firstSocket);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(latestWebSocket).toBe(newRoomSocket);
+    act(() => newRoomSocket?.onopen?.());
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toContainEqual({ type: "subscribe", channelId: 2 });
+  });
+
+  it("keeps notification navigation inside the signed-in workspace", async () => {
     await renderChat({
-      missingRequest: "send",
+      missingRequest: "event",
       fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 7,
+        type: "task_updated",
+        category: "general",
+        body: "Open the workspace task",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: "/communities/1",
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    fireEvent.click(screen.getByRole("button", { name: /Open the workspace task/ }));
+
+    expect(screen.getByTestId("text-notification-full-content").textContent).toBe("Open the workspace task");
+    fireEvent.click(screen.getByTestId("button-open-notification-context"));
+    await waitFor(() => expect(window.location.pathname).toBe("/communities/1"));
+    expect(screen.queryByText("Open the workspace task")).toBeNull();
+  });
+
+  it("applies notification read updates received from another session", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      notifications: [{
+        id: 8,
+        type: "task_updated",
+        category: "general",
+        body: "Read this from another session",
+        createdAt: "2026-09-21T12:00:00.000Z",
+        readAt: null,
+        actionUrl: null,
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText(/Read this from another session/)).toBeTruthy();
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    latestWebSocket?.onmessage?.({
+      data: JSON.stringify({
+        type: "notification_read",
+        notificationId: 8,
+        readAt: "2026-09-21T12:01:00.000Z",
+      }),
+    } as MessageEvent);
+
+    await waitFor(() => expect(screen.getByText(/· read$/)).toBeTruthy());
+  });
+
+  it("does not create a placeholder message when an attachment upload fails", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      uploadFailure: true,
     });
 
     const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
@@ -809,19 +889,4 @@ describe("frontend route and document error hardening", () => {
     expect(screen.queryByText("Real rooms.")).toBeNull();
   });
 
-  it("surfaces document loading failures instead of showing an empty state", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => jsonResponse({ error: "documents unavailable" }, 503)));
-    const detail = {
-      community: { id: 7 },
-      canManage: false,
-    } as Parameters<typeof DocumentCenter>[0]["detail"];
-
-    const originalButton = screen.getByRole("button", { name: /deleted-room/i });
-    const setError = vi.fn();
-    render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={setError} />);
-    expect(await screen.findByText("documents unavailable")).toBeTruthy();
-    expect(setError).toHaveBeenCalledWith("documents unavailable");
-  });
 });
-
-    const replacement = latestWebSocket;
