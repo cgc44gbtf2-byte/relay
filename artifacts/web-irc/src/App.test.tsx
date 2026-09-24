@@ -536,6 +536,98 @@ describe("community organization polling", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
 
+  it("keeps the newly created workspace selected in the URL and after remounting", async () => {
+    const workspace = (id: number, name: string) => ({
+      id, name, description: "", rules: "", services: "", serviceArea: "",
+      businessHours: "", contactEmail: "", contactPhone: "", plan: "business",
+      memberCount: 1, channelCount: 0, canManage: false, joined: true,
+    });
+    const oldWorkspace = workspace(71, "Existing business");
+    const newWorkspace = workspace(72, "New business");
+    let created = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "member" });
+      if (url === "/api/me") return jsonResponse(profile);
+      if (url === "/api/communities" && init?.method === "POST") {
+        created = true;
+        return jsonResponse(newWorkspace);
+      }
+      if (url === "/api/communities") return jsonResponse(created ? [oldWorkspace, newWorkspace] : [oldWorkspace]);
+      const match = url.match(/^\/api\/communities\/(71|72)\?/);
+      if (match) return jsonResponse({
+        community: match[1] === "72" ? newWorkspace : oldWorkspace,
+        canManage: false, canManageOrganization: false, isOwner: false,
+        members: [], employees: [], departments: [], locations: [], teams: [],
+        teamMemberships: [], assignments: [], channels: [], categories: [],
+        announcements: [], invitations: [], policies: [], documents: [], tasks: [],
+      });
+      if (/\/dashboard$/.test(url)) return jsonResponse({ stats: {}, tasks: {}, recentActivity: [] });
+      if (/\/activity/.test(url)) return jsonResponse({ entries: [], actions: [] });
+      if (/\/documents/.test(url)) return jsonResponse({ documents: [], folders: [], pagination: { hasMore: false }, folderPagination: { hasMore: false } });
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/communities/71");
+    const app = render(<App />);
+    await screen.findByRole("heading", { name: "Existing business" });
+
+    fireEvent.click(screen.getByRole("button", { name: "new" }));
+    fireEvent.change(screen.getByLabelText("business name"), { target: { value: "New business" } });
+    fireEvent.click(screen.getByRole("button", { name: "create business workspace" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/communities/72"));
+    expect(await screen.findByRole("heading", { name: "New business" })).toBeTruthy();
+
+    app.unmount();
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "New business" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/communities/72");
+  });
+
+  it("ignores an older workspace list response after navigating to a different workspace", async () => {
+    const workspaces = [81, 82].map((id) => ({
+      id, name: `Business ${id}`, description: "", rules: "", services: "",
+      serviceArea: "", businessHours: "", contactEmail: "", contactPhone: "",
+      plan: "business", memberCount: 1, channelCount: 0, joined: true, canManage: false,
+    }));
+    let listCalls = 0;
+    let resolveOlderList!: (response: Response) => void;
+    const olderList = new Promise<Response>((resolve) => { resolveOlderList = resolve; });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "member" });
+      if (url === "/api/me") return jsonResponse(profile);
+      if (url === "/api/communities") {
+        listCalls++;
+        return listCalls === 2 ? olderList : jsonResponse(workspaces);
+      }
+      const match = url.match(/^\/api\/communities\/(81|82)\?/);
+      if (match) return jsonResponse({
+        community: workspaces.find((item) => item.id === Number(match[1])),
+        canManage: false, canManageOrganization: false, isOwner: false,
+        members: [], employees: [], departments: [], locations: [], teams: [],
+        teamMemberships: [], assignments: [], channels: [], categories: [],
+        announcements: [], invitations: [], policies: [], documents: [], tasks: [],
+      });
+      if (/\/dashboard$/.test(url)) return jsonResponse({ stats: {}, tasks: {}, recentActivity: [] });
+      if (/\/activity/.test(url)) return jsonResponse({ entries: [], actions: [] });
+      if (/\/documents/.test(url)) return jsonResponse({ documents: [], folders: [], pagination: { hasMore: false }, folderPagination: { hasMore: false } });
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/communities/81");
+    render(<App />);
+    await screen.findByRole("heading", { name: "Business 81" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Business 82/ }));
+    await waitFor(() => expect(listCalls).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: /Business 81/ }));
+    await waitFor(() => expect(listCalls).toBe(3));
+    await act(async () => { resolveOlderList(await jsonResponse(workspaces)); await olderList; });
+
+    expect(window.location.pathname).toBe("/communities/81");
+    expect(await screen.findByRole("heading", { name: "Business 81" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Business 82" })).toBeNull();
+  });
+
   it("renders cross-session relationship changes without replacing an unsaved settings draft", async () => {
     const community = {
       id: 41, name: "Polling workspace", description: "Server description", rules: "", services: "",

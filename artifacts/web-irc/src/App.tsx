@@ -3977,6 +3977,7 @@ export function WorkspaceChannelOrganizer({
 }
 
 function CommunityConsole() {
+  const [, setLocation] = useLocation();
   const [, routeParams] = useRoute<{ id?: string }>("/communities/:id");
   const parsedCommunityId = routeParams?.id ? Number(routeParams.id) : NaN;
   const requestedCommunityId = Number.isSafeInteger(parsedCommunityId) && parsedCommunityId > 0 ? parsedCommunityId : null;
@@ -4024,23 +4025,33 @@ function CommunityConsole() {
   const [loadingMoreDetail, setLoadingMoreDetail] = useState(false);
   const [loadMoreDetailError, setLoadMoreDetailError] = useState("");
   const detailRequestGeneration = useRef(0);
+  const communitiesRequestGeneration = useRef(0);
+  const requestedCommunityIdRef = useRef(requestedCommunityId);
+  requestedCommunityIdRef.current = requestedCommunityId;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const selectCommunity = (id: number) => {
+    requestedCommunityIdRef.current = id;
+    setSelectedId(id);
+    if (requestedCommunityId !== id) setLocation(`/communities/${id}`);
+  };
 
   const loadCommunities = async () => {
+    const generation = ++communitiesRequestGeneration.current;
     const [nextPermissions, nextCommunities, me] = await Promise.all([
       api<PermissionSnapshot>("/permissions/me"),
       pagedApi<CommunitySummary>("/communities"),
       api<Profile>("/me"),
     ]);
+    if (generation !== communitiesRequestGeneration.current || requestedCommunityIdRef.current !== requestedCommunityId) return;
     setPermissions(nextPermissions);
     setCurrentUserId(me.id);
     setCommunities(nextCommunities);
     setSelectedId((current) => {
-      if (current !== null && nextCommunities.some((community) => community.id === current)) return current;
       if (requestedCommunityId !== null && nextCommunities.some((community) => community.id === requestedCommunityId)) {
         return requestedCommunityId;
       }
+      if (current !== null && nextCommunities.some((community) => community.id === current)) return current;
       return nextCommunities[0]?.id ?? null;
     });
   };
@@ -4139,8 +4150,7 @@ function CommunityConsole() {
       setNewContactPhone("");
        setNewCommunityPrivate(true);
       setNotice("Business workspace created with default operating channels.");
-      await loadCommunities();
-      setSelectedId(created.id);
+      selectCommunity(created.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create community");
     } finally {
@@ -4352,12 +4362,12 @@ function CommunityConsole() {
       <main className="mx-auto grid max-w-7xl gap-5 px-5 py-8 lg:grid-cols-[250px_1fr] sm:px-10">
         <aside className="rounded-xl border border-border bg-card p-3">
           <div className="flex items-center justify-between px-2 py-2"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">your businesses</p><button onClick={() => setNewCommunityOpen(true)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground">new</button></div>
-          <div className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => setSelectedId(community.id)} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "business access" : community.joined ? "team member" : "available"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No business workspaces yet.</p>}</div>
+           <div className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => selectCommunity(community.id)} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "business access" : community.joined ? "team member" : "available"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No business workspaces yet.</p>}</div>
         </aside>
         <section className="min-w-0">
           {error && <div className="mb-4 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}<button onClick={() => setError("")} className="ml-auto" aria-label="Dismiss error" title="Dismiss error"><X className="h-3.5 w-3.5" /></button></div>}
           {notice && <div className="mb-4 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notification" title="Dismiss notification"><X className="h-3.5 w-3.5" /></button></div>}
-          {!detail ? <div className="rounded-xl border border-border bg-card p-8"><Users className="h-6 w-6 text-primary" /><h1 className="mt-5 font-mono text-2xl font-bold">Choose a business.</h1><p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">Business owners and managers operate only inside assigned private workspaces. Platform settings stay with Admin / Developer accounts.</p></div> : <div className="space-y-5">
+           {!detail || detail.community.id !== selectedId ? <div className="rounded-xl border border-border bg-card p-8"><Users className="h-6 w-6 text-primary" /><h1 className="mt-5 font-mono text-2xl font-bold">{selectedId === null ? "Choose a business." : "Loading business…"}</h1><p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">Business owners and managers operate only inside assigned private workspaces. Platform settings stay with Admin / Developer accounts.</p></div> : <div className="space-y-5">
             <div className="rounded-xl border border-border bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">business workspace</p><h1 className="mt-2 font-mono text-2xl font-bold">{detail.community.name}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{detail.community.description || "No business description yet."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{detail.canManage ? "manage access" : "read access"}</span></div></div>
             {detail.canManage && <div className="grid gap-5 xl:grid-cols-2">
               <form onSubmit={saveSettings} className="rounded-xl border border-border bg-card p-5"><h2 className="font-mono text-sm font-bold">business settings</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Only assignments matching this workspace can change these values.</p><div className="mt-4 grid gap-3 sm:grid-cols-2"><input value={settings.name} onChange={(event) => setSettings({ ...settings, name: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="business name" /><input value={settings.contactEmail} onChange={(event) => setSettings({ ...settings, contactEmail: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="contact email" /><input value={settings.contactPhone} onChange={(event) => setSettings({ ...settings, contactPhone: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="contact phone" /><input value={settings.serviceArea} onChange={(event) => setSettings({ ...settings, serviceArea: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs" placeholder="service area" /><input value={settings.services} onChange={(event) => setSettings({ ...settings, services: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="services offered" /><input value={settings.businessHours} onChange={(event) => setSettings({ ...settings, businessHours: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="business hours" /><input value={settings.description} onChange={(event) => setSettings({ ...settings, description: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-xs sm:col-span-2" placeholder="description" /><textarea value={settings.rules} onChange={(event) => setSettings({ ...settings, rules: event.target.value })} className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs sm:col-span-2" placeholder="policies and operating rules" /></div><button disabled={working} className="mt-4 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50">save business settings</button></form>
