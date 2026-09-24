@@ -1702,6 +1702,103 @@ describe("admin access controls", () => {
     }
   });
 
+  test("filters activity by actor and literal action without returning unrelated events", async () => {
+    const marker = `audit_filter_${randomUUID().replaceAll("-", "")}`;
+    const fixtures = [
+      { actor: `${marker} Alpha`, action: `${marker}_grant_role` },
+      { actor: `${marker} Beta`, action: `${marker}_grant_role` },
+      { actor: `${marker} Alpha`, action: `${marker}_revoke_role` },
+      { actor: `${marker} Alpha`, action: `${marker}Xgrant_role` },
+    ];
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (const fixture of fixtures) {
+      const offset = parameters.length;
+      values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
+      parameters.push(
+        adminSession.userId,
+        fixture.actor,
+        fixture.action,
+        `${marker}_target`,
+        `${marker} target`,
+      );
+    }
+
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label)
+       VALUES ${values.join(", ")}
+       RETURNING id`,
+      parameters,
+    );
+    const fixtureIds = inserted.rows.map((row) => row.id);
+
+    try {
+      const actorResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityActor=${encodeURIComponent(`${marker} alpha`)}`,
+      );
+      assert.equal(actorResponse.status, 200, JSON.stringify(actorResponse));
+      const actorActivity = (actorResponse.body as {
+        activity: Array<{ id: number; actor: string; action: string }>;
+      }).activity;
+      assert.ok(actorActivity.every((entry) => entry.actor.toLowerCase().includes("alpha")));
+      assert.deepEqual(new Set(actorActivity.map((entry) => entry.id)), new Set([
+        fixtureIds[0],
+        fixtureIds[2],
+        fixtureIds[3],
+      ]));
+
+      const actionResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityAction=${encodeURIComponent(`${marker}_grant_role`)}`,
+      );
+      assert.equal(actionResponse.status, 200, JSON.stringify(actionResponse));
+      const actionActivity = (actionResponse.body as {
+        activity: Array<{ id: number; actor: string; action: string }>;
+      }).activity;
+      assert.ok(actionActivity.every((entry) => entry.action === `${marker}_grant_role`));
+      assert.deepEqual(new Set(actionActivity.map((entry) => entry.id)), new Set([
+        fixtureIds[0],
+        fixtureIds[1],
+      ]));
+
+      const combinedResponse = await apiRequest(
+        adminSession,
+        `/admin/overview?activityActor=${encodeURIComponent(`${marker} alpha`)}&activityAction=${encodeURIComponent(`${marker}_grant_role`)}`,
+      );
+      assert.equal(combinedResponse.status, 200, JSON.stringify(combinedResponse));
+      const combinedActivity = (combinedResponse.body as {
+        activity: Array<{ id: number; actor: string; action: string }>;
+      }).activity;
+      assert.deepEqual(combinedActivity.map((entry) => entry.id), [fixtureIds[0]]);
+      assert.equal(combinedActivity[0]?.actor, `${marker} Alpha`);
+      assert.equal(combinedActivity[0]?.action, `${marker}_grant_role`);
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
+  test("rejects oversized and repeated activity filters", async () => {
+    const tooLong = "x".repeat(201);
+    for (const path of [
+      `/admin/overview?activityActor=${tooLong}`,
+      `/admin/overview?activityAction=${tooLong}`,
+      "/admin/overview?activityActor=first&activityActor=second",
+    ]) {
+      const response = await apiRequest(adminSession, path);
+      assert.equal(response.status, 400, JSON.stringify(response));
+    }
+
+    const boundaryResponse = await apiRequest(
+      adminSession,
+      `/admin/overview?activityActor=${"x".repeat(200)}`,
+    );
+    assert.equal(boundaryResponse.status, 200, JSON.stringify(boundaryResponse));
+  });
+
   test("keeps cursor activity pages complete when a newer event arrives between requests", async () => {
     const marker = `activity_cursor_${randomUUID().replaceAll("-", "")}`;
     const rowCount = 23;

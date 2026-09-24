@@ -27,7 +27,6 @@ const startedAt = Date.now();
 const DEFAULT_ACTIVITY_LIMIT = 20;
 const MAX_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_OFFSET = 10_000;
-
 const MAX_ACTIVITY_CURSOR_LENGTH = 256;
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
@@ -63,6 +62,11 @@ function parseActivityQueryInteger(
   return parsed;
 }
 
+function parseActivityFilter(value: unknown): string | null {
+  if (value === undefined) return "";
+  if (!isValidQuery(value)) return null;
+  return value.trim();
+}
 function parseActivityCursor(value: unknown): ActivityCursor | null | false {
   if (value === undefined) return null;
   if (
@@ -178,16 +182,18 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     0,
     MAX_ACTIVITY_OFFSET,
   );
-
+  if (activityLimit === null || activityOffset === null) {
+    res.status(400).json({
+      error: `activityLimit must be between 1 and ${MAX_ACTIVITY_LIMIT}, and activityOffset must be between 0 and ${MAX_ACTIVITY_OFFSET}.`,
+    });
+    return;
+  }
   const activityCursor = parseActivityCursor(req.query.activityCursor);
-  const rawActivityActor = req.query.activityActor;
-  const rawActivityAction = req.query.activityAction;
-  const activityActor = typeof rawActivityActor === "string" ? rawActivityActor.trim() : "";
-  const activityAction = typeof rawActivityAction === "string" ? rawActivityAction.trim() : "";
-  if (
-    (typeof rawActivityActor === "string" && !isValidQuery(rawActivityActor))
-    || (typeof rawActivityAction === "string" && !isValidQuery(rawActivityAction))
-  ) {
+
+  const effectiveActivityOffset = activityCursor ? 0 : activityOffset;
+  const activityActor = parseActivityFilter(req.query.activityActor);
+  const activityAction = parseActivityFilter(req.query.activityAction);
+  if (activityActor === null || activityAction === null) {
     res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
     return;
   }
@@ -280,19 +286,22 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       })
       .from(adminAuditLogsTable)
       .where(and(
-        activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
-        activityAction ? ilike(adminAuditLogsTable.action, `%${activityAction}%`) : undefined,
+        activityActor
+          ? ilike(adminAuditLogsTable.actorDisplayName, `%${escapeLikePattern(activityActor)}%`)
+          : undefined,
+        activityAction
+          ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(activityAction)}%`)
+          : undefined,
         activityCursor
           ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${activityCursor.createdAt}::timestamptz, ${activityCursor.id})`
           : undefined,
       ))
       .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
       .limit(activityLimit + 1)
-      .offset(activityCursor ? 0 : activityOffset),
+      .offset(effectiveActivityOffset),
   ]);
   const hasMoreActivity = activity.length > activityLimit;
-
-  const lastActivity = activity.at(-1);
+  const lastActivity = activity[Math.min(activity.length, activityLimit) - 1];
   const actor = await adminProfile(req);
   if (!actor) {
     res.status(403).json({ error: "Admin access required." });
@@ -613,7 +622,15 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
     }
   }
   if (scopeType === "channel") {
-    const [channel] = await db.select({ id: channelsTable.id, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).where(eq(channelsTable.id, channelId!));
+  const [channel] = await db
+    .select({ id: channelsTable.id, name: channelsTable.name })
+    .from(channelsTable)
+    .where(eq(channelsTable.id, channelId));
+
+  const deleted = await db
+    .delete(messagesTable)
+    .where(eq(messagesTable.channelId, channelId))
+    .returning({ id: messagesTable.id });
     if (!channel || (communityId !== null && channel.communityId !== communityId) || (categoryId !== null && channel.categoryId !== categoryId)) {
       res.status(400).json({ error: "Channel does not match the selected scope." });
       return;
@@ -685,26 +702,31 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     return;
   }
   const result = await db.transaction(async (tx) => {
-    const [channel] = await tx
-      .select({ id: channelsTable.id, name: channelsTable.name })
-      .from(channelsTable)
-      .where(eq(channelsTable.id, channelId))
-      .for("update");
+    const [currentActor] = await tx.select({ role: usersTable.role })
+      .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
+    const [channel] = await tx.select().from(channelsTable)
+      .where(eq(channelsTable.id, channelId)).for("update");
     if (!channel) return { outcome: "not_found" } as const;
-
-    const deleted = await tx
-      .delete(messagesTable)
-      .where(eq(messagesTable.channelId, channelId))
-      .returning({ id: messagesTable.id });
-    await tx.insert(adminAuditLogsTable).values({
-      actorId: actor.clerkId,
-      actorDisplayName: actor.displayName,
-      action: "cleared_channel_history",
-      targetId: String(channelId),
-      targetLabel: channel.name,
-      details: `${deleted.length} messages deleted`,
-    });
-    return { outcome: "cleared", deleted: deleted.length } as const;
+    if (categoryId !== null && categoryId !== undefined) {
+      const [category] = await tx
+        .select({ communityId: categoriesTable.communityId })
+        .from(categoriesTable)
+        .where(eq(categoriesTable.id, categoryId))
+        .for("share");
+      if (!category || category.communityId !== channel.communityId) {
+        return { outcome: "wrong_workspace" } as const;
+      }
+    }
+    const [updated] = await tx
+      .update(channelsTable)
+      .set({
+        ...(topic === undefined ? {} : { topic }),
+        ...(hasCategoryId ? { categoryId } : {}),
+      })
+      .where(eq(channelsTable.id, channelId))
+      .returning();
+    return { outcome: "updated", updated } as const;
   });
   if (result.outcome === "forbidden") {
     res.status(403).json({ error: "Admin access required." });
@@ -719,6 +741,12 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     return;
   }
   const { updated } = result;
+
+  const auditDetails = hasCategoryId
+    ? categoryId === null
+      ? "Moved to unassigned channels"
+      : `Moved to room ${categoryId}`
+    : topic || "Cleared channel topic";
   const { passwordHash: _passwordHash, ...safeChannel } = updated;
   wsHub.broadcastChannel(channelId, { type: "channel", channel: safeChannel });
   if (hasCategoryId) wsHub.broadcastChannelListChanged();
@@ -737,49 +765,45 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
   }
   const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
   const channelId = Number(rawId);
-  if (!Number.isInteger(channelId)) {
-    res.status(400).json({ error: "Invalid channel." });
-    return;
-  }
   const result = await db.transaction(async (tx) => {
-    const [channel] = await tx
-      .select({ id: channelsTable.id, name: channelsTable.name })
-      .from(channelsTable)
-      .where(eq(channelsTable.id, channelId))
-      .for("update");
+    const [currentActor] = await tx.select({ role: usersTable.role })
+      .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
+    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
+    const [channel] = await tx.select().from(channelsTable)
+      .where(eq(channelsTable.id, channelId)).for("update");
     if (!channel) return { outcome: "not_found" } as const;
-
-    const deleted = await tx
-      .delete(messagesTable)
-      .where(eq(messagesTable.channelId, channelId))
-      .returning({ id: messagesTable.id });
-    await tx.insert(adminAuditLogsTable).values({
-      actorId: actor.clerkId,
-      actorDisplayName: actor.displayName,
-      action: "cleared_channel_history",
-      targetId: String(channelId),
-      targetLabel: channel.name,
-      details: `${deleted.length} messages deleted`,
-    });
-    return { outcome: "cleared", deleted: deleted.length } as const;
+    if (categoryId !== null && categoryId !== undefined) {
+      const [category] = await tx
+        .select({ communityId: categoriesTable.communityId })
+        .from(categoriesTable)
+        .where(eq(categoriesTable.id, categoryId))
+        .for("share");
+      if (!category || category.communityId !== channel.communityId) {
+        return { outcome: "wrong_workspace" } as const;
+      }
+    }
+    const [updated] = await tx
+      .update(channelsTable)
+      .set({
+        ...(topic === undefined ? {} : { topic }),
+        ...(hasCategoryId ? { categoryId } : {}),
+      })
+      .where(eq(channelsTable.id, channelId))
+      .returning();
+    return { outcome: "updated", updated } as const;
   });
-  if (result.outcome === "not_found") {
-    res.status(404).json(channelNotFoundError);
-    return;
-  }
-  res.json({ ok: true, deleted: result.deleted });
-});
-
 export default router;
-
 type ActivityCursor = { createdAt: string; id: number };
-
-  const visibleActivity = activity.map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
-
+  const visibleActivity = activity
+    .slice(0, activityLimit)
+    .map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
   const nextActivityCursor = hasMoreActivity && lastActivity
     ? encodeActivityCursor({ createdAt: lastActivity.cursorCreatedAt, id: lastActivity.id })
     : null;
-
 function encodeActivityCursor(cursor: ActivityCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
 }

@@ -1792,6 +1792,8 @@ function AdminConsole() {
   const [accountStatusFilter, setAccountStatusFilter] = useState("all");
   const [activityActorFilter, setActivityActorFilter] = useState("");
   const [activityActionFilter, setActivityActionFilter] = useState("");
+  const [loadedActivityFilters, setLoadedActivityFilters] = useState({ actor: "", action: "" });
+  const overviewLoadRef = useRef(0);
   const [pendingRole, setPendingRole] = useState<{ id: string; label: string; role: "admin" | "moderator" | "community_admin" | "member" } | null>(null);
   const [pendingAccountStatus, setPendingAccountStatus] = useState<{ id: string; label: string; accountStatus: "active" | "suspended" } | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<AdminAssignment | null>(null);
@@ -1807,14 +1809,21 @@ function AdminConsole() {
   const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [announcementDraft, setAnnouncementDraft] = useState("");
   const load = async (activityCursor: string | null = null, appendActivity = false) => {
+    const requestId = ++overviewLoadRef.current;
+    const requestedActivityFilters = {
+      actor: activityActorFilter.trim(),
+      action: activityActionFilter.trim(),
+    };
     setError("");
     try {
       const activityParams = new URLSearchParams();
       if (activityCursor) activityParams.set("activityCursor", activityCursor);
-      if (activityActorFilter.trim()) activityParams.set("activityActor", activityActorFilter.trim());
-      if (activityActionFilter.trim()) activityParams.set("activityAction", activityActionFilter.trim());
+      if (requestedActivityFilters.actor) activityParams.set("activityActor", requestedActivityFilters.actor);
+      if (requestedActivityFilters.action) activityParams.set("activityAction", requestedActivityFilters.action);
       const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
       const [nextOverview, nextHealth] = await Promise.all([api<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
+      if (requestId !== overviewLoadRef.current) return;
+      setLoadedActivityFilters(requestedActivityFilters);
       if (!appendActivity) {
         setOverview(nextOverview);
       } else {
@@ -1827,7 +1836,9 @@ function AdminConsole() {
       }
       setHealth(nextHealth);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load the operations console");
+      if (requestId === overviewLoadRef.current) {
+        setError(reason instanceof Error ? reason.message : "Could not load the operations console");
+      }
     }
   };
   const loadRoleData = async () => {
@@ -1925,6 +1936,8 @@ function AdminConsole() {
   const nav: Array<[typeof section, string, LucideIcon]> = [["overview", "overview", LayoutDashboard], ["accounts", "accounts", Users], ["channels", "channels", Hash], ["roles", "scoped roles", Shield], ["activity", "activity", Activity], ["upgrades", "upgrades", CheckCircle2], ["system", "system status", Server]];
   const title = nav.find(([key]) => key === section)?.[1] ?? "overview";
   const actor = (value: ConsoleOverview["activity"][number]["actor"]) => typeof value === "string" ? value : value?.displayName ?? value?.username ?? "system";
+  const activityFiltersCurrent = loadedActivityFilters.actor === activityActorFilter.trim()
+    && loadedActivityFilters.action === activityActionFilter.trim();
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading admin console…</div>;
   if (error && !status) return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
   if (!status?.isAdmin) return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10"><div className="mx-auto max-w-2xl"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><div className="mt-16 rounded-2xl border border-border bg-card p-8"><Shield className="h-8 w-8 text-primary" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">platform access</p><h1 className="mt-2 font-mono text-3xl font-bold">Admin access is managed by the platform</h1><p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground">Your account is a member. A platform operator must explicitly provision administrative access before you can enter this control room.</p></div></div></div>;
@@ -1955,7 +1968,37 @@ function AdminConsole() {
               <div className="grid gap-5 xl:grid-cols-[1.12fr_.88fr]"><section className="rounded-lg border border-border bg-card"><div className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="font-mono text-sm font-bold">recent activity</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">The last operational changes</p></div><button onClick={() => setSection("activity")} className="font-mono text-[10px] text-primary hover:underline">view all</button></div><div className="divide-y divide-border">{overview.activity.slice(0, 6).map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} />)}{overview.activity.length === 0 && <EmptyAdminState label="No activity recorded yet." />}</div></section><div className="space-y-5"><AdminHealthCard health={health} onOpen={() => setSection("system")} /><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">recent messages</h2></div><div className="divide-y divide-border">{overview.recentMessages.slice(0, 5).map((message) => <div key={message.id} className="px-5 py-3"><div className="flex justify-between gap-3 font-mono text-[10px]"><span className="truncate text-secondary-foreground">{message.sender}</span><span className="shrink-0 text-muted-foreground">{timeLabel(message.createdAt)}</span></div><p className="mt-1 truncate text-xs">{message.body}</p></div>)}{overview.recentMessages.length === 0 && <EmptyAdminState label="No messages have been sent yet." />}</div></section></div></div>
             </div>
             ) : section === "accounts" ? <AdminAccountsPanel accounts={accounts} query={query} setQuery={setQuery} roleFilter={roleFilter} setRoleFilter={setRoleFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter} accountStatusFilter={accountStatusFilter} setAccountStatusFilter={setAccountStatusFilter} currentId={status.profile.id} working={working} onRole={(account, role) => setPendingRole({ id: account.id, label: account.displayName, role })} onAccountStatus={(account, accountStatus) => setPendingAccountStatus({ id: account.id, label: account.displayName, accountStatus })} /> : section === "channels" ? <AdminChannelsPanel channels={overview.channels} categories={overview.categories} currentId={status.profile.id} editingChannel={editingChannel} topicDraft={topicDraft} setTopicDraft={setTopicDraft} working={working} onEdit={(channel) => { setEditingChannel(channel.id); setTopicDraft(channel.topic); }} onSave={saveTopic} onCancel={() => setEditingChannel(null)} onClear={(channel) => setPendingClear({ id: channel.id, name: channel.name })} onDeleteChannel={(channel) => setPendingResourceDelete({ kind: "channel", item: channel })} onDeleteCategory={(category) => setPendingResourceDelete({ kind: "category", item: category })} onDeleteCategoryWithChannels={(category) => setPendingResourceDelete({ kind: "category-with-channels", item: category })} /> : section === "roles" ? <AdminRoleAssignmentsPanel assignments={roleAssignments} users={directoryLoaded ? directory : overview.users} options={scopeOptions} working={working} onGrant={grantRole} onRevoke={setPendingRevoke} customRoles={customRoles} permissions={customRolePermissions} onCreateCustomRole={createCustomRole} /> : section === "activity" ? (
-             <section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-mono text-sm font-bold">audit stream</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p></div><Activity className="h-4 w-4 text-primary" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} placeholder="filter by actor" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-actor" /><input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} placeholder="filter by action" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] outline-none focus:border-primary" data-testid="input-activity-action" /></div></div><div className="divide-y divide-border">{overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}{overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}</div>{overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}</section>
+              <section className="rounded-lg border border-border bg-card">
+                <div className="border-b border-border px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="font-mono text-sm font-bold">audit stream</h2>
+                      <p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p>
+                    </div>
+                    <Activity className="h-4 w-4 text-primary" />
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+                    <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                      actor contains
+                      <input value={activityActorFilter} onChange={(event) => setActivityActorFilter(event.target.value)} maxLength={200} placeholder="name or display name" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-actor" />
+                    </label>
+                    <label className="grid gap-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                      action contains
+                      <input value={activityActionFilter} onChange={(event) => setActivityActionFilter(event.target.value)} maxLength={200} placeholder="action type" className="h-9 rounded-md border border-input bg-background px-3 font-mono text-[11px] normal-case tracking-normal text-foreground outline-none focus:border-primary" data-testid="input-activity-action" />
+                    </label>
+                    <button type="button" onClick={() => { setActivityActorFilter(""); setActivityActionFilter(""); }} disabled={!activityActorFilter && !activityActionFilter} className="h-9 rounded-md border border-border px-3 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" data-testid="button-clear-activity-filters">clear filters</button>
+                  </div>
+                </div>
+                <div className="divide-y divide-border">
+                  {!activityFiltersCurrent
+                    ? <EmptyAdminState label="Updating activity filters…" />
+                    : <>
+                      {overview.activity.map((item) => <AdminActivityRow key={item.id} item={item} actor={actor} detailed />)}
+                      {overview.activity.length === 0 && <EmptyAdminState label="No administrative activity matches these filters." />}
+                    </>}
+                </div>
+                {activityFiltersCurrent && overview.activityPagination.hasMore && <div className="border-t border-border p-4 text-center"><button disabled={loadingOlderActivity} onClick={() => void loadOlderActivity()} className="rounded-md border border-border px-4 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{loadingOlderActivity ? "loading older activity…" : "load older activity"}</button></div>}
+              </section>
           ) : section === "upgrades" ? <AdminCommunityUpgradesPanel /> : (
             <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><section className="rounded-lg border border-border bg-card"><div className="border-b border-border px-5 py-4"><h2 className="font-mono text-sm font-bold">service health</h2><p className="mt-1 font-mono text-[10px] text-muted-foreground">Last probe: {health ? timeLabel(health.checkedAt) : "unavailable"}</p></div><div className="grid gap-px bg-border sm:grid-cols-2">{health ? <><HealthCell label="api" value={health.api} icon={Radio} /><HealthCell label="database" value={health.database} icon={Database} /><HealthCell label="database latency" value={`${health.databaseLatencyMs} ms`} icon={Clock3} /><HealthCell label="environment" value={health.environment} icon={Server} /><HealthCell label="uptime" value={`${Math.floor(health.uptimeSeconds / 3600)}h`} icon={Activity} /></> : <EmptyAdminState label="Health data is not available." />}</div></section><div className="rounded-lg border border-border bg-card p-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">administrator</p><div className="mt-5 flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary font-mono text-sm font-bold text-secondary-foreground">{initials(status.profile.displayName)}</div><div><p className="font-mono text-sm font-bold">{status.profile.displayName}</p><p className="mt-1 font-mono text-[10px] text-muted-foreground">@{status.profile.username}</p></div></div><div className="mt-6 border-t border-border pt-4 font-mono text-[10px] leading-5 text-muted-foreground">This account can change roles, update public room context, and permanently remove room history.</div></div></div>
            )}
