@@ -6087,6 +6087,267 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rejects valid resource IDs from another workspace on reads and writes", async () => {
+    const workspaces: number[] = [];
+    const foreignEmployee = await createTestSession("foreign_workspace_employee");
+    const originalFetch = globalThis.fetch;
+    const resources: Array<{
+      task: number; attachment: number; document: number; version: number;
+      department: number; location: number; team: number; invitation: number;
+      category: number; announcement: number; announcementAttachment: number;
+      folder: number; channel: number; policy: number;
+    }> = [];
+    const owner = adminSession.userId;
+    const employee = memberSession.userId;
+    const file = { objectPath: `/objects/uploads/${randomUUID()}`, fileName: "scope.txt", contentType: "text/plain", fileSize: 1 };
+    const json = (body: object, method = "POST"): RequestInit => ({
+      method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const insertId = async (sql: string, params: unknown[]): Promise<number> => {
+      const result = await pool.query<{ id: number }>(sql, params);
+      assert.equal(result.rowCount, 1);
+      return result.rows[0].id;
+    };
+
+    try {
+      assert.equal((await apiRequest(foreignEmployee, "/me")).status, 200);
+      for (const label of ["home", "foreign"]) {
+        const workspace = await insertId(
+          `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+           VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+          [`Isolation ${label}`, `isolation-${randomUUID()}`, owner],
+        );
+        workspaces.push(workspace);
+        await pool.query(
+          `INSERT INTO irc_community_members (community_id, user_id, status)
+           VALUES ($1, $2, 'owner'), ($1, $3, 'member') ON CONFLICT DO NOTHING`,
+          [workspace, owner, employee],
+        );
+        await pool.query(
+          `INSERT INTO irc_employee_profiles (community_id, user_id)
+           VALUES ($1, $2)`,
+          [workspace, employee],
+        );
+        if (label === "foreign") {
+          await pool.query(
+            "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+            [workspace, foreignEmployee.userId],
+          );
+          await pool.query(
+            "INSERT INTO irc_employee_profiles (community_id, user_id) VALUES ($1, $2)",
+            [workspace, foreignEmployee.userId],
+          );
+        }
+        const department = await insertId(
+          "INSERT INTO irc_departments (community_id, name) VALUES ($1, $2) RETURNING id",
+          [workspace, `${label} department`],
+        );
+        const location = await insertId(
+          "INSERT INTO irc_locations (community_id, name) VALUES ($1, $2) RETURNING id",
+          [workspace, `${label} location`],
+        );
+        const team = await insertId(
+          "INSERT INTO irc_teams (community_id, department_id, location_id, name) VALUES ($1, $2, $3, $4) RETURNING id",
+          [workspace, department, location, `${label} team`],
+        );
+        const category = await insertId(
+          "INSERT INTO irc_categories (community_id, owner_id, name) VALUES ($1, $2, $3) RETURNING id",
+          [workspace, owner, `${label}-${randomUUID()}`],
+        );
+        const channel = await insertId(
+          "INSERT INTO irc_channels (community_id, category_id, owner_id, name) VALUES ($1, $2, $3, $4) RETURNING id",
+          [workspace, category, owner, `#scope-${randomUUID().slice(0, 8)}`],
+        );
+        const folder = await insertId(
+          "INSERT INTO irc_document_folders (community_id, name, created_by) VALUES ($1, $2, $3) RETURNING id",
+          [workspace, `${label} folder`, owner],
+        );
+        const task = await insertId(
+          "INSERT INTO irc_workspace_tasks (community_id, title, created_by) VALUES ($1, $2, $3) RETURNING id",
+          [workspace, `${label} task`, owner],
+        );
+        const attachment = await insertId(
+          `INSERT INTO irc_workspace_task_attachments
+           (task_id, uploader_id, object_path, file_name, content_type, file_size)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [task, owner, file.objectPath, file.fileName, file.contentType, file.fileSize],
+        );
+        const document = await insertId(
+          "INSERT INTO irc_business_documents (community_id, title, owner_id, requires_acknowledgement) VALUES ($1, $2, $3, true) RETURNING id",
+          [workspace, `${label} document`, owner],
+        );
+        const version = await insertId(
+          `INSERT INTO irc_document_versions
+           (document_id, version, object_path, file_name, content_type, file_size, uploaded_by)
+           VALUES ($1, 1, $2, $3, $4, $5, $6) RETURNING id`,
+          [document, file.objectPath, file.fileName, file.contentType, file.fileSize, owner],
+        );
+        const invitation = await insertId(
+          `INSERT INTO irc_workspace_invitations
+           (community_id, email, invited_by, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4, now() + interval '1 day') RETURNING id`,
+          [workspace, `${randomUUID()}@example.test`, owner, createHash("sha256").update(randomUUID()).digest("hex")],
+        );
+        const announcement = await insertId(
+          "INSERT INTO irc_server_announcements (community_id, author_id, title, body) VALUES ($1, $2, $3, 'Scope fixture') RETURNING id",
+          [workspace, owner, `${label} announcement`],
+        );
+        const announcementAttachment = await insertId(
+          `INSERT INTO irc_announcement_attachments
+           (announcement_id, uploader_id, object_path, file_name, content_type, file_size)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [announcement, owner, file.objectPath, file.fileName, file.contentType, file.fileSize],
+        );
+        const policy = await insertId(
+          "INSERT INTO irc_workspace_policies (community_id, title, body, created_by) VALUES ($1, $2, 'Scope fixture', $3) RETURNING id",
+          [workspace, `${label} policy`, owner],
+        );
+        resources.push({
+          task, attachment, document, version, department, location, team,
+          invitation, category, announcement, announcementAttachment, folder, channel, policy,
+        });
+      }
+      const [home, foreign] = workspaces;
+      const [own, other] = resources;
+      const homePath = `/communities/${home}`;
+
+      // Signed downloads must prove that the authorized route reaches storage,
+      // without relying on an external signer or following the redirect.
+      globalThis.fetch = async (input, init) => {
+        const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (requestUrl === "http://127.0.0.1:1106/object-storage/signed-object-url") {
+          return new Response(JSON.stringify({ signed_url: "https://storage.example/scope" }), {
+            status: 200, headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+
+      // Both sides are real, readable resources, and this actor can manage both workspaces.
+      for (const [workspace, data] of [[home, own], [foreign, other]] as const) {
+        const detail = await apiRequest(adminSession, `/communities/${workspace}`);
+        assert.equal(detail.status, 200, JSON.stringify(detail));
+        const body = detail.body as Record<string, Array<{ id?: number; userId?: string }>>;
+        for (const [key, id] of Object.entries({
+          departments: data.department, locations: data.location, teams: data.team,
+          invitations: data.invitation, categories: data.category,
+          announcements: data.announcement, policies: data.policy, tasks: data.task,
+        })) {
+          assert.ok(body[key]?.some((row) => row.id === id), `${key} fixture must be visible in workspace ${workspace}`);
+        }
+        assert.ok(body.employees?.some((row) => row.userId === employee), "employee fixture must be visible");
+        assert.ok(body.channels?.some((row) => row.id === data.channel));
+        const task = await apiRequest(adminSession, `/communities/${workspace}/tasks/${data.task}`);
+        assert.equal(task.status, 200, JSON.stringify(task));
+        assert.ok((task.body as { attachments: Array<{ id: number }> }).attachments.some((a) => a.id === data.attachment));
+        const documents = await apiRequest(adminSession, `/communities/${workspace}/documents`);
+        assert.equal(documents.status, 200, JSON.stringify(documents));
+        assert.ok((documents.body as { documents: Array<{ id: number }> }).documents.some((d) => d.id === data.document));
+        for (const path of [
+          `/communities/${workspace}/tasks/${data.task}/attachments/${data.attachment}`,
+          `/communities/${workspace}/announcements/${data.announcement}/attachments/${data.announcementAttachment}`,
+          `/communities/${workspace}/documents/${data.document}/download/${data.version}`,
+        ]) {
+          const download = await apiRequest(adminSession, path, { redirect: "manual" });
+          assert.equal(download.status, 302, `${path}: ${JSON.stringify(download)}`);
+        }
+      }
+
+      for (const [label, path, init, expected] of [
+        ["task comment", `${homePath}/tasks/${own.task}/comments`, json({ body: "Home comment" }), 201],
+        ["task attachment", `${homePath}/tasks/${own.task}/attachments`, json(file), 201],
+        ["announcement read", `${homePath}/announcements/${own.announcement}/read`, { method: "POST" }, 200],
+        ["announcement attachment", `${homePath}/announcements/${own.announcement}/attachments`, json(file), 201],
+        ["document acknowledgement", `${homePath}/documents/${own.document}/acknowledge`, { method: "POST" }, 200],
+        ["policy acknowledgement", `${homePath}/policies/${own.policy}/acknowledge`, { method: "POST" }, 200],
+      ] as Array<[string, string, RequestInit, number]>) {
+        const response = await apiRequest(adminSession, path, init);
+        assert.equal(response.status, expected, `${label} positive control: ${JSON.stringify(response)}`);
+      }
+
+      const homeDetail = await apiRequest(adminSession, homePath);
+      const homeBody = homeDetail.body as Record<string, Array<{ id?: number; userId?: string }>>;
+      assert.ok(!homeBody.employees?.some((row) => row.userId === foreignEmployee.userId));
+      for (const [key, id] of Object.entries({
+        departments: other.department, locations: other.location, teams: other.team,
+        invitations: other.invitation, categories: other.category,
+        announcements: other.announcement, policies: other.policy, tasks: other.task,
+      })) {
+        assert.ok(!homeBody[key]?.some((row) => row.id === id), `${key} leaked into home workspace`);
+      }
+      const homeDocuments = await apiRequest(adminSession, `${homePath}/documents`);
+      assert.ok(!(homeDocuments.body as { documents: Array<{ id: number }> }).documents.some((d) => d.id === other.document));
+      assert.ok(!(homeDocuments.body as { folders: Array<{ id: number }> }).folders.some((f) => f.id === other.folder));
+
+      const cases: Array<[string, string, RequestInit | undefined, number]> = [
+        ["task read", `${homePath}/tasks/${other.task}`, undefined, 404],
+        ["task write", `${homePath}/tasks/${other.task}`, json({ status: "in_progress" }, "PATCH"), 404],
+        ["task comment", `${homePath}/tasks/${other.task}/comments`, json({ body: "Cross-workspace" }), 404],
+        ["task attachment write", `${homePath}/tasks/${other.task}/attachments`, json(file), 404],
+        ["task attachment read", `${homePath}/tasks/${other.task}/attachments/${other.attachment}`, undefined, 404],
+        ["mismatched attachment", `${homePath}/tasks/${own.task}/attachments/${other.attachment}`, undefined, 404],
+        ["document version read", `${homePath}/documents/${other.document}/download/${other.version}`, undefined, 404],
+        ["mismatched document version", `${homePath}/documents/${own.document}/download/${other.version}`, undefined, 404],
+        ["document version write", `${homePath}/documents/${other.document}/versions`, json(file), 404],
+        ["document acknowledgement", `${homePath}/documents/${other.document}/acknowledge`, { method: "POST" }, 404],
+        ["document permission", `${homePath}/documents/${other.document}/permissions`, json({ userId: employee, permission: "viewer" }), 400],
+        ["foreign document folder", `${homePath}/documents`, json({ ...file, title: "Invalid folder", folderId: other.folder }), 400],
+        ["employee update", `${homePath}/employees/${employee}/organization`, json({ departmentId: other.department }, "PATCH"), 400],
+        ["foreign employee update", `${homePath}/employees/${foreignEmployee.userId}`, json({ jobTitle: "Wrong workspace" }, "PATCH"), 404],
+        ["foreign employee assignment", `${homePath}/employees/${foreignEmployee.userId}/organization`, json({ departmentId: own.department }, "PATCH"), 404],
+        ["foreign department manager", `${homePath}/departments/${other.department}/manager`, json({ managerId: employee }, "PATCH"), 404],
+        ["foreign team manager", `${homePath}/teams/${other.team}/manager`, json({ managerId: employee }, "PATCH"), 404],
+        ["foreign team member", `${homePath}/teams/${other.team}/members/${employee}`, json({ role: "member" }, "PUT"), 404],
+        ["foreign department team", `${homePath}/teams`, json({ name: "Wrong department", departmentId: other.department }), 400],
+        ["foreign location team", `${homePath}/teams`, json({ name: "Wrong location", locationId: other.location }), 400],
+        ["foreign invitation", `${homePath}/invitations/${other.invitation}/revoke`, { method: "POST" }, 404],
+        ["foreign invitation resend", `${homePath}/invitations/${other.invitation}/resend`, { method: "POST" }, 404],
+        ["foreign category", `${homePath}/categories/${other.category}`, { method: "DELETE" }, 404],
+        ["foreign category update", `${homePath}/categories/${other.category}`, json({ name: "wrong-workspace" }, "PATCH"), 404],
+        ["foreign announcement read", `${homePath}/announcements/${other.announcement}/read`, { method: "POST" }, 404],
+        ["foreign announcement delete", `${homePath}/announcements/${other.announcement}`, { method: "DELETE" }, 404],
+        ["foreign announcement attachment", `${homePath}/announcements/${other.announcement}/attachments/${other.announcementAttachment}`, undefined, 404],
+        ["mismatched announcement attachment", `${homePath}/announcements/${own.announcement}/attachments/${other.announcementAttachment}`, undefined, 404],
+        ["foreign announcement attachment write", `${homePath}/announcements/${other.announcement}/attachments`, json(file), 404],
+        ["foreign announcement audience", `${homePath}/announcements`, json({ body: "Wrong audience", audienceType: "team", teamId: other.team }), 400],
+        ["foreign policy", `${homePath}/policies/${other.policy}/acknowledge`, { method: "POST" }, 404],
+        ["foreign role category", "/admin/role-assignments", json({
+          userId: employee, role: "department_admin", scopeType: "category",
+          communityId: home, categoryId: other.category,
+        }), 400],
+        ["foreign role channel", "/admin/role-assignments", json({
+          userId: employee, role: "moderator", scopeType: "channel",
+          communityId: home, categoryId: own.category, channelId: other.channel,
+        }), 400],
+      ];
+      for (const [label, path, init, expected] of cases) {
+        const response = await apiRequest(adminSession, path, init);
+        assert.equal(response.status, expected, `${label}: ${JSON.stringify(response)}`);
+      }
+      assert.deepEqual(
+        (await pool.query("SELECT status FROM irc_workspace_tasks WHERE id = $1", [other.task])).rows,
+        [{ status: "todo" }],
+      );
+      assert.deepEqual(
+        (await pool.query("SELECT status FROM irc_workspace_invitations WHERE id = $1", [other.invitation])).rows,
+        [{ status: "pending" }],
+      );
+      assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_user_roles WHERE user_id = $1 AND community_id = $2 AND category_id = $3", [employee, home, other.category])).rows[0].count, 0);
+      assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_document_versions WHERE document_id = $1", [other.document])).rows[0].count, 1);
+      assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_team_members WHERE team_id = $1", [other.team])).rows[0].count, 0);
+      const validRole = await apiRequest(adminSession, "/admin/role-assignments", json({
+        userId: employee, role: "moderator", scopeType: "channel",
+        communityId: home, categoryId: own.category, channelId: own.channel,
+      }));
+      assert.equal(validRole.status, 201, `role-scope positive control: ${JSON.stringify(validRole)}`);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (workspaces.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [workspaces]);
+      }
+    }
+  });
+
   test("prevents global channels from using a workspace category", async () => {
     let communityId: number | null = null;
     let channelId: number | null = null;
