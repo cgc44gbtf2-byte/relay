@@ -119,6 +119,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build shared library declarations
+        run: pnpm run typecheck:libs
+
       - name: Check API types
         run: pnpm --filter @workspace/api-server run typecheck
 
@@ -174,7 +177,7 @@ jobs:
       - name: Verify real schema bootstrap, database isolation, and cleanup
         run: |
           set +e
-          pnpm --filter @workspace/db exec node --test --test-reporter=tap ./scripts/*.test.mjs 2>&1 | tee "$RUNNER_TEST_OUTPUT"
+          pnpm --filter @workspace/db exec sh -c 'node --test --test-reporter=tap ./scripts/*.test.mjs' 2>&1 | tee "$RUNNER_TEST_OUTPUT"
           test_status=${PIPESTATUS[0]}
           set -e
           if [ "$test_status" -ne 0 ]; then
