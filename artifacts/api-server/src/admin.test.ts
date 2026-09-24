@@ -336,6 +336,24 @@ function closeWebSocket(socket: WebSocket): void {
   }
 }
 
+async function waitForProfileStatus(userId: string, status: "online" | "offline"): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ status: string }>(
+      "SELECT status FROM irc_users WHERE clerk_id = $1",
+      [userId],
+    );
+    if (result.rows[0]?.status === status) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const result = await pool.query<{ status: string }>(
+    "SELECT status FROM irc_users WHERE clerk_id = $1",
+    [userId],
+  );
+  assert.deepEqual(result.rows, [{ status }], `Expected profile ${userId} to become ${status}.`);
+}
+
 async function removeTestChannels(channelIds: number[], userIds: string[] = []): Promise<void> {
   if (channelIds.length === 0) return;
   await pool.query("DELETE FROM irc_messages WHERE channel_id = ANY($1::int[])", [channelIds]);
@@ -976,6 +994,26 @@ describe("admin access controls", () => {
 
     const afterRows = await userOwnedRows(invalidSession.userId);
     assert.deepEqual(afterRows, beforeRows);
+  });
+
+  test("active Clerk sessions establish live chat presence and go offline after disconnect", async () => {
+    const activeSession = await createTestSession("active_ws");
+    const profile = await apiRequest(activeSession, "/me");
+    assert.equal(profile.status, 200, JSON.stringify(profile));
+    await pool.query(
+      "UPDATE irc_users SET status = 'offline' WHERE clerk_id = $1",
+      [activeSession.userId],
+    );
+
+    let socket: WebSocket | undefined;
+    try {
+      socket = await openWebSocket(activeSession);
+      assert.equal(socket.readyState, WebSocket.OPEN);
+      await waitForProfileStatus(activeSession.userId, "online");
+    } finally {
+      if (socket) closeWebSocket(socket);
+      await waitForProfileStatus(activeSession.userId, "offline");
+    }
   });
 
   test("rejects a WebSocket ticket issued before session revocation without changing presence", async () => {
