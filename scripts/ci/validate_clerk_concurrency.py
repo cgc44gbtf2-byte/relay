@@ -24,7 +24,9 @@ def validate_workflow(workflow: str) -> dict[str, dict[str, str | bool | None]]:
         if current_job is None:
             continue
 
-        if re.match(r"^      CLERK_[A-Za-z0-9_]+:", line):
+        # Credentials may be limited to a single step rather than shared by
+        # every step in the job; those jobs still need Clerk concurrency.
+        if re.match(r"^ {6}(?: {4})?CLERK_[A-Za-z0-9_]+:", line):
             jobs[current_job]["uses_clerk"] = True
         elif re.match(r"^      group:", line):
             jobs[current_job]["group"] = line.split(":", 1)[1].strip()

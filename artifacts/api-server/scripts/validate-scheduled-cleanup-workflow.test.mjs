@@ -61,6 +61,27 @@ test("accepts the existing scheduled cleanup workflow", async () => {
   assert.equal(result.code, 0, result.output);
 });
 
+for (const key of ["env", '"env"']) {
+  test(`rejects cleanup credentials inherited from workflow-level ${key}`, async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "cleanup-workflow-"));
+    try {
+      const source = await readFile(ciWorkflowPath, "utf8");
+      const mutated = source.replace(
+        /^jobs:\n/m,
+        `${key}:\n  CLERK_SECRET_KEY: \${{ secrets.CLERK_TEST_SECRET_KEY }}\n\njobs:\n`,
+      );
+      assert.notEqual(mutated, source, "fixture must add workflow-level env");
+      const workflowPath = path.join(directory, "ci.yml");
+      await writeFile(workflowPath, mutated);
+      const result = await runValidator(workflowPath);
+      assert.notEqual(result.code, 0, result.output);
+      assert.match(result.output, /must not inherit workflow-level env/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("rejects an unrelated step in the cleanup job", async () => {
   const result = await runValidator(unrelatedStepFixturePath);
   assert.notEqual(result.code, 0, result.output);

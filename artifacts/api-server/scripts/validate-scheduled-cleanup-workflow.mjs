@@ -15,6 +15,11 @@ const workflowPath =
   path.resolve(packageDir, "../../.github/workflows/ci.yml");
 
 const workflow = await readFile(workflowPath, "utf8");
+assert.doesNotMatch(
+  workflow,
+  /^(?:env|["']env["'])\s*:/m,
+  "scheduled cleanup must not inherit workflow-level env; credentials belong only on the cleanup step",
+);
 const job = extractJob(workflow, "cleanup-abandoned-test-users");
 const jobEnv = extractJobEnv(job);
 const envEntries = parseEnvEntries(jobEnv);
