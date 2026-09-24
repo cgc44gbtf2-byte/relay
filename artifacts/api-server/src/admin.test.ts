@@ -48,12 +48,17 @@ async function withClerkRateLimitRetry<T>(operation: () => Promise<T>): Promise<
   }
 }
 
-async function createTestSession(label: string): Promise<TestSession> {
-  const uniqueId = `${label}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+async function createTestSession(
+  label: string,
+  emailStatus: "reserved" | "verified" = "reserved",
+): Promise<TestSession> {
+  const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
+  const maxLabelLength = 64 - TEST_USERNAME_PREFIX.length - suffix.length - 1;
+  const uniqueId = `${label.slice(0, maxLabelLength)}_${suffix}`;
   const user = await withClerkRateLimitRetry(() => clerkClient.users.createUser({
     username: `${TEST_USERNAME_PREFIX}${uniqueId}`,
     emailAddress: [`${TEST_USERNAME_PREFIX}${uniqueId}@${TEST_EMAIL_DOMAIN}`],
-    emailAddressIdentificationStatus: ["reserved"],
+    emailAddressIdentificationStatus: [emailStatus],
     skipPasswordRequirement: true,
   }));
   const session = await withClerkRateLimitRetry(
@@ -1783,8 +1788,8 @@ describe("admin access controls", () => {
       workspaceId = workspace.rows[0]?.id;
       assert.ok(workspaceId);
       await pool.query(
-        `INSERT INTO irc_community_members (community_id, user_id, role)
-         VALUES ($1, $2, 'workspace_owner')`,
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'owner')`,
         [workspaceId, owner.userId],
       );
 
@@ -1817,7 +1822,7 @@ describe("admin access controls", () => {
   });
 
   test("rejects invitation organization assignments from another workspace atomically", async () => {
-    const recipient = await createTestSession("cross_workspace_invitation_recipient");
+    const recipient = await createTestSession("cross_workspace_invitation_recipient", "verified");
     const workspaceIds: number[] = [];
     const token = randomUUID();
     let foreignTeamId: number | undefined;
@@ -2049,10 +2054,10 @@ describe("admin access controls", () => {
       });
     }
 
-    // Admin maintenance keeps its legacy validation errors for malformed IDs.
+    // Admin maintenance validates malformed IDs before looking up the channel.
     assert.equal(adminResponses[0].status, 400, JSON.stringify(adminResponses[0]));
     assert.deepEqual(adminResponses[0].body, {
-      error: "A valid channel and topic are required.",
+      error: "A valid channel update is required.",
     });
     assert.equal(adminResponses[1].status, 400, JSON.stringify(adminResponses[1]));
     assert.deepEqual(adminResponses[1].body, { error: "Invalid channel." });

@@ -51,7 +51,7 @@ env -u DATABASE_URL NODE_ENV=test TEST_DATABASE_URL='postgres://.../web_irc_test
   pnpm --filter @workspace/api-server run cleanup:test-users
 ```
 
-The command is dry-run by default. Add `-- --apply` only after confirming the
+The command is dry-run by default. Add `--apply` only after confirming the
 listed users belong to an interrupted regression run. It refuses non-test Clerk
 keys, requires `NODE_ENV=test` and `TEST_DATABASE_URL`, refuses a simultaneous
 `DATABASE_URL`, revokes active sessions, deletes only matching test users, and
