@@ -5900,21 +5900,27 @@ describe("admin access controls", () => {
     const ownerSession = await createTestSession("request_cleanup_owner");
     const requesterSession = await createTestSession("request_cleanup_requester");
     const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
 
     try {
-      const created = await apiRequest(ownerSession, "/channels", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name: `cleanup-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
-          isPrivate: true,
-        }),
-      });
-      assert.equal(created.status, 201, JSON.stringify(created));
-      assert.ok(created.body && typeof created.body === "object");
-      const channelId = (created.body as { id?: unknown }).id;
-      assert.equal(typeof channelId, "number");
-      channelIds.push(channelId as number);
+      const createPrivateChannel = async (label: string): Promise<number> => {
+        const created = await apiRequest(ownerSession, "/channels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: `${label}-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+            isPrivate: true,
+          }),
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        assert.ok(created.body && typeof created.body === "object");
+        const channelId = (created.body as { id?: unknown }).id;
+        assert.equal(typeof channelId, "number");
+        channelIds.push(channelId as number);
+        return channelId as number;
+      };
+      const channelId = await createPrivateChannel("cleanup");
+      const otherChannelId = await createPrivateChannel("cleanup-other");
 
       const pending = await apiRequest(
         requesterSession,
@@ -5922,11 +5928,28 @@ describe("admin access controls", () => {
         { method: "POST" },
       );
       assert.equal(pending.status, 202, JSON.stringify(pending));
-      const beforeDelete = await pool.query(
+      const beforeDelete = await pool.query<{ id: number }>(
         "SELECT id FROM irc_channel_join_requests WHERE channel_id = $1",
         [channelId],
       );
       assert.equal(beforeDelete.rows.length, 1);
+      const staleRequestId = beforeDelete.rows[0].id;
+
+      const otherPending = await apiRequest(
+        requesterSession,
+        `/channels/${otherChannelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(otherPending.status, 202, JSON.stringify(otherPending));
+      const otherRequests = await apiRequest(
+        ownerSession,
+        `/channels/${otherChannelId}/join-requests`,
+      );
+      assert.equal(otherRequests.status, 200, JSON.stringify(otherRequests));
+      assert.ok(Array.isArray(otherRequests.body));
+      assert.equal(otherRequests.body.length, 1);
+      const otherRequestId = (otherRequests.body[0] as { id?: unknown }).id;
+      assert.equal(typeof otherRequestId, "number");
 
       const deleted = await apiRequest(
         ownerSession,
@@ -5939,7 +5962,67 @@ describe("admin access controls", () => {
         [channelId],
       );
       assert.deepEqual(afterDelete.rows, []);
+
+      const staleRequestApproval = await apiRequest(
+        ownerSession,
+        `/channels/${otherChannelId}/join-requests/${staleRequestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(staleRequestApproval.status, 404, JSON.stringify(staleRequestApproval));
+      assert.deepEqual(staleRequestApproval.body, { error: "Join request not found." });
+
+      const staleChannelApproval = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/join-requests/${otherRequestId as number}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(staleChannelApproval.status, 400, JSON.stringify(staleChannelApproval));
+      const stillPending = await apiRequest(
+        ownerSession,
+        `/channels/${otherChannelId}/join-requests`,
+      );
+      assert.equal(stillPending.status, 200, JSON.stringify(stillPending));
+      assert.ok(Array.isArray(stillPending.body));
+      assert.deepEqual(
+        stillPending.body.map((request) => ({
+          id: (request as { id?: unknown }).id,
+          status: (request as { status?: unknown }).status,
+        })),
+        [{ id: otherRequestId, status: "pending" }],
+      );
+      const requesterMembership = await pool.query(
+        `SELECT 1 FROM irc_channel_members
+         WHERE channel_id = $1 AND user_id = $2`,
+        [otherChannelId, requesterSession.userId],
+      );
+      assert.deepEqual(requesterMembership.rows, []);
+
+      const deletedHistory = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/messages`,
+      );
+      assert.equal(deletedHistory.status, 404, JSON.stringify(deletedHistory));
+
+      const socket = await openWebSocket(requesterSession);
+      sockets.push(socket);
+      socket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const blockedDeletedRoomSubscription = expectNoWebSocketEvent(
+        socket,
+        (event) => event.type === "message" && event.channelId === channelId,
+      );
+      wsHub.broadcastChannel(channelId, { type: "message", channelId });
+      await blockedDeletedRoomSubscription;
     } finally {
+      for (const socket of sockets) closeWebSocket(socket);
       await removeTestChannels(channelIds, [
         ownerSession.userId,
         requesterSession.userId,
