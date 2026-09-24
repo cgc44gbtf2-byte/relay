@@ -22,7 +22,7 @@ migration command succeeds:
 ```sh
 RELEASE_MIGRATION_TARGET=production \
 RELEASE_MIGRATION_BACKUP_CONFIRMED=true \
-RELEASE_MIGRATION_BACKUP_REFERENCE='provider-snapshot-2026-09-23' \
+RELEASE_MIGRATION_BACKUP_REFERENCE='<current-backup-or-snapshot-label>' \
 pnpm run release:start
 ```
 
@@ -32,6 +32,20 @@ pending files performs a ledger and checksum no-op verification. A changed
 applied file, missing file, gap in the sequence, or partial history stops the
 release with an actionable diagnostic.
 
+The API artifact's production run command is configured to invoke
+`pnpm run release:start`; it sets `RELEASE_MIGRATION_TARGET=production`.
+Before each production release, configure these non-secret confirmation values
+in the deployment environment after verifying a current backup or provider
+snapshot:
+
+- `RELEASE_MIGRATION_BACKUP_CONFIRMED=true`
+- `RELEASE_MIGRATION_BACKUP_REFERENCE=<current-backup-or-snapshot-label>`
+
+Do not hard-code a backup reference that may no longer describe the current
+release. The startup command applies migrations first and starts the API only
+when that command exits successfully. Development and test startup commands
+remain separate and do not use this production release gate.
+
 For an existing installation that predates the migration ledger, do not run
 the migration files again. First inspect the production catalog and data,
 confirm which reviewed migrations are already present, and take a current
@@ -40,7 +54,7 @@ backup. Then run the explicit baseline command with the last verified file:
 ```sh
 RELEASE_MIGRATION_TARGET=production \
 RELEASE_MIGRATION_BACKUP_CONFIRMED=true \
-RELEASE_MIGRATION_BACKUP_REFERENCE='provider-snapshot-2026-09-23' \
+RELEASE_MIGRATION_BACKUP_REFERENCE='<current-backup-or-snapshot-label>' \
 RELEASE_MIGRATION_BASELINE_CONFIRMED=true \
 RELEASE_MIGRATION_BASELINE=0012_query_path_indexes.sql \
 pnpm run db:migrate:release:baseline

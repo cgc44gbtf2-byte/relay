@@ -21,12 +21,18 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# we don't run through pnpm to make startup faster in production
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+# The release script uses &&, so the API starts only after migrations succeed.
+args = ["pnpm", "run", "release:start"]
 
 [services.production.run.env]
 PORT = "8080"
 NODE_ENV = "production"
+RELEASE_MIGRATION_TARGET = "production"
+# Set these non-secret confirmations in production deployment settings for each release,
+# after verifying a current backup or provider snapshot. Do not hard-code the reference.
+# RELEASE_MIGRATION_BACKUP_CONFIRMED = "true"
+# RELEASE_MIGRATION_BACKUP_REFERENCE = "<current-backup-or-snapshot-label>"
+# For reviewed destructive migrations only, also set both destructive approval values.
 
 [services.production.health.startup]
 path = "/api/healthz"
