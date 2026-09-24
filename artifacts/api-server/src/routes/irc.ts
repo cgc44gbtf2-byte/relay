@@ -1706,7 +1706,12 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
     res.status(400).json({ error: "Invalid moderation request." });
     return;
   }
-  if (action !== "moderator" && !(await isChannelOwnerOrModerator(channel.id, userId))) {
+  if (
+    action !== "moderator"
+    && action !== "kick"
+    && action !== "ban"
+    && !(await isChannelOwnerOrModerator(channel.id, userId))
+  ) {
     res.status(403).json({ error: "You do not have moderation permissions." });
     return;
   }
@@ -1759,24 +1764,126 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
   if (action === "mute") {
     const minutes = Math.max(1, Math.min(1440, Number(req.body.minutes) || 10));
     await db.update(channelMembersTable).set({ mutedUntil: new Date(Date.now() + minutes * 60_000) }).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
-  } else if (action === "kick") {
-    await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
-    wsHub.revokeChannelAccess(channel.id, targetUserId);
-  } else if (action === "ban") {
-    await db.delete(channelMembersTable).where(and(eq(channelMembersTable.channelId, channel.id), eq(channelMembersTable.userId, targetUserId)));
-    await db.insert(channelBansTable).values({ channelId: channel.id, userId: targetUserId, reason: String(req.body.reason ?? "") }).onConflictDoUpdate({ target: [channelBansTable.channelId, channelBansTable.userId], set: { reason: String(req.body.reason ?? "") } });
+  } else if (action === "kick" || action === "ban") {
+    const moderationResult = await db.transaction(async (tx) => {
+      const [lockedChannel] = await tx
+        .select({
+          id: channelsTable.id,
+          ownerId: channelsTable.ownerId,
+          isPrivate: channelsTable.isPrivate,
+        })
+        .from(channelsTable)
+        .where(eq(channelsTable.id, channel.id))
+        .for("update");
+      if (!lockedChannel) return { outcome: "not_found" } as const;
+
+      const members = await tx
+        .select({
+          userId: channelMembersTable.userId,
+          role: channelMembersTable.role,
+        })
+        .from(channelMembersTable)
+        .where(eq(channelMembersTable.channelId, lockedChannel.id))
+        .orderBy(asc(channelMembersTable.userId))
+        .for("update");
+      const actorMembership = members.find((member) => member.userId === userId);
+      const actorIsOperator = Boolean(
+        actorMembership && ["owner", "moderator"].includes(actorMembership.role),
+      );
+      const actorCanModerateChannel = actorIsOperator
+        || await hasPermission(userId, "manage_channel", { channelId: lockedChannel.id }, tx, true)
+        || await hasPermission(userId, "moderate_channel", { channelId: lockedChannel.id }, tx, true);
+      if (!actorCanModerateChannel) {
+        return { outcome: "forbidden" } as const;
+      }
+
+      const targetMembership = members.find((member) => member.userId === targetUserId);
+      const targetIsOperator = lockedChannel.ownerId === targetUserId
+        || Boolean(targetMembership && ["owner", "moderator"].includes(targetMembership.role));
+      if (lockedChannel.isPrivate && targetIsOperator) {
+        const remainingOperators = members.filter((member) =>
+          member.userId !== targetUserId && ["owner", "moderator"].includes(member.role),
+        );
+
+        if (lockedChannel.ownerId === targetUserId) {
+          const successor = remainingOperators.find((member) => member.role === "moderator")
+            ?? remainingOperators.find((member) => member.role === "owner");
+          if (!successor) return { outcome: "last_operator" } as const;
+
+          await tx
+            .update(channelsTable)
+            .set({ ownerId: successor.userId })
+            .where(eq(channelsTable.id, lockedChannel.id));
+          if (successor.role !== "owner") {
+            await tx
+              .update(channelMembersTable)
+              .set({ role: "owner" })
+              .where(and(
+                eq(channelMembersTable.channelId, lockedChannel.id),
+                eq(channelMembersTable.userId, successor.userId),
+              ));
+          }
+        } else if (remainingOperators.length === 0) {
+          return { outcome: "last_operator" } as const;
+        }
+      }
+
+      await tx.delete(channelMembersTable).where(and(
+        eq(channelMembersTable.channelId, lockedChannel.id),
+        eq(channelMembersTable.userId, targetUserId),
+      ));
+      if (action === "ban") {
+        await tx
+          .insert(channelBansTable)
+          .values({
+            channelId: lockedChannel.id,
+            userId: targetUserId,
+            reason: String(req.body.reason ?? ""),
+          })
+          .onConflictDoUpdate({
+            target: [channelBansTable.channelId, channelBansTable.userId],
+            set: { reason: String(req.body.reason ?? "") },
+          });
+      }
+      await tx.insert(moderationActionsTable).values({
+        actorId: userId,
+        targetUserId,
+        communityId: channel.communityId,
+        channelId: lockedChannel.id,
+        action,
+        details: typeof req.body.reason === "string" ? req.body.reason.trim().slice(0, 500) : null,
+      });
+      return { outcome: "updated" } as const;
+    });
+
+    if (moderationResult.outcome === "not_found") {
+      res.status(404).json(channelNotFoundError);
+      return;
+    }
+    if (moderationResult.outcome === "forbidden") {
+      res.status(403).json({ error: "You do not have moderation permissions." });
+      return;
+    }
+    if (moderationResult.outcome === "last_operator") {
+      res.status(409).json({
+        error: "A private channel must keep an owner or moderator. Promote another member before removing this operator.",
+      });
+      return;
+    }
     wsHub.revokeChannelAccess(channel.id, targetUserId);
   } else if (action === "unban") {
     await db.delete(channelBansTable).where(and(eq(channelBansTable.channelId, channel.id), eq(channelBansTable.userId, targetUserId)));
   }
-  await db.insert(moderationActionsTable).values({
-    actorId: userId,
-    targetUserId,
-    communityId: channel.communityId,
-    channelId: channel.id,
-    action,
-    details: typeof req.body.reason === "string" ? req.body.reason.trim().slice(0, 500) : null,
-  });
+  if (action !== "kick" && action !== "ban") {
+    await db.insert(moderationActionsTable).values({
+      actorId: userId,
+      targetUserId,
+      communityId: channel.communityId,
+      channelId: channel.id,
+      action,
+      details: typeof req.body.reason === "string" ? req.body.reason.trim().slice(0, 500) : null,
+    });
+  }
   wsHub.broadcastChannel(channel.id, { type: "moderation", action, targetUserId });
   res.json({ ok: true });
 });
