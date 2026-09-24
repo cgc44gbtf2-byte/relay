@@ -1729,6 +1729,16 @@ describe("admin access controls", () => {
       releaseId = (created.body as { id?: unknown }).id as number;
       assert.equal(typeof releaseId, "number");
 
+      const listedAfterCreate = await apiRequest(adminSession, "/developer/releases");
+      assert.equal(listedAfterCreate.status, 200, JSON.stringify(listedAfterCreate));
+      assert.ok(Array.isArray(listedAfterCreate.body));
+      assert.ok(listedAfterCreate.body.some(
+        (release) =>
+          typeof release === "object" &&
+          release !== null &&
+          (release as { id?: unknown }).id === releaseId,
+      ));
+
       const review = await apiRequest(
         adminSession,
         `/developer/releases/${releaseId}/status`,

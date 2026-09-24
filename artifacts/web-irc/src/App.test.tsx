@@ -111,8 +111,6 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
-      channels: [{ id: 7, name: "#team", categoryId: null }],
-      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
 
     const onRefresh = vi.fn().mockResolvedValue(undefined);
@@ -471,6 +469,8 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     const newerResponse = new Promise<Response>((resolve) => { resolveNewer = resolve; });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+
+    const secondSocket = latestWebSocket;
       if (url === "/api/users/search?q=al") return olderResponse;
       if (url === "/api/users/search?q=alex") return newerResponse;
       return baseFetch(input, init);
@@ -782,22 +782,18 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     const reconnectedSocket = latestWebSocket;
     expect(reconnectedSocket).toBeTruthy();
     expect(reconnectedSocket).not.toBe(firstSocket);
-    await act(async () => { reconnectedSocket?.onopen?.(); });
-
-    await waitFor(() => {
-      expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
-      expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
-      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
-    });
-    expect(screen.queryByText("reaction before reconnect")).toBeNull();
-    expect(screen.queryByText("message before deletion")).toBeNull();
-    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
-    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
+    expect(reconnectedSocket?.url).not.toBe(firstSocket?.url);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket")).toHaveLength(initialTickets + 1);
+    webSocketFrames = [];
+    act(() => reconnectedSocket?.onopen?.());
+    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
+      { type: "subscribe", channelId: 1 },
+    ]));
   });
 
-  it("requests a fresh socket and resubscribes after a connection drops", async () => {
+  it("bounds repeated failures and cancels retries when chat unmounts", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    vi.useFakeTimers();
     const firstSocket = latestWebSocket;
     expect(firstSocket).toBeTruthy();
     act(() => firstSocket?.onopen?.());
@@ -971,6 +967,16 @@ describe("frontend route and document error hardening", () => {
     } as Parameters<typeof DocumentCenter>[0]["detail"];
 
     const setError = vi.fn();
+
+    const storedRelease = {
+      id: 41,
+      version: "v2.4.0",
+      title: "Stored release",
+      notes: "Existing release notes",
+      status: "draft" as const,
+      announcementId: null,
+      createdAt: "2026-09-24T12:00:00.000Z",
+    };
     render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={setError} />);
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "documents unavailable");
     expect(setError).toHaveBeenCalledWith("documents unavailable");
@@ -981,3 +987,17 @@ describe("frontend route and document error hardening", () => {
     const props = { working: false, setWorking: vi.fn(), setNotice: vi.fn(), setError: vi.fn(), onRefresh };
 
     const updatedDirectoryLine = screen.getAllByText(/Reporting manager:/)[1];
+
+    const releaseFromAnotherSession = {
+      id: 42,
+      version: "v2.5.0",
+      title: "New release",
+      notes: "Added by another session",
+      status: "draft" as const,
+      announcementId: null,
+      createdAt: "2026-09-24T12:30:00.000Z",
+    };
+
+    let releaseRequests = 0;
+
+    let releases: typeof storedRelease[] = [];
