@@ -3737,6 +3737,54 @@ describe("admin access controls", () => {
     }
   });
 
+  for (const operation of [
+    {
+      name: "change a user's role",
+      path: () => `/admin/users/${adminSession.userId}/role`,
+      method: "PATCH",
+      body: () => ({ role: "member" }),
+    },
+    {
+      name: "assign a scoped role",
+      path: () => "/admin/role-assignments",
+      method: "POST",
+      body: () => ({
+        userId: memberSession.userId,
+        role: "platform_moderator",
+        scopeType: "platform",
+      }),
+    },
+    {
+      name: "create a custom role",
+      path: () => "/admin/custom-roles",
+      method: "POST",
+      body: () => ({
+        label: "Unauthorized role",
+        scopeType: "community",
+        permissions: ["manage_community_members"],
+      }),
+    },
+  ]) {
+    test(`a non-admin cannot ${operation.name} or alter audit history`, async () => {
+      const beforeAudit = await pool.query(
+        "SELECT * FROM irc_admin_audit_logs ORDER BY id",
+      );
+
+      const response = await apiRequest(memberSession, operation.path(), {
+        method: operation.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(operation.body()),
+      });
+
+      assert.equal(response.status, 403, JSON.stringify(response));
+      assert.deepEqual(response.body, { error: "Admin access required." });
+      const afterAudit = await pool.query(
+        "SELECT * FROM irc_admin_audit_logs ORDER BY id",
+      );
+      assert.deepEqual(afterAudit.rows, beforeAudit.rows);
+    });
+  }
+
   test("a non-admin cannot use health, user, or channel maintenance tools", async () => {
     const channelName = `admin-guard-${randomUUID()}`;
     const channelResult = await pool.query<{ id: number; topic: string }>(
