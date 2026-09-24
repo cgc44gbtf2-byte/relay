@@ -164,6 +164,7 @@ function installApi({
   missingChannelMessage = "This channel is no longer available.",
   owner = false,
   reconnectedMessages,
+  channelMembers,
   dmMessages,
   notifications = [],
   notificationsFailure = false,
@@ -185,6 +186,7 @@ function installApi({
   missingChannelMessage?: string;
   owner?: boolean;
   reconnectedMessages?: unknown[];
+  channelMembers?: () => Promise<Response>;
   dmMessages?: () => unknown[];
   notifications?: Array<{
     id: number;
@@ -308,6 +310,7 @@ function installApi({
         : jsonResponse({ messages: historyCalls > 1 && reconnectedMessages ? reconnectedMessages : [message(1, "stale history")] });
     }
     if (url === "/api/channels/1/members" && method === "GET") {
+      if (channelMembers) return channelMembers();
       if (accessRequiredRequest === "members") return channelAccessRequired();
       return missingRequest === "members" ? channelNotFound(missingChannelMessage) : jsonResponse(members(owner ? "owner" : "member"));
     }
@@ -844,6 +847,60 @@ describe("deleted room recovery", () => {
     expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
   });
 
+  it("restores members after a presence change was missed while disconnected", async () => {
+    let currentMembers = members();
+    const channelMembers = vi.fn(() => jsonResponse(currentMembers));
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
+      channelMembers,
+    });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => { await Promise.resolve(); });
+    const callsBefore = channelMembers.mock.calls.length;
+    const firstSocket = latestWebSocket;
+    vi.useFakeTimers();
+    act(() => firstSocket?.onclose?.());
+    // No presence frame reaches the client while offline.
+    currentMembers = [members()[0], { ...members()[1], id: "user-3", username: "nova", displayName: "Nova" }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(latestWebSocket).not.toBe(firstSocket);
+    await act(async () => { latestWebSocket?.onopen?.(); });
+    expect(channelMembers.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Orion/ })).toBeNull();
+  });
+
+  it("ignores a delayed reconnect member response after switching rooms", async () => {
+    let resolveMembers!: (response: Response) => void;
+    const delayedMembers = new Promise<Response>((resolve) => { resolveMembers = resolve; });
+    let delay = false;
+    const channelMembers = vi.fn(() => delay ? delayedMembers : jsonResponse(members()));
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
+      channelMembers,
+    });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => { await Promise.resolve(); });
+    const callsBefore = channelMembers.mock.calls.length;
+    vi.useFakeTimers();
+    act(() => latestWebSocket?.onclose?.());
+    delay = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { latestWebSocket?.onopen?.(); });
+    expect(channelMembers.mock.calls.length).toBeGreaterThan(callsBefore);
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole("button", { name: /fallback-room/ }));
+    await screen.findByRole("heading", { name: "#fallback-room" });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => {
+      resolveMembers(await jsonResponse([{ ...members()[1], id: "user-3", username: "nova", displayName: "Nova" }]));
+    });
+    expect(screen.getByRole("button", { name: /Orion/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Nova/ })).toBeNull();
+  });
+
   it("refreshes direct messages after reconnecting without duplicating stale reactions or deletions", async () => {
     const dmMessage = (id: string, body: string) => ({
       ...message(1, body, id),
@@ -1332,3 +1389,4 @@ describe("admin activity date filters", () => {
     expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
   });
 });
+

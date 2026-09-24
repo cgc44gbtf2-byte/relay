@@ -368,6 +368,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
   const [olderMessagesError, setOlderMessagesError] = useState("");
   const onUnavailableChannelRef = useRef(onUnavailableChannel);
   const messageRefreshRef = useRef(0);
+  const memberRefreshRef = useRef(0);
   const messagesRef = useRef(messages);
   const messageVersionRef = useRef(0);
   const changedMessagesRef = useRef(new Map<string, { version: number; message: ChatMessage }>());
@@ -461,6 +462,20 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
     }
   }, [activeDm, hasOlder, loadingOlder, messages, roomKey, updateMessages]);
 
+  const refreshMembers = useCallback(async () => {
+    const refreshId = ++memberRefreshRef.current;
+    if (!channelId || activeDm) return;
+    const membersRoomKey = roomKey;
+    try {
+      const data = await pagedApi<Member>(`/channels/${channelId}/members`);
+      if (refreshId === memberRefreshRef.current && roomKeyRef.current === membersRoomKey) setMembers(data);
+    } catch (error) {
+      if (refreshId !== memberRefreshRef.current || roomKeyRef.current !== membersRoomKey) return;
+      setMembers([]);
+      if (isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
+    }
+  }, [channelId, activeDm, roomKey]);
+
   useEffect(() => {
     messageVersionRef.current = 0;
     changedMessagesRef.current.clear();
@@ -475,20 +490,10 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
       return;
     }
     void refreshMessages(true);
-    let cancelled = false;
-    if (channelId && !activeDm) {
-      const membersRoomKey = roomKey;
-      pagedApi<Member>(`/channels/${channelId}/members`).then((data) => {
-        if (!cancelled && roomKeyRef.current === membersRoomKey) setMembers(data);
-      }).catch((error) => {
-        if (cancelled || roomKeyRef.current !== membersRoomKey) return;
-        setMembers([]);
-        if (isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
-      });
-    }
-    return () => { cancelled = true; };
-  }, [channelId, activeDm, refreshMessages, roomKey]);
-  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, olderMessagesError, loadOlderMessages, refreshMessages };
+    void refreshMembers();
+    return () => { memberRefreshRef.current += 1; };
+  }, [channelId, activeDm, refreshMessages, refreshMembers, roomKey]);
+  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, olderMessagesError, loadOlderMessages, refreshMessages, refreshMembers };
 }
 
 function ChatApp() {
@@ -834,6 +839,7 @@ function ChatApp() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (currentChannelId !== null && !activeDm) {
       ws.send(JSON.stringify({ type: "subscribe", channelId: currentChannelId }));
+      void room.refreshMembers();
     }
     if (currentChannelId !== null || activeDm) void room.refreshMessages();
     return () => {
@@ -841,7 +847,7 @@ function ChatApp() {
         ws.send(JSON.stringify({ type: "unsubscribe", channelId: currentChannelId }));
       }
     };
-  }, [ws, currentChannelId, activeDm?.id, room.refreshMessages]);
+  }, [ws, currentChannelId, activeDm?.id, room.refreshMessages, room.refreshMembers]);
 
   useEffect(() => {
     setTypingUsers({});

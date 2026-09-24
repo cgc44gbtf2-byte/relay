@@ -18,7 +18,7 @@ function setup(initial = [notice(1, "You have a new direct message."), notice(2,
   let saved = initial.map((item) => ({ ...item }));
   const request = vi.fn(async (path: string, init?: RequestInit) => {
     const id = Number(path.match(/\/notifications\/(\d+)/)?.[1]);
-    if (path === "/notifications?archived=true") return saved.filter((item) => item.archivedAt);
+    if (path === "/notifications?archived=true&limit=100&offset=0") return saved.filter((item) => item.archivedAt);
     if (path.endsWith("/detail")) return {
       notification: saved.find((item) => item.id === id),
       message: { id: `message-${id}`, body: "The complete private message, not a preview.", channelId: null, sender: { id: "sender", username: "sender", displayName: "Sender" } },
