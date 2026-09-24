@@ -37,6 +37,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { requireAuth, ensureProfile, getUserId, type AuthenticatedRequest } from "../lib/auth";
+import { AccountDeletionPendingError, assertDeletionEligibleUser } from "../lib/account-deletion";
 import { wsHub } from "../lib/ws";
 import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
@@ -733,8 +734,19 @@ router.post("/channels/:channelId/join", requireAuth, async (req: AuthenticatedR
     res.status(202).json({ ok: true, status: requestResult.request.status });
     return;
   }
-  await db.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
-  await db.delete(channelInvitesTable).where(and(eq(channelInvitesTable.channelId, channel.id), eq(channelInvitesTable.userId, userId)));
+  try {
+    await db.transaction(async (tx) => {
+      await assertDeletionEligibleUser(userId, tx);
+      await tx.insert(channelMembersTable).values({ channelId: channel.id, userId }).onConflictDoNothing();
+      await tx.delete(channelInvitesTable).where(and(eq(channelInvitesTable.channelId, channel.id), eq(channelInvitesTable.userId, userId)));
+    });
+  } catch (error) {
+    if (error instanceof AccountDeletionPendingError) {
+      res.status(409).json({ error: "This account is pending deletion and cannot join channels." });
+      return;
+    }
+    throw error;
+  }
   const user = await publicUser(userId);
   const event = {
     type: "presence",
@@ -846,6 +858,14 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
     if (!reviewer || !["owner", "moderator"].includes(reviewer.role)) {
       return { outcome: "forbidden" } as const;
     }
+    if (decision === "approve") {
+      try {
+        await assertDeletionEligibleUser(request.userId, tx);
+      } catch (error) {
+        if (!(error instanceof AccountDeletionPendingError)) throw error;
+        return { outcome: "pending_deletion" } as const;
+      }
+    }
     const [updatedRequest] = await tx
       .update(channelJoinRequestsTable)
       .set({ status: decision === "approve" ? "approved" : "rejected", reviewedAt: new Date(), reviewedBy: userId })
@@ -882,6 +902,10 @@ router.post("/channels/:channelId/join-requests/:requestId", requireAuth, async 
   }
   if (review.outcome === "forbidden") {
     res.status(403).json({ error: "Only channel operators can review join requests." });
+    return;
+  }
+  if (review.outcome === "pending_deletion") {
+    res.status(409).json({ error: "This account is pending deletion and cannot join channels." });
     return;
   }
   if (review.outcome === "not_found") {

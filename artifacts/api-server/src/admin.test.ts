@@ -4692,6 +4692,156 @@ describe("admin access controls", () => {
     }
   });
 
+  test("admin grants and invitation acceptance cannot restore access during account deletion", async () => {
+    // This test also runs alone with --test-name-pattern, without the earlier
+    // provisioning test that normally assigns the shared admin session.
+    const provisionedHere = !adminSession;
+    if (provisionedHere) {
+      adminSession = firstSession;
+      await apiRequest(adminSession, "/me");
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId]);
+    }
+    const target = await createTestSession("deletion_grant_race", "verified");
+    const email = (await clerkClient.users.getUser(target.userId)).emailAddresses
+      .find((address) => address.verification?.status === "verified")?.emailAddress;
+    assert.ok(email);
+    await apiRequest(target, "/me");
+    const workspace = await pool.query<{ id: number }>(
+      "INSERT INTO irc_communities (name, slug, owner_id, plan) VALUES ('Deletion Race', $1, $2, 'paid_workspace') RETURNING id",
+      [`deletion-race-${randomUUID()}`, adminSession.userId],
+    );
+    const communityId = workspace.rows[0].id;
+    let channelId: number | null = null;
+    const invitationResponse = await apiRequest(adminSession, `/communities/${communityId}/invitations`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, role: "employee" }),
+    });
+    assert.equal(invitationResponse.status, 201, JSON.stringify(invitationResponse));
+    const token = (invitationResponse.body as { invitationToken: string }).invitationToken;
+    const waitForLock = async () => {
+      for (let attempt = 0; attempt < 150; attempt++) {
+        const waiting = await pool.query(
+          `SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+           AND state = 'active' AND wait_event_type = 'Lock' AND query ILIKE '%irc_users%'`,
+        );
+        if (waiting.rowCount) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error("Access request did not wait for the account lock");
+    };
+    const grant = () => apiRequest(adminSession, "/admin/role-assignments", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: target.userId, role: "platform_moderator", scopeType: "platform" }),
+    });
+    const lock = await pool.connect();
+    try {
+      // Deletion wins: the admin grant must wait and reject without an audit row.
+      await lock.query("BEGIN");
+      await lock.query("UPDATE irc_users SET deletion_status = 'pending', account_status = 'suspended' WHERE clerk_id = $1", [target.userId]);
+      const blockedGrant = grant();
+      try {
+        await waitForLock();
+      } finally {
+        await lock.query("COMMIT");
+      }
+      assert.equal((await blockedGrant).status, 409);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_user_roles WHERE user_id = $1", [target.userId],
+      )).rows[0].count, 0);
+
+      // Restore only the disposable fixture; a second pending transition races
+      // the real invitation acceptance route (including its membership writes).
+      await pool.query("UPDATE irc_users SET deletion_status = 'none', account_status = 'active' WHERE clerk_id = $1", [target.userId]);
+      await lock.query("BEGIN");
+      await lock.query("UPDATE irc_users SET deletion_status = 'pending', account_status = 'suspended' WHERE clerk_id = $1", [target.userId]);
+      const acceptance = apiRequest(target, `/communities/${communityId}/invitations/accept`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      try {
+        await waitForLock();
+      } finally {
+        await lock.query("COMMIT");
+      }
+      assert.equal((await acceptance).status, 409);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_community_members WHERE community_id = $1 AND user_id = $2",
+        [communityId, target.userId],
+      )).rows[0].count, 0);
+      assert.equal((await pool.query(
+        "SELECT status FROM irc_workspace_invitations WHERE community_id = $1", [communityId],
+      )).rows[0].status, "pending");
+
+      // Grant wins: deletion removes the committed grant, and no later grant
+      // can reappear after the target is pending.
+      await pool.query("UPDATE irc_users SET deletion_status = 'none', account_status = 'active' WHERE clerk_id = $1", [target.userId]);
+      const granted = await grant();
+      assert.equal(granted.status, 201, JSON.stringify(granted));
+      await lock.query("BEGIN");
+      await lock.query("UPDATE irc_users SET deletion_status = 'pending', account_status = 'suspended' WHERE clerk_id = $1", [target.userId]);
+      await lock.query("DELETE FROM irc_user_roles WHERE user_id = $1", [target.userId]);
+      await lock.query("COMMIT");
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_user_roles WHERE user_id = $1", [target.userId],
+      )).rows[0].count, 0);
+
+      // Existing workspace members can still appear active to requests started
+      // before deletion commits. Neither assignment path may write after it.
+      await pool.query("UPDATE irc_users SET deletion_status = 'none', account_status = 'active' WHERE clerk_id = $1", [target.userId]);
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id) VALUES ($1, $2)",
+        [communityId, target.userId],
+      );
+      await pool.query(
+        "INSERT INTO irc_employee_profiles (community_id, user_id, employment_status) VALUES ($1, $2, 'active')",
+        [communityId, target.userId],
+      );
+      const team = await pool.query<{ id: number }>(
+        "INSERT INTO irc_teams (community_id, name) VALUES ($1, 'Race team') RETURNING id",
+        [communityId],
+      );
+      const channel = await pool.query<{ id: number }>(
+        "INSERT INTO irc_channels (community_id, owner_id, name) VALUES ($1, $2, '#race-room') RETURNING id",
+        [communityId, adminSession.userId],
+      );
+      channelId = channel.rows[0].id;
+      await lock.query("BEGIN");
+      await lock.query("UPDATE irc_users SET deletion_status = 'pending', account_status = 'suspended' WHERE clerk_id = $1", [target.userId]);
+      const teamAssignment = apiRequest(adminSession, `/communities/${communityId}/teams/${team.rows[0].id}/members/${target.userId}`, {
+        method: "PUT", headers: { "content-type": "application/json" }, body: "{}",
+      });
+      const channelJoin = apiRequest(target, `/channels/${channelId}/join`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      });
+      try {
+        await waitForLock();
+      } finally {
+        await lock.query("COMMIT");
+      }
+      assert.equal((await teamAssignment).status, 409);
+      assert.equal((await channelJoin).status, 409);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_team_members WHERE team_id = $1 AND user_id = $2",
+        [team.rows[0].id, target.userId],
+      )).rows[0].count, 0);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2",
+        [channelId, target.userId],
+      )).rows[0].count, 0);
+    } finally {
+      await lock.query("ROLLBACK").catch(() => undefined);
+      lock.release();
+      if (channelId !== null) {
+        await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      }
+      await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      await pool.query("UPDATE irc_users SET deletion_status = 'none', account_status = 'active' WHERE clerk_id = $1", [target.userId]);
+      if (provisionedHere) {
+        await pool.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [adminSession.userId]);
+      }
+    }
+  });
+
   test("creates only one chat identity during concurrent first-session requests", async () => {
     const session = await createTestSession("concurrent_profile");
     const responses = await Promise.all(

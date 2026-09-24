@@ -17,6 +17,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
+import { AccountDeletionPendingError, assertDeletionEligibleUser } from "../lib/account-deletion";
 import { createNotifications } from "../lib/notifications";
 import { channelNotFoundError } from "./errors";
 import { CUSTOM_ROLE_PERMISSIONS, ensurePermissionCatalog, PERMISSION_DESCRIPTIONS, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
@@ -793,6 +794,7 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
       const [currentActor] = await tx.select({ role: usersTable.role }).from(usersTable)
         .where(eq(usersTable.clerkId, actor.clerkId)).for("update");
       if (currentActor?.role !== "admin") return null;
+      await assertDeletionEligibleUser(userId, tx);
       if (customRole) {
         const [currentRole] = await tx.select().from(customRolesTable)
           .where(eq(customRolesTable.key, role)).for("share");
@@ -808,6 +810,9 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
       return granted;
     });
   } catch (error) {
+    if (error instanceof AccountDeletionPendingError) {
+      res.status(409).json({ error: error.message }); return;
+    }
     if (!isUniqueViolation(error)) throw error;
     res.status(409).json({ error: "This role is already assigned at that scope." }); return;
   }

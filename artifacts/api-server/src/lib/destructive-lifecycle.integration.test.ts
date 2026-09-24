@@ -4,6 +4,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   businessDocumentsTable,
   categoriesTable,
+  channelMembersTable,
   channelsTable,
   communitiesTable,
   communityMembersTable,
@@ -18,10 +19,11 @@ import {
   usersTable,
   userRolesTable,
   teamMembersTable,
+  teamsTable,
   workspaceObjectDeletionJobsTable,
   workspaceTasksTable,
 } from "@workspace/db";
-import { assertDeletionEligibleUser, finalizePendingAccountDeletion } from "./account-deletion";
+import { assertDeletionEligibleUser, finalizePendingAccountDeletion, startAccountDeletionWorker } from "./account-deletion";
 import { exactCommunityOwner } from "./destructive-policy";
 import { processObjectDeletionJobs } from "./object-cleanup";
 
@@ -33,7 +35,7 @@ const suffix = `integration_${Date.now()}_${Math.random().toString(36).slice(2, 
 const ids = {
   owner: `test_owner_${suffix}`,
   target: `test_target_${suffix}`,
-  replacement: `test_replacement_${suffix}`,
+  replacement: `test_${suffix}_replacement`,
 };
 let communityId: number;
 
@@ -110,6 +112,11 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       assert.equal(exactCommunityOwner(ids.owner, ids.owner), true);
       await second.query("ROLLBACK");
 
+      const [currentOwner] = await db.select({ ownerId: communitiesTable.ownerId })
+        .from(communitiesTable).where(eq(communitiesTable.id, communityId));
+      assert.equal(currentOwner.ownerId, ids.target);
+      assert.equal(exactCommunityOwner(currentOwner.ownerId, ids.owner), false);
+      assert.equal(exactCommunityOwner(currentOwner.ownerId, ids.target), true);
       const [target] = await db.select({ deletionStatus: usersTable.deletionStatus })
         .from(usersTable).where(eq(usersTable.clerkId, ids.target));
       assert.equal(target.deletionStatus, "none");
@@ -142,6 +149,68 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       .where(eq(usersTable.clerkId, ids.target));
   });
 
+  test("a concurrent invitation or grant cannot restore access after deletion starts", async () => {
+    const [team] = await db.insert(teamsTable).values({ communityId, name: `Deletion team ${suffix}` })
+      .returning({ id: teamsTable.id });
+    const [channel] = await db.insert(channelsTable).values({
+      communityId, ownerId: ids.owner, name: `deletion-channel-${suffix}`,
+    }).returning({ id: channelsTable.id });
+    const blocker = await pool.connect();
+    try {
+      await db.delete(communityMembersTable).where(and(
+        eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, ids.target),
+      ));
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "UPDATE irc_users SET deletion_status = 'pending', account_status = 'suspended' WHERE clerk_id = $1",
+        [ids.target],
+      );
+      // Each access path must check the target while holding the same user row
+      // lock as deletion, and write in that transaction.
+      const attempts = [
+        () => db.transaction(async (tx) => {
+          await assertDeletionEligibleUser(ids.target, tx);
+          await tx.insert(communityMembersTable).values({ communityId, userId: ids.target });
+        }),
+        () => db.transaction(async (tx) => {
+          await assertDeletionEligibleUser(ids.target, tx);
+          await tx.insert(teamMembersTable).values({ teamId: team.id, userId: ids.target });
+        }),
+        () => db.transaction(async (tx) => {
+          await assertDeletionEligibleUser(ids.target, tx);
+          await tx.insert(userRolesTable).values({
+            userId: ids.target, role: "workspace_admin", scopeType: "community",
+            communityId, grantedBy: ids.owner,
+          });
+        }),
+        () => db.transaction(async (tx) => {
+          await assertDeletionEligibleUser(ids.target, tx);
+          await tx.insert(channelMembersTable).values({ channelId: channel.id, userId: ids.target });
+        }),
+      ];
+      const grants = attempts.map((attempt) => attempt());
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled(grants);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, "rejected");
+        assert.match(String((outcome as PromiseRejectedResult).reason), /pending deletion/);
+      }
+      assert.deepEqual(await db.select().from(communityMembersTable).where(eq(communityMembersTable.userId, ids.target)), []);
+      assert.deepEqual(await db.select().from(teamMembersTable).where(eq(teamMembersTable.userId, ids.target)), []);
+      assert.deepEqual(await db.select().from(userRolesTable).where(eq(userRolesTable.userId, ids.target)), []);
+      assert.deepEqual(await db.select().from(channelMembersTable).where(eq(channelMembersTable.userId, ids.target)), []);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await db.delete(channelsTable).where(eq(channelsTable.id, channel.id));
+      await db.delete(teamsTable).where(eq(teamsTable.id, team.id));
+      await db.update(usersTable).set({ deletionStatus: "none", accountStatus: "active" })
+        .where(eq(usersTable.clerkId, ids.target));
+      await db.insert(communityMembersTable).values({ communityId, userId: ids.target, status: "member" })
+        .onConflictDoNothing();
+    }
+  });
+
   test("finalization cannot complete after Clerk transient failure and is idempotent on retry/404", async () => {
     await db.update(usersTable).set({
       deletionStatus: "pending",
@@ -161,8 +230,13 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     const [pending] = await db.select({
       deletionStatus: usersTable.deletionStatus,
       clerkDeletionStatus: usersTable.clerkDeletionStatus,
+      clerkDeletionAttempts: usersTable.clerkDeletionAttempts,
+      clerkDeletionLastError: usersTable.clerkDeletionLastError,
     }).from(usersTable).where(eq(usersTable.clerkId, ids.target));
-    assert.deepEqual(pending, { deletionStatus: "pending", clerkDeletionStatus: "failed" });
+    assert.deepEqual(pending, {
+      deletionStatus: "pending", clerkDeletionStatus: "failed",
+      clerkDeletionAttempts: 1, clerkDeletionLastError: "transient Clerk outage",
+    });
 
     const completed = await finalizePendingAccountDeletion(ids.target, {
       deleteClerkUser: async () => {
@@ -174,11 +248,15 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     const [deleted] = await db.select({
       deletionStatus: usersTable.deletionStatus,
       clerkDeletionStatus: usersTable.clerkDeletionStatus,
+      clerkDeletionAttempts: usersTable.clerkDeletionAttempts,
+      clerkDeletionLastError: usersTable.clerkDeletionLastError,
       displayName: usersTable.displayName,
     }).from(usersTable).where(eq(usersTable.clerkId, ids.target));
     assert.deepEqual(deleted, {
       deletionStatus: "completed",
       clerkDeletionStatus: "deleted",
+      clerkDeletionAttempts: 2,
+      clerkDeletionLastError: null,
       displayName: "[deleted user]",
     });
     assert.equal(await finalizePendingAccountDeletion(ids.target, {
@@ -193,6 +271,49 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     assert.equal(await finalizePendingAccountDeletion(ids.target, {
       deleteClerkUser: async () => { throw Object.assign(new Error("missing"), { status: 404 }); },
     }), "completed");
+  });
+
+  test("the account deletion worker retries an external failure before completing", async () => {
+    await db.update(usersTable).set({
+      deletionStatus: "pending", accountStatus: "suspended", clerkDeletionStatus: "pending",
+    }).where(eq(usersTable.clerkId, ids.replacement));
+    let calls = 0;
+    let allowRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { allowRetry = resolve; });
+    const timer = startAccountDeletionWorker({
+      intervalMs: 30,
+      deleteClerkUser: async (id) => {
+        assert.equal(id, ids.replacement);
+        calls++;
+        if (calls === 1) throw new Error("temporary Clerk failure");
+        await retryGate;
+      },
+    });
+    const waitFor = async (expected: string) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        const [row] = await db.select({
+          deletionStatus: usersTable.deletionStatus,
+          clerkDeletionStatus: usersTable.clerkDeletionStatus,
+        }).from(usersTable).where(eq(usersTable.clerkId, ids.replacement));
+        if (row.clerkDeletionStatus === expected && (expected !== "deleted" || row.deletionStatus === "completed")) return row;
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      throw new Error(`Worker did not reach ${expected}`);
+    };
+    try {
+      assert.deepEqual(await waitFor("failed"), {
+        deletionStatus: "pending", clerkDeletionStatus: "failed",
+      });
+      allowRetry();
+      assert.deepEqual(await waitFor("deleted"), {
+        deletionStatus: "completed", clerkDeletionStatus: "deleted",
+      });
+      assert.ok(calls >= 2);
+    } finally {
+      allowRetry();
+      clearInterval(timer);
+    }
   });
 
   test("document versions are unique within each document", async () => {
@@ -523,6 +644,12 @@ describe("destructive lifecycle PostgreSQL integration", () => {
       },
     });
     assert.deepEqual(first, { processed: 0, failed: 1 });
+    const [failedJob] = await db.select().from(workspaceObjectDeletionJobsTable)
+      .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+    assert.equal(failedJob.status, "failed");
+    assert.equal(failedJob.attempts, 1);
+    assert.match(failedJob.lastError ?? "", /503/);
+    assert.equal(failedJob.processedAt, null);
     const second = await processObjectDeletionJobs(10, {
       signObjectUrl: async () => "https://storage.test/object",
       fetchImpl: async () => {
@@ -532,6 +659,12 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     });
     assert.deepEqual(second, { processed: 1, failed: 0 });
     assert.equal(attempts, 2);
+    const [completedJob] = await db.select().from(workspaceObjectDeletionJobsTable)
+      .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+    assert.equal(completedJob.status, "completed");
+    assert.equal(completedJob.attempts, 1);
+    assert.equal(completedJob.lastError, null);
+    assert.ok(completedJob.processedAt);
     await db.delete(workspaceObjectDeletionJobsTable)
       .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
   });

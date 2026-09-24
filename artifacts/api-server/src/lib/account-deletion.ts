@@ -69,15 +69,23 @@ export async function rejectPendingDeletion(userId: string, database = db): Prom
   return user?.deletionStatus === "pending" || user?.deletionStatus === "completed";
 }
 
+export class AccountDeletionPendingError extends Error {
+  constructor() {
+    super("This account is pending deletion and cannot receive access.");
+  }
+}
+
 export async function assertDeletionEligibleUser(userId: string, database: any = db): Promise<void> {
   const query = database.select({ deletionStatus: usersTable.deletionStatus }).from(usersTable)
     .where(eq(usersTable.clerkId, userId));
   const [user] = await query.for("update");
-  if (!user || user.deletionStatus !== "none") throw new Error("This account is pending deletion and cannot receive access.");
+  if (!user || user.deletionStatus !== "none") throw new AccountDeletionPendingError();
 }
 
 let accountWorkerRunning = false;
-export function startAccountDeletionWorker(): NodeJS.Timeout {
+export function startAccountDeletionWorker(
+  dependencies: { deleteClerkUser?: (userId: string) => Promise<unknown>; intervalMs?: number } = {},
+): NodeJS.Timeout {
   const run = async () => {
     if (accountWorkerRunning) return;
     accountWorkerRunning = true;
@@ -86,7 +94,7 @@ export function startAccountDeletionWorker(): NodeJS.Timeout {
         .where(eq(usersTable.deletionStatus, "pending")).limit(50);
       for (const row of rows) {
         try {
-          const result = await finalizePendingAccountDeletion(row.clerkId);
+          const result = await finalizePendingAccountDeletion(row.clerkId, dependencies);
           if (result === "retryable") logger.warn({ userId: row.clerkId }, "Account deletion will be retried");
         } catch (error) {
           await db.update(usersTable).set({
@@ -102,7 +110,7 @@ export function startAccountDeletionWorker(): NodeJS.Timeout {
     } finally { accountWorkerRunning = false; }
   };
   void run();
-  const timer = setInterval(() => void run(), 60_000);
+  const timer = setInterval(() => void run(), dependencies.intervalMs ?? 60_000);
   timer.unref();
   return timer;
 }

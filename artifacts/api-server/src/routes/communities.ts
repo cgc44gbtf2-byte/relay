@@ -64,7 +64,7 @@ import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
 import { validateUploadMetadata } from "./storage";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
-import { assertDeletionEligibleUser, finalizePendingAccountDeletion } from "../lib/account-deletion";
+import { AccountDeletionPendingError, assertDeletionEligibleUser, finalizePendingAccountDeletion } from "../lib/account-deletion";
 import {
   ACCOUNT_DELETION_CONFIRMATION,
   COMMUNITY_DELETION_CONFIRMATION,
@@ -1743,22 +1743,29 @@ router.put("/communities/:communityId/teams/:teamId/members/:memberId", requireA
     res.status(400).json({ error: "Invalid team membership." });
     return;
   }
-  if (status === "active") {
-    try { await assertDeletionEligibleUser(memberId); } catch {
+  let membership;
+  try {
+    membership = await db.transaction(async (tx) => {
+      if (status === "active") await assertDeletionEligibleUser(memberId, tx);
+      const [assigned] = await tx.insert(teamMembersTable).values({
+        teamId,
+        userId: memberId,
+        role,
+        status,
+        endedAt: status === "active" ? null : new Date(),
+      }).onConflictDoUpdate({
+        target: [teamMembersTable.teamId, teamMembersTable.userId],
+        set: { role, status, endedAt: status === "active" ? null : new Date() },
+      }).returning();
+      return assigned;
+    });
+  } catch (error) {
+    if (error instanceof AccountDeletionPendingError) {
       res.status(409).json({ error: "This account is pending deletion and cannot receive team access." });
       return;
     }
+    throw error;
   }
-  const [membership] = await db.insert(teamMembersTable).values({
-    teamId,
-    userId: memberId,
-    role,
-    status,
-    endedAt: status === "active" ? null : new Date(),
-  }).onConflictDoUpdate({
-    target: [teamMembersTable.teamId, teamMembersTable.userId],
-    set: { role, status, endedAt: status === "active" ? null : new Date() },
-  }).returning();
   await writeCommunityAudit(userId, "assigned_employee_team", communityId, {
     resourceType: "team_membership",
     resourceId: `${teamId}:${memberId}`,
@@ -1936,12 +1943,9 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
     return;
   }
   const now = new Date();
-  const result = await db.transaction(async (tx) => {
-    const [lockedUser] = await tx.select({ deletionStatus: usersTable.deletionStatus }).from(usersTable)
-      .where(eq(usersTable.clerkId, userId)).for("update");
-    if (!lockedUser || lockedUser.deletionStatus === "pending" || lockedUser.deletionStatus === "completed") {
-      throw new Error("Account deletion is pending or completed.");
-    }
+  let result;
+  try {
+    result = await db.transaction(async (tx) => {
     await assertDeletionEligibleUser(userId, tx);
     const [lockedInvitation] = await tx.select().from(workspaceInvitationsTable).where(and(
       eq(workspaceInvitationsTable.id, invitation.id),
@@ -2026,7 +2030,14 @@ router.post("/communities/:communityId/invitations/accept", requireAuth, async (
       }).onConflictDoNothing();
     }
     return { status: "accepted" as const, invitation: accepted };
-  });
+    });
+  } catch (error) {
+    if (error instanceof AccountDeletionPendingError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
   if (result.status === "invalid_scope") {
     res.status(409).json({ error: "This invitation contains organization assignments from another workspace." });
     return;
