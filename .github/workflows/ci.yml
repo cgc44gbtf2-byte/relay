@@ -40,11 +40,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate Clerk job concurrency
-        run: |
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/ci -p 'test_*.py'
-          python3 scripts/ci/validate_clerk_concurrency.py .github/workflows/ci.yml
-
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -54,6 +49,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Validate CI workflow YAML syntax
+        run: pnpm run validate:ci-workflow
+
+      - name: Validate Clerk job concurrency
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+          python3 scripts/ci/validate_clerk_concurrency.py .github/workflows/ci.yml
 
       - name: Validate scheduled cleanup environment
         run: pnpm --filter @workspace/api-server run validate:cleanup-workflow

@@ -8,6 +8,7 @@
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "audit:inventory": "node ./scripts/generate-dependency-inventory.mjs",
     "audit:licenses": "node ./scripts/check-third-party-licenses.mjs",
+    "validate:ci-workflow": "pnpm dlx prettier@3.9.6 --parser yaml --check .github/workflows/ci.yml",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "db:check:migrations": "pnpm --filter @workspace/db run check:migrations",
