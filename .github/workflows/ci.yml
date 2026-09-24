@@ -58,6 +58,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/ci -p 'test_*.py'
           python3 scripts/ci/validate_clerk_concurrency.py .github/workflows/ci.yml
 
+      - name: Validate PostgreSQL CI version policy
+        run: python3 scripts/ci/validate_postgres_versions.py .github/workflows/ci.yml
+
       - name: Validate scheduled cleanup environment
         run: pnpm --filter @workspace/api-server run validate:cleanup-workflow
 
@@ -116,8 +119,7 @@ jobs:
     if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
-      # PostgreSQL 14 is the compatibility floor, 16 is the current CI baseline.
-      # Keep this range aligned with the versions supported by the service.
+      # Versions and baseline are checked against scripts/ci/validate_postgres_versions.py.
       matrix:
         postgres-version: ["14", "15", "16"]
     runs-on: ubuntu-latest

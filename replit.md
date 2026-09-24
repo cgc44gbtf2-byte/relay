@@ -40,6 +40,14 @@ the run, pushes the schema with `push:test`, runs the API tests, and drops the d
 even when setup or tests fail. The command never reads `DATABASE_URL` or a pre-existing
 `TEST_DATABASE_URL`, so development and preview databases cannot be used by accident.
 
+The supported PostgreSQL CI runner versions are defined in
+`scripts/ci/validate_postgres_versions.py` (`SUPPORTED_VERSIONS`, currently 14–16).
+The last version is the `api-tests` baseline, and the whole range must remain in
+the `database-runner-compatibility` matrix. CI validates both against that policy
+and reports the policy, baseline, and matrix values on mismatch. When changing
+support, update the policy and both jobs together; do not silently drop older
+runner coverage.
+
 If an authenticated admin test run is interrupted, its Clerk users may survive after
 the test process stops. The test users are identified by the exact
 `admin_access_test_` username plus matching `@example.com` email convention. With
