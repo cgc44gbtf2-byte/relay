@@ -1,4 +1,4 @@
-name: Validate CI workflow YAML
+name: Validate GitHub Actions workflows
 
 on:
   push:
@@ -8,11 +8,23 @@ permissions:
   contents: read
 
 jobs:
-  validate-ci-workflow:
+  validate-workflows:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Lint GitHub Actions workflows
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d)"
+          trap 'rm -rf "$tool_dir"' EXIT
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            -o "$tool_dir/actionlint.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $tool_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$tool_dir/actionlint.tar.gz" -C "$tool_dir" actionlint
+          "$tool_dir/actionlint"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
