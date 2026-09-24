@@ -1343,7 +1343,7 @@ type ConsoleOverview = {
   categories: Array<{ id: number; name: string; description: string; communityId: number | null; communityName: string | null; communityOwnerId: string | null }>;
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
-  activityPagination: { limit: number; offset: number; hasMore: boolean; nextOffset: number | null };
+  activityPagination: { limit: number; offset: number; hasMore: boolean; nextOffset: number | null; nextCursor: string | null };
 };
 type AdminAssignment = {
   id: number;
@@ -1793,11 +1793,11 @@ function AdminConsole() {
   >(null);
   const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [announcementDraft, setAnnouncementDraft] = useState("");
-  const load = async (activityOffset = 0, appendActivity = false) => {
+  const load = async (activityCursor: string | null = null, appendActivity = false) => {
     setError("");
     try {
       const activityParams = new URLSearchParams();
-      if (activityOffset > 0) activityParams.set("activityOffset", String(activityOffset));
+      if (activityCursor) activityParams.set("activityCursor", activityCursor);
       if (activityActorFilter.trim()) activityParams.set("activityActor", activityActorFilter.trim());
       if (activityActionFilter.trim()) activityParams.set("activityAction", activityActionFilter.trim());
       const overviewPath = activityParams.toString() ? `/admin/overview?${activityParams.toString()}` : "/admin/overview";
@@ -1899,11 +1899,11 @@ function AdminConsole() {
     }
   };
   const loadOlderActivity = async () => {
-    const nextOffset = overview?.activityPagination.nextOffset;
-    if (nextOffset === null || nextOffset === undefined || loadingOlderActivity) return;
+    const nextCursor = overview?.activityPagination.nextCursor;
+    if (!nextCursor || loadingOlderActivity) return;
     setLoadingOlderActivity(true);
     try {
-      await load(nextOffset, true);
+      await load(nextCursor, true);
     } finally {
       setLoadingOlderActivity(false);
     }

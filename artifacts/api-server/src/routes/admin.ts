@@ -28,6 +28,7 @@ const DEFAULT_ACTIVITY_LIMIT = 20;
 const MAX_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_OFFSET = 10_000;
 
+const MAX_ACTIVITY_CURSOR_LENGTH = 256;
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 3; depth += 1) {
@@ -62,6 +63,39 @@ function parseActivityQueryInteger(
   return parsed;
 }
 
+function parseActivityCursor(value: unknown): ActivityCursor | null | false {
+  if (value === undefined) return null;
+  if (
+    typeof value !== "string"
+    || value.length > MAX_ACTIVITY_CURSOR_LENGTH
+    || !/^[A-Za-z0-9_-]+$/.test(value)
+  ) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<ActivityCursor>;
+    if (
+      typeof parsed.createdAt !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(parsed.createdAt)
+      || Number(parsed.createdAt.slice(0, 4)) < 1
+      || !Number.isSafeInteger(parsed.id)
+      || (parsed.id ?? 0) < 1
+    ) {
+      return false;
+    }
+    const timestamp = new Date(parsed.createdAt);
+    if (
+      Number.isNaN(timestamp.getTime())
+      || timestamp.toISOString().slice(0, 19) !== parsed.createdAt.slice(0, 19)
+    ) {
+      return false;
+    }
+    return { createdAt: parsed.createdAt, id: parsed.id! };
+  } catch {
+    return false;
+  }
+}
 async function adminProfile(req: AuthenticatedRequest) {
   const profile = await ensureProfile(getUserId(req));
   return profile.role === "admin" ? profile : null;
@@ -144,12 +178,8 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     0,
     MAX_ACTIVITY_OFFSET,
   );
-  if (activityLimit === null || activityOffset === null) {
-    res.status(400).json({
-      error: `activityLimit must be between 1 and ${MAX_ACTIVITY_LIMIT}, and activityOffset must be between 0 and ${MAX_ACTIVITY_OFFSET}.`,
-    });
-    return;
-  }
+
+  const activityCursor = parseActivityCursor(req.query.activityCursor);
   const rawActivityActor = req.query.activityActor;
   const rawActivityAction = req.query.activityAction;
   const activityActor = typeof rawActivityActor === "string" ? rawActivityActor.trim() : "";
@@ -246,41 +276,23 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         details: adminAuditLogsTable.details,
         createdAt: adminAuditLogsTable.createdAt,
         actor: adminAuditLogsTable.actorDisplayName,
+        cursorCreatedAt: sql<string>`to_char(${adminAuditLogsTable.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(adminAuditLogsTable)
       .where(and(
         activityActor ? ilike(adminAuditLogsTable.actorDisplayName, `%${activityActor}%`) : undefined,
         activityAction ? ilike(adminAuditLogsTable.action, `%${activityAction}%`) : undefined,
+        activityCursor
+          ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) < (${activityCursor.createdAt}::timestamptz, ${activityCursor.id})`
+          : undefined,
       ))
       .orderBy(desc(adminAuditLogsTable.createdAt), desc(adminAuditLogsTable.id))
       .limit(activityLimit + 1)
-      .offset(activityOffset),
+      .offset(activityCursor ? 0 : activityOffset),
   ]);
   const hasMoreActivity = activity.length > activityLimit;
-  if (hasMoreActivity) activity.pop();
-  res.json({
-    stats: {
-      users: Number(userStats?.users ?? 0),
-      channels: Number(channelCount?.value ?? 0),
-      messages: Number(messageCount?.value ?? 0),
-      online: Number(userStats?.online ?? 0),
-      admins: Number(userStats?.admins ?? 0),
-    },
-    users,
-    channels,
-    categories,
-    recentMessages,
-    activity,
-    activityPagination: {
-      limit: activityLimit,
-      offset: activityOffset,
-      hasMore: hasMoreActivity,
-      nextOffset: hasMoreActivity ? activityOffset + activityLimit : null,
-    },
-  });
-});
 
-router.post("/admin/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  const lastActivity = activity.at(-1);
   const actor = await adminProfile(req);
   if (!actor) {
     res.status(403).json({ error: "Admin access required." });
@@ -321,11 +333,9 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
     return;
   }
   const requestedRole = typeof req.query.role === "string" ? req.query.role : "";
-  const role = PRIMARY_ROLES.includes(requestedRole as typeof PRIMARY_ROLES[number])
-    ? requestedRole as typeof PRIMARY_ROLES[number]
-    : "";
+  const role = req.body?.role;
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
-  const accountStatus = req.query.accountStatus === "active" || req.query.accountStatus === "suspended" ? req.query.accountStatus : "";
+  const accountStatus = req.body?.accountStatus;
   const filters = [
     query
       ? or(
@@ -527,16 +537,7 @@ router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest
     return;
   }
   try {
-    const role = await db.transaction(async (tx) => {
-      const [created] = await tx.insert(customRolesTable).values({ key, label, description, scopeType, createdBy: actor.clerkId }).returning();
-      const definitions = await tx.select({ id: permissionDefinitionsTable.id, key: permissionDefinitionsTable.key })
-        .from(permissionDefinitionsTable);
-      const ids = new Map(definitions.map((definition) => [definition.key, definition.id]));
-      const links = permissions.map((permission) => ids.get(permission)).filter((id): id is number => id !== undefined)
-        .map((permissionId) => ({ role: key, permissionId }));
-      if (links.length) await tx.insert(rolePermissionsTable).values(links);
-      return created;
-    });
+  const role = req.body?.role;
     await writeAudit(actor.clerkId, actor.displayName, "created_custom_role", key, label, permissions.join(", "));
     res.status(201).json({ ...role, permissions });
   } catch (error) {
@@ -554,8 +555,12 @@ router.post("/admin/role-assignments", requireAuth, async (req: AuthenticatedReq
   const role = req.body?.role;
   const scopeType = req.body?.scopeType;
   const communityId = req.body?.communityId === undefined || req.body.communityId === null ? null : Number(req.body.communityId);
-  const categoryId = req.body?.categoryId === undefined || req.body.categoryId === null ? null : Number(req.body.categoryId);
-  const channelId = req.body?.channelId === undefined || req.body.channelId === null ? null : Number(req.body.channelId);
+  const categoryId = req.body.categoryId === null
+    ? null
+    : isPositiveSafeInteger(req.body.categoryId)
+      ? req.body.categoryId
+      : undefined;
+  const channelId = Number(rawId);
   const [customRole] = typeof role === "string"
     ? await db.select().from(customRolesTable).where(and(eq(customRolesTable.key, role), eq(customRolesTable.isActive, true))).limit(1)
     : [];
@@ -657,6 +662,10 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     res.status(403).json({ error: "Admin access required." });
     return;
   }
+  if (req.body.confirm !== true) {
+    res.status(400).json({ error: "Explicit confirmation is required to clear channel history." });
+    return;
+  }
   const rawId = Array.isArray(req.params.channelId) ? req.params.channelId[0] : req.params.channelId;
   const channelId = Number(rawId);
   const topic = typeof req.body.topic === "string" ? req.body.topic.trim().slice(0, 160) : undefined;
@@ -675,44 +684,26 @@ router.patch("/admin/channels/:channelId", requireAuth, async (req: Authenticate
     return;
   }
   const result = await db.transaction(async (tx) => {
-    const [currentActor] = await tx.select({ role: usersTable.role })
-      .from(usersTable).where(eq(usersTable.clerkId, actor.clerkId)).for("update");
-    if (currentActor?.role !== "admin") return { outcome: "forbidden" } as const;
-    const [channel] = await tx.select().from(channelsTable)
-      .where(eq(channelsTable.id, channelId)).for("update");
-    if (!channel) return { outcome: "not_found" } as const;
-    if (categoryId !== null && categoryId !== undefined) {
-      const [category] = await tx
-        .select({ communityId: categoriesTable.communityId })
-        .from(categoriesTable)
-        .where(eq(categoriesTable.id, categoryId))
-        .for("share");
-      if (!category || category.communityId !== channel.communityId) {
-        return { outcome: "wrong_workspace" } as const;
-      }
-    }
-    const [updated] = await tx
-      .update(channelsTable)
-      .set({
-        ...(topic === undefined ? {} : { topic }),
-        ...(hasCategoryId ? { categoryId } : {}),
-      })
+    const [channel] = await tx
+      .select({ id: channelsTable.id, name: channelsTable.name })
+      .from(channelsTable)
       .where(eq(channelsTable.id, channelId))
-      .returning();
-    const auditDetails = hasCategoryId
-      ? categoryId === null
-        ? "Moved to unassigned channels"
-        : `Moved to room ${categoryId}`
-      : topic || "Cleared channel topic";
+      .for("update");
+    if (!channel) return { outcome: "not_found" } as const;
+
+    const deleted = await tx
+      .delete(messagesTable)
+      .where(eq(messagesTable.channelId, channelId))
+      .returning({ id: messagesTable.id });
     await tx.insert(adminAuditLogsTable).values({
       actorId: actor.clerkId,
       actorDisplayName: actor.displayName,
-      action: hasCategoryId ? "moved_channel_room" : "updated_channel_topic",
+      action: "cleared_channel_history",
       targetId: String(channelId),
-      targetLabel: updated.name,
-      details: auditDetails,
+      targetLabel: channel.name,
+      details: `${deleted.length} messages deleted`,
     });
-    return { outcome: "updated", updated } as const;
+    return { outcome: "cleared", deleted: deleted.length } as const;
   });
   if (result.outcome === "forbidden") {
     res.status(403).json({ error: "Admin access required." });
@@ -779,3 +770,15 @@ router.delete("/admin/channels/:channelId/messages", requireAuth, async (req: Au
 });
 
 export default router;
+
+type ActivityCursor = { createdAt: string; id: number };
+
+  const visibleActivity = activity.map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
+
+  const nextActivityCursor = hasMoreActivity && lastActivity
+    ? encodeActivityCursor({ createdAt: lastActivity.cursorCreatedAt, id: lastActivity.id })
+    : null;
+
+function encodeActivityCursor(cursor: ActivityCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}

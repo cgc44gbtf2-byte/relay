@@ -1583,6 +1583,7 @@ describe("admin access controls", () => {
               offset: number;
               hasMore: boolean;
               nextOffset: number | null;
+              nextCursor: string | null;
             };
           },
         );
@@ -1593,13 +1594,16 @@ describe("admin access controls", () => {
         [8, 8, 7],
       );
       assert.deepEqual(
-        pageResponses.map((page) => page.activityPagination),
+        pageResponses.map(({ activityPagination: { nextCursor: _nextCursor, ...pagination } }) => pagination),
         [
           { limit: 8, offset: 0, hasMore: true, nextOffset: 8 },
           { limit: 8, offset: 8, hasMore: true, nextOffset: 16 },
           { limit: 8, offset: 16, hasMore: false, nextOffset: null },
         ],
       );
+      assert.ok(pageResponses[0]?.activityPagination.nextCursor);
+      assert.ok(pageResponses[1]?.activityPagination.nextCursor);
+      assert.equal(pageResponses[2]?.activityPagination.nextCursor, null);
 
       const activity = pageResponses.flatMap((page) => page.activity);
       assert.equal(new Set(activity.map((entry) => entry.id)).size, rowCount);
@@ -1621,6 +1625,93 @@ describe("admin access controls", () => {
         "/admin/overview?activityLimit=51",
       );
       assert.equal(invalidLimit.status, 400, JSON.stringify(invalidLimit));
+    } finally {
+      await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
+        `${marker}%`,
+      ]);
+    }
+  });
+
+  test("keeps cursor activity pages complete when a newer event arrives between requests", async () => {
+    const marker = `activity_cursor_${randomUUID().replaceAll("-", "")}`;
+    const rowCount = 23;
+    const sharedTimestamp = new Date(Date.UTC(2099, 0, 1));
+    const values: string[] = [];
+    const parameters: unknown[] = [];
+    for (let index = 0; index < rowCount; index += 1) {
+      const offset = parameters.length;
+      values.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`,
+      );
+      parameters.push(
+        adminSession.userId,
+        "Cursor pagination actor",
+        `${marker}_${String(index).padStart(2, "0")}`,
+        `${marker}_target_${index}`,
+        `${marker} label ${index}`,
+        `Cursor pagination detail ${index}`,
+        sharedTimestamp,
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO irc_admin_audit_logs
+       (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+       VALUES ${values.join(", ")}`,
+      parameters,
+    );
+
+    try {
+      const query = `/admin/overview?activityLimit=8&activityAction=${marker}`;
+      const firstResponse = await apiRequest(adminSession, query);
+      assert.equal(firstResponse.status, 200, JSON.stringify(firstResponse));
+      const firstPage = firstResponse.body as {
+        activity: Array<{ id: number; actorId: string; action: string; actor: string | null; createdAt: string }>;
+        activityPagination: { hasMore: boolean; nextCursor: string | null };
+      };
+      assert.equal(firstPage.activity.length, 8);
+      assert.equal(firstPage.activityPagination.hasMore, true);
+      assert.ok(firstPage.activityPagination.nextCursor);
+
+      await pool.query(
+        `INSERT INTO irc_admin_audit_logs
+         (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          adminSession.userId,
+          "Interleaving actor",
+          `${marker}_newer_event`,
+          `${marker}_newer_target`,
+          `${marker} newer label`,
+          "Inserted after the first page",
+          sharedTimestamp,
+        ],
+      );
+
+      const pages = [firstPage];
+      let cursor: string | null = firstPage.activityPagination.nextCursor;
+      while (cursor) {
+        const response = await apiRequest(
+          adminSession,
+          `${query}&activityCursor=${encodeURIComponent(cursor)}`,
+        );
+        assert.equal(response.status, 200, JSON.stringify(response));
+        const page = response.body as typeof firstPage;
+        pages.push(page);
+        cursor = page.activityPagination.nextCursor;
+      }
+
+      const activity = pages.flatMap((page) => page.activity);
+      assert.equal(activity.length, rowCount);
+      assert.equal(new Set(activity.map((entry) => entry.id)).size, rowCount);
+      assert.deepEqual(
+        activity.map((entry) => entry.action),
+        Array.from({ length: rowCount }, (_, index) => `${marker}_${String(rowCount - index - 1).padStart(2, "0")}`),
+      );
+      assert.ok(activity.every((entry) => entry.actorId === adminSession.userId));
+      assert.ok(activity.every((entry) => entry.actor === "Cursor pagination actor"));
+      assert.ok(activity.every((entry) => entry.createdAt === sharedTimestamp.toISOString()));
+      assert.ok(!activity.some((entry) => entry.action === `${marker}_newer_event`));
     } finally {
       await pool.query("DELETE FROM irc_admin_audit_logs WHERE action LIKE $1", [
         `${marker}%`,
