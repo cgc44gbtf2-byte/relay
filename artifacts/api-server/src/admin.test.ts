@@ -4202,7 +4202,7 @@ describe("admin access controls", () => {
     );
   });
 
-  test("rejects scoped roles with mismatched community, category, or channel relationships and audits a valid grant", async () => {
+  test("rejects mismatched scoped roles and preserves channel messages when auditing a valid grant", async () => {
     const suffix = randomUUID();
     const communityAResult = await pool.query<{ id: number }>(
       `INSERT INTO irc_communities (name, slug, owner_id)
@@ -4239,8 +4239,16 @@ describe("admin access controls", () => {
       [`channel-${suffix}`, adminSession.userId, communityA, categoryA],
     );
     const channelId = channelResult.rows[0].id;
+    const neighboringChannelResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_channels (name, owner_id, community_id, category_id)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [`neighbor-${suffix}`, adminSession.userId, communityA, categoryA],
+    );
+    const neighboringChannelId = neighboringChannelResult.rows[0].id;
     const assignmentDetails = "department_admin on category";
     let assignmentId: number | null = null;
+    let channelAssignmentId: number | null = null;
     const targetProfile = await pool.query<{ display_name: string }>(
       "SELECT display_name FROM irc_users WHERE clerk_id = $1",
       [memberSession.userId],
@@ -4348,17 +4356,73 @@ describe("admin access controls", () => {
         target_label: targetProfile.rows[0].display_name,
         details: assignmentDetails,
       }]);
+
+      const messagesBeforeGrant = await pool.query<{ id: string; channel_id: number; body: string }>(
+        `INSERT INTO irc_messages (channel_id, sender_id, body)
+         VALUES ($1, $3, $4), ($1, $3, $5), ($2, $3, $6)
+         RETURNING id, channel_id, body`,
+        [
+          channelId, neighboringChannelId, adminSession.userId,
+          `First channel message ${suffix}`, `Second channel message ${suffix}`, `Neighbor message ${suffix}`,
+        ],
+      );
+      assert.equal(messagesBeforeGrant.rowCount, 3);
+      const channelGrant = await postAssignment({
+        userId: memberSession.userId,
+        role: "moderator",
+        scopeType: "channel",
+        communityId: communityA,
+        categoryId: categoryA,
+        channelId,
+      });
+      assert.equal(channelGrant.status, 201, JSON.stringify(channelGrant));
+      channelAssignmentId = (channelGrant.body as { id: number }).id;
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT id, user_id, role, scope_type, community_id, category_id, channel_id
+           FROM irc_user_roles WHERE id = $1`,
+          [channelAssignmentId],
+        )).rows,
+        [{
+          id: channelAssignmentId, user_id: memberSession.userId, role: "moderator",
+          scope_type: "channel", community_id: communityA, category_id: categoryA, channel_id: channelId,
+        }],
+      );
+      const channelAudit = await pool.query(
+        `SELECT actor_id, action, target_id, details FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND target_id = $2 AND action = 'granted_scoped_role'
+           AND details = 'moderator on channel'`,
+        [adminSession.userId, memberSession.userId],
+      );
+      assert.deepEqual(channelAudit.rows, [{
+        actor_id: adminSession.userId, action: "granted_scoped_role",
+        target_id: memberSession.userId, details: "moderator on channel",
+      }]);
+      const messagesAfterGrant = await pool.query<{ id: string; channel_id: number; body: string }>(
+        `SELECT id, channel_id, body FROM irc_messages
+         WHERE channel_id = ANY($1::int[]) ORDER BY id`,
+        [[channelId, neighboringChannelId]],
+      );
+      assert.deepEqual(
+        messagesAfterGrant.rows,
+        messagesBeforeGrant.rows.sort((a, b) => a.id.localeCompare(b.id)),
+        "The channel grant must not delete or change existing messages in either channel.",
+      );
     } finally {
       if (assignmentId !== null) {
         await pool.query("DELETE FROM irc_user_roles WHERE id = $1", [assignmentId]);
       }
+      if (channelAssignmentId !== null) {
+        await pool.query("DELETE FROM irc_user_roles WHERE id = $1", [channelAssignmentId]);
+      }
       await pool.query(
         `DELETE FROM irc_admin_audit_logs
          WHERE actor_id = $1 AND action = 'granted_scoped_role'
-           AND target_id = $2 AND details = $3`,
-        [adminSession.userId, memberSession.userId, assignmentDetails],
+            AND target_id = $2 AND details = ANY($3::text[])`,
+        [adminSession.userId, memberSession.userId, [assignmentDetails, "moderator on channel"]],
       );
-      await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      await pool.query("DELETE FROM irc_messages WHERE channel_id = ANY($1::int[])", [[channelId, neighboringChannelId]]);
+      await pool.query("DELETE FROM irc_channels WHERE id = ANY($1::int[])", [[channelId, neighboringChannelId]]);
       await pool.query("DELETE FROM irc_categories WHERE id = ANY($1::int[])", [[categoryA, categoryB]]);
       await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [[communityA, communityB]]);
     }
