@@ -9,6 +9,7 @@ import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
+import { sendCommunitySubscriptionReminders } from "./lib/community-subscription-reminders";
 import { hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
@@ -1747,6 +1748,55 @@ describe("admin access controls", () => {
         await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [renewalId]);
       }
       await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
+    }
+  });
+
+  test("reminds once per latest paid term, not legacy slots or superseded terms", async () => {
+    const ids: number[] = [];
+    const seed = async (status: string, expiresAt: Date | null) => {
+      const inserted = await pool.query<{ id: number }>(
+        `INSERT INTO irc_community_upgrade_requests (user_id, email, display_name, status, expires_at)
+         VALUES ($1, 'test@example.invalid', 'Reminder test owner', $2, $3) RETURNING id`,
+        [memberSession.userId, status, expiresAt],
+      );
+      ids.push(inserted.rows[0].id);
+      return inserted.rows[0].id;
+    };
+    const now = new Date();
+    try {
+      const permanent = await seed("approved", null);
+      const ended = await seed("ended", new Date(now.getTime() + 2 * 86400_000));
+      const expired = await seed("approved", new Date(now.getTime() - 86400_000));
+      const superseded = await seed("approved", new Date(now.getTime() + 2 * 86400_000));
+      const latest = await seed("approved", new Date(now.getTime() + 4 * 86400_000));
+      assert.equal((await Promise.all([
+        sendCommunitySubscriptionReminders(now), sendCommunitySubscriptionReminders(now),
+      ])).reduce((sum, count) => sum + count, 0), 1);
+      const alerts = await pool.query<{ user_id: string; entity_id: string }>(
+        `SELECT user_id, entity_id FROM irc_notifications
+         WHERE entity_type = 'community_subscription_reminder' AND entity_id = ANY($1::text[])`,
+        [ids.map(String)],
+      );
+      assert.equal(alerts.rows.length, 2);
+      assert.deepEqual(new Set(alerts.rows.map((row) => row.user_id)),
+        new Set([memberSession.userId, adminSession.userId]));
+      assert.ok(alerts.rows.every((row) => row.entity_id === String(latest)));
+      assert.equal(await sendCommunitySubscriptionReminders(now), 0);
+      const renewed = await seed("approved", new Date(now.getTime() + 6 * 86400_000));
+      assert.equal(await sendCommunitySubscriptionReminders(now), 1);
+      const refreshed = await pool.query<{ entity_id: string }>(
+        `SELECT entity_id FROM irc_notifications WHERE entity_type = 'community_subscription_reminder'
+         AND entity_id = ANY($1::text[])`, [ids.map(String)],
+      );
+      assert.equal(refreshed.rows.length, 4);
+      assert.equal(refreshed.rows.filter((row) => row.entity_id === String(renewed)).length, 2);
+      assert.ok(!refreshed.rows.some((row) => [permanent, ended, expired, superseded].includes(Number(row.entity_id))));
+    } finally {
+      await pool.query(
+        "DELETE FROM irc_notifications WHERE entity_type = 'community_subscription_reminder' AND entity_id = ANY($1::text[])",
+        [ids.map(String)],
+      );
+      await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = ANY($1::int[])", [ids]);
     }
   });
 

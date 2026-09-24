@@ -5,6 +5,7 @@ import { wsHub } from "./lib/ws";
 import { startObjectDeletionWorker } from "./lib/object-cleanup";
 import { startAccountDeletionWorker } from "./lib/account-deletion";
 import { startMessageNotificationWorker } from "./lib/message-notification-delivery";
+import { startCommunitySubscriptionReminderWorker } from "./lib/community-subscription-reminders";
 
 const rawPort = process.env["PORT"];
 
@@ -30,5 +31,6 @@ server.listen(port, () => {
   startObjectDeletionWorker();
   startAccountDeletionWorker();
   startMessageNotificationWorker();
+  startCommunitySubscriptionReminderWorker();
   logger.info({ port }, "Server listening");
 });

@@ -83,6 +83,7 @@ export const communityUpgradeRequestsTable = pgTable("irc_community_upgrade_requ
   currency: text("currency").notNull().default("USD"),
   paymentReference: text("payment_reference"),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
+  reminderSentAt: timestamp("reminder_sent_at", { withTimezone: true }),
   reviewedBy: text("reviewed_by").references(() => usersTable.clerkId, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),

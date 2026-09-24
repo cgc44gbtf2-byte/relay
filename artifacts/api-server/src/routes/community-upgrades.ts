@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { randomUUID } from "node:crypto";
-import { and, count, desc, eq, gt, isNull } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNull, or } from "drizzle-orm";
 import {
   adminAuditLogsTable,
   categoriesTable,
@@ -110,8 +110,19 @@ router.get("/admin/community-upgrades", requireAuth, async (req: AuthenticatedRe
     res.status(403).json({ error: "Platform admin access required." });
     return;
   }
-  res.json(await db.select().from(communityUpgradeRequestsTable)
-    .orderBy(desc(communityUpgradeRequestsTable.createdAt)).limit(100));
+  // Reminders must remain actionable even if the active term is older than
+  // the 100 most recent requests displayed in the administration panel.
+  const [recent, current] = await Promise.all([
+    db.select().from(communityUpgradeRequestsTable)
+      .orderBy(desc(communityUpgradeRequestsTable.createdAt)).limit(100),
+    db.select().from(communityUpgradeRequestsTable).where(or(
+      eq(communityUpgradeRequestsTable.status, "pending"),
+      and(eq(communityUpgradeRequestsTable.status, "approved"),
+        gt(communityUpgradeRequestsTable.expiresAt, new Date())),
+    )),
+  ]);
+  res.json([...new Map([...recent, ...current].map((request) => [request.id, request])).values()]
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id - a.id));
 });
 
 async function reviewRequest(req: AuthenticatedRequest, res: import("express").Response, decision: "approved" | "declined") {
