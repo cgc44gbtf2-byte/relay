@@ -1,15 +1,68 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, lt, notInArray, or } from "drizzle-orm";
-import { db, workspaceObjectDeletionJobsTable } from "@workspace/db";
+import { and, asc, eq, gte, inArray, isNull, lt, lte, notInArray, or } from "drizzle-orm";
+import { db, notificationsTable, usersTable, workspaceObjectDeletionJobsTable } from "@workspace/db";
 import { signedObjectUrlForPath } from "../routes/storage";
 import { logger } from "./logger";
+import { broadcastNotifications, insertNotifications } from "./notifications";
 
 const OBJECT_CLEANUP_INTERVAL_MS = 60_000;
 // The DELETE attempt is bounded well below the lease so a live worker does not
 // normally overlap a recovery worker. Tokens fence off late/stale completions.
 const DELETE_TIMEOUT_MS = 60_000;
 const CLAIM_LEASE_MS = 120_000;
+const ALERT_AFTER_ATTEMPTS = 3;
+const ALERT_AFTER_MS = 24 * 60 * 60 * 1000;
 let cleanupRunning = false;
+
+/** Only job metadata crosses into operator-visible notifications. Never include
+ * object paths, signed URLs, or arbitrary storage error messages. */
+export async function alertFailedObjectDeletionJobs(now = new Date()): Promise<number> {
+  const candidates = await db.select({ id: workspaceObjectDeletionJobsTable.id })
+    .from(workspaceObjectDeletionJobsTable).where(and(
+      eq(workspaceObjectDeletionJobsTable.status, "failed"),
+      isNull(workspaceObjectDeletionJobsTable.alertedAt),
+      or(
+        lte(workspaceObjectDeletionJobsTable.createdAt, new Date(now.getTime() - ALERT_AFTER_MS)),
+        gte(workspaceObjectDeletionJobsTable.attempts, ALERT_AFTER_ATTEMPTS),
+      ),
+    )).orderBy(asc(workspaceObjectDeletionJobsTable.createdAt), asc(workspaceObjectDeletionJobsTable.id))
+    .limit(100);
+  let sent = 0;
+  for (const candidate of candidates) {
+    // Serialize with claims/completions; the marker and notification commit together.
+    const created = await db.transaction(async (tx) => {
+      const [job] = await tx.select({
+        id: workspaceObjectDeletionJobsTable.id,
+        status: workspaceObjectDeletionJobsTable.status,
+        attempts: workspaceObjectDeletionJobsTable.attempts,
+        createdAt: workspaceObjectDeletionJobsTable.createdAt,
+        alertedAt: workspaceObjectDeletionJobsTable.alertedAt,
+      }).from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.id, candidate.id)).for("update");
+      if (!job || job.status !== "failed" || job.alertedAt ||
+        (job.attempts < ALERT_AFTER_ATTEMPTS && job.createdAt > new Date(now.getTime() - ALERT_AFTER_MS))) return [];
+      const [admin] = await tx.select({ id: usersTable.clerkId }).from(usersTable)
+        .where(eq(usersTable.role, "admin")).limit(1);
+      if (!admin) return []; // Keep eligible for a later pass when an operator exists.
+      const notifications = await insertNotifications(tx, [admin.id], {
+        type: "administrative_action",
+        category: "administrative_action",
+        body: `Storage cleanup job #${job.id} has failed ${job.attempts} times (queued ${job.createdAt.toISOString()}). Check object storage access and review this job in the deletion queue; retries continue automatically.`,
+        entityType: "object_deletion_job",
+        entityId: job.id,
+      });
+      await tx.update(workspaceObjectDeletionJobsTable).set({ alertedAt: now })
+        .where(eq(workspaceObjectDeletionJobsTable.id, job.id));
+      return notifications;
+    });
+    broadcastNotifications(created);
+    if (created.length) {
+      sent++;
+      logger.error({ jobId: candidate.id }, "Storage cleanup job needs operator attention");
+    }
+  }
+  return sent;
+}
 
 async function claimNextJob(excludedIds: number[]) {
   return db.transaction(async (tx) => {
@@ -84,18 +137,32 @@ export async function processObjectDeletionJobs(
       if (!response.ok && response.status !== 404) throw new Error(`Object storage returned ${response.status}`);
       const updated = await db.update(workspaceObjectDeletionJobsTable).set({
         status: "completed", processedAt: new Date(), updatedAt: new Date(),
-        lastError: null, claimToken: null, leaseExpiresAt: null,
+        lastError: null, alertedAt: null, claimToken: null, leaseExpiresAt: null,
       }).where(and(
         eq(workspaceObjectDeletionJobsTable.id, job.id),
         eq(workspaceObjectDeletionJobsTable.status, "processing"),
         eq(workspaceObjectDeletionJobsTable.claimToken, job.claimToken),
       )).returning({ id: workspaceObjectDeletionJobsTable.id });
-      if (updated.length) processed++;
+      if (updated.length) {
+        processed++;
+        // An old unread alert must not continue to appear as an active incident.
+        try {
+          await db.update(notificationsTable).set({ archivedAt: new Date() }).where(and(
+            eq(notificationsTable.entityType, "object_deletion_job"),
+            eq(notificationsTable.entityId, String(job.id)),
+            isNull(notificationsTable.archivedAt),
+          ));
+        } catch {
+          logger.error({ jobId: job.id }, "Could not archive recovered storage cleanup alert");
+        }
+      }
     } catch (error) {
       const updated = await db.update(workspaceObjectDeletionJobsTable).set({
         status: "failed", attempts: job.attempts + 1, updatedAt: new Date(),
         claimToken: null, leaseExpiresAt: null,
-        lastError: error instanceof Error ? error.message : "Unknown object deletion failure",
+        // An exception from a signer or fetch may contain a signed URL or path.
+        lastError: error instanceof Error && /^Object storage returned \d{3}$/.test(error.message)
+          ? error.message : "Object deletion failed (storage request or signing error)",
       }).where(and(
         eq(workspaceObjectDeletionJobsTable.id, job.id),
         eq(workspaceObjectDeletionJobsTable.status, "processing"),
@@ -105,6 +172,12 @@ export async function processObjectDeletionJobs(
     } finally {
       if (timeout) clearTimeout(timeout);
     }
+  }
+  try {
+    await alertFailedObjectDeletionJobs();
+  } catch {
+    // Alerting must not prevent subsequent cleanup passes or alter the lease.
+    logger.error("Storage cleanup alert pass failed");
   }
   return { processed, failed };
 }

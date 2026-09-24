@@ -14,6 +14,7 @@ import {
   documentFoldersTable,
   documentVersionsTable,
   messagesTable,
+  notificationsTable,
   locationsTable,
   pool,
   usersTable,
@@ -25,7 +26,7 @@ import {
 } from "@workspace/db";
 import { assertDeletionEligibleUser, finalizePendingAccountDeletion, startAccountDeletionWorker } from "./account-deletion";
 import { exactCommunityOwner } from "./destructive-policy";
-import { processObjectDeletionJobs } from "./object-cleanup";
+import { alertFailedObjectDeletionJobs, processObjectDeletionJobs } from "./object-cleanup";
 
 if (!process.env.TEST_DATABASE_URL || process.env.DATABASE_URL) {
   throw new Error("Destructive lifecycle integration tests require TEST_DATABASE_URL and refuse DATABASE_URL.");
@@ -667,6 +668,101 @@ describe("destructive lifecycle PostgreSQL integration", () => {
     assert.ok(completedJob.processedAt);
     await db.delete(workspaceObjectDeletionJobsTable)
       .where(eq(workspaceObjectDeletionJobsTable.objectPath, objectPath));
+  });
+
+  test("cleanup alerts once at three failures, redacts storage details, and clears on recovery", async () => {
+    const objectPath = `/objects/integration/${suffix}-alert`;
+    const [existingAdmin] = await db.select({ id: usersTable.clerkId }).from(usersTable)
+      .where(eq(usersTable.role, "admin")).limit(1);
+    if (!existingAdmin) await db.update(usersTable).set({ role: "admin" })
+      .where(eq(usersTable.clerkId, ids.owner));
+    const adminId = existingAdmin?.id ?? ids.owner;
+    let jobId: number | undefined;
+    try {
+      const [job] = await db.insert(workspaceObjectDeletionJobsTable)
+        .values({ objectPath, context: "integration" }).returning({ id: workspaceObjectDeletionJobsTable.id });
+      jobId = job.id;
+      const secret = "https://storage.test/private?signature=do-not-expose";
+      const failing = {
+        signObjectUrl: async () => secret,
+        fetchImpl: async () => { throw new Error(secret); },
+      };
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        assert.deepEqual(await processObjectDeletionJobs(1, failing), { processed: 0, failed: 1 });
+        const notices = await db.select().from(notificationsTable).where(and(
+          eq(notificationsTable.entityType, "object_deletion_job"),
+          eq(notificationsTable.entityId, String(jobId)),
+        ));
+        assert.equal(notices.length, attempt < 3 ? 0 : 1);
+        if (notices[0]) {
+          assert.equal(notices[0].userId, adminId);
+          assert.match(notices[0].body, new RegExp(`job #${jobId}`));
+          assert.ok(!notices[0].body.includes(secret));
+          assert.ok(!notices[0].body.includes(objectPath));
+        }
+      }
+      const [failed] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.id, jobId));
+      assert.ok(failed.alertedAt);
+      assert.ok(!failed.lastError?.includes(secret));
+      assert.equal(await alertFailedObjectDeletionJobs(), 0);
+      assert.deepEqual(await processObjectDeletionJobs(1, {
+        signObjectUrl: async () => secret,
+        fetchImpl: async () => new Response(null, { status: 204 }),
+      }), { processed: 1, failed: 0 });
+      const [recovered] = await db.select().from(workspaceObjectDeletionJobsTable)
+        .where(eq(workspaceObjectDeletionJobsTable.id, jobId));
+      assert.equal(recovered.alertedAt, null);
+      assert.equal(recovered.status, "completed");
+      const [notice] = await db.select().from(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "object_deletion_job"),
+        eq(notificationsTable.entityId, String(jobId)),
+      ));
+      assert.ok(notice.archivedAt);
+    } finally {
+      if (jobId) {
+        await db.delete(notificationsTable).where(and(
+          eq(notificationsTable.entityType, "object_deletion_job"),
+          eq(notificationsTable.entityId, String(jobId)),
+        ));
+        await db.delete(workspaceObjectDeletionJobsTable).where(eq(workspaceObjectDeletionJobsTable.id, jobId));
+      }
+      if (!existingAdmin) await db.update(usersTable).set({ role: "member" })
+        .where(eq(usersTable.clerkId, ids.owner));
+    }
+  });
+
+  test("an old failed cleanup job alerts even before its third attempt", async () => {
+    const objectPath = `/objects/integration/${suffix}-aged-alert`;
+    const [existingAdmin] = await db.select({ id: usersTable.clerkId }).from(usersTable)
+      .where(eq(usersTable.role, "admin")).limit(1);
+    if (!existingAdmin) await db.update(usersTable).set({ role: "admin" })
+      .where(eq(usersTable.clerkId, ids.owner));
+    let jobId: number | undefined;
+    try {
+      const [job] = await db.insert(workspaceObjectDeletionJobsTable).values({
+        objectPath, context: "integration", status: "failed", attempts: 1,
+        createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      }).returning({ id: workspaceObjectDeletionJobsTable.id });
+      jobId = job.id;
+      assert.equal(await alertFailedObjectDeletionJobs(), 1);
+      assert.equal(await alertFailedObjectDeletionJobs(), 0);
+      const [notice] = await db.select().from(notificationsTable).where(and(
+        eq(notificationsTable.entityType, "object_deletion_job"),
+        eq(notificationsTable.entityId, String(jobId)),
+      ));
+      assert.equal(notice.userId, existingAdmin?.id ?? ids.owner);
+    } finally {
+      if (jobId) {
+        await db.delete(notificationsTable).where(and(
+          eq(notificationsTable.entityType, "object_deletion_job"),
+          eq(notificationsTable.entityId, String(jobId)),
+        ));
+        await db.delete(workspaceObjectDeletionJobsTable).where(eq(workspaceObjectDeletionJobsTable.id, jobId));
+      }
+      if (!existingAdmin) await db.update(usersTable).set({ role: "member" })
+        .where(eq(usersTable.clerkId, ids.owner));
+    }
   });
 
   test("simultaneous cleanup passes issue only one DELETE per claimed job", async () => {

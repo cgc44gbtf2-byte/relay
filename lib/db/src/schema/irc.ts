@@ -731,6 +731,7 @@ export const workspaceObjectDeletionJobsTable = pgTable("irc_workspace_object_de
   leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   attempts: integer("attempts").notNull().default(0),
   lastError: text("last_error"),
+  alertedAt: timestamp("alerted_at", { withTimezone: true }),
   context: text("context").notNull().default("workspace"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
