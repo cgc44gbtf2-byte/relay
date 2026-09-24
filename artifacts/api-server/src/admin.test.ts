@@ -2724,7 +2724,7 @@ describe("admin access controls", () => {
     }
   });
 
-  test("a non-admin cannot read the overview or update roles", async () => {
+  test("a non-admin cannot access admin views, announcements, scoped roles, suspension, or scope options", async () => {
     const overview = await apiRequest(memberSession, "/admin/overview");
     assert.equal(overview.status, 403);
     assert.deepEqual(overview.body, { error: "Admin access required." });
@@ -2747,7 +2747,22 @@ describe("admin access controls", () => {
     const beforeCustomRoles = await pool.query(
       "SELECT key FROM irc_custom_roles ORDER BY key",
     );
-    const [roleAssignment, customRole] = await Promise.all([
+    const beforeAnnouncements = await pool.query(
+      "SELECT id FROM irc_server_announcements ORDER BY id",
+    );
+    const beforeAudit = await pool.query(
+      "SELECT id FROM irc_admin_audit_logs ORDER BY id",
+    );
+    const beforeAccountStatus = await pool.query<{ account_status: string }>(
+      "SELECT account_status FROM irc_users WHERE clerk_id = $1",
+      [adminSession.userId],
+    );
+    const [announcement, roleAssignment, customRole, accountStatus, scopeOptions] = await Promise.all([
+      apiRequest(memberSession, "/admin/announcements", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: `Unauthorized announcement ${randomUUID()}` }),
+      }),
       apiRequest(memberSession, "/admin/role-assignments", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2766,8 +2781,14 @@ describe("admin access controls", () => {
           permissions: ["manage_community_members"],
         }),
       }),
+      apiRequest(memberSession, `/admin/users/${adminSession.userId}/account-status`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accountStatus: "suspended" }),
+      }),
+      apiRequest(memberSession, "/admin/scope-options"),
     ]);
-    for (const response of [roleAssignment, customRole]) {
+    for (const response of [announcement, roleAssignment, customRole, accountStatus, scopeOptions]) {
       assert.equal(response.status, 403, JSON.stringify(response));
       assert.deepEqual(response.body, { error: "Admin access required." });
     }
@@ -2779,6 +2800,180 @@ describe("admin access controls", () => {
       (await pool.query("SELECT key FROM irc_custom_roles ORDER BY key")).rows,
       beforeCustomRoles.rows,
     );
+    assert.deepEqual(
+      (await pool.query("SELECT id FROM irc_server_announcements ORDER BY id")).rows,
+      beforeAnnouncements.rows,
+    );
+    assert.deepEqual(
+      (await pool.query("SELECT id FROM irc_admin_audit_logs ORDER BY id")).rows,
+      beforeAudit.rows,
+    );
+    assert.deepEqual(
+      (await pool.query("SELECT account_status FROM irc_users WHERE clerk_id = $1", [adminSession.userId])).rows,
+      beforeAccountStatus.rows,
+    );
+  });
+
+  test("rejects scoped roles with mismatched community, category, or channel relationships and audits a valid grant", async () => {
+    const suffix = randomUUID();
+    const communityAResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_communities (name, slug, owner_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [`Scope A ${suffix}`, `scope-a-${suffix}`, adminSession.userId],
+    );
+    const communityBResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_communities (name, slug, owner_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [`Scope B ${suffix}`, `scope-b-${suffix}`, adminSession.userId],
+    );
+    const communityA = communityAResult.rows[0].id;
+    const communityB = communityBResult.rows[0].id;
+    const categoryAResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_categories (name, owner_id, community_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [`Category A ${suffix}`, adminSession.userId, communityA],
+    );
+    const categoryBResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_categories (name, owner_id, community_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [`Category B ${suffix}`, adminSession.userId, communityB],
+    );
+    const categoryA = categoryAResult.rows[0].id;
+    const categoryB = categoryBResult.rows[0].id;
+    const channelResult = await pool.query<{ id: number }>(
+      `INSERT INTO irc_channels (name, owner_id, community_id, category_id)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [`channel-${suffix}`, adminSession.userId, communityA, categoryA],
+    );
+    const channelId = channelResult.rows[0].id;
+    const assignmentDetails = "department_admin on category";
+    let assignmentId: number | null = null;
+    const targetProfile = await pool.query<{ display_name: string }>(
+      "SELECT display_name FROM irc_users WHERE clerk_id = $1",
+      [memberSession.userId],
+    );
+
+    const postAssignment = (body: object) => apiRequest(adminSession, "/admin/role-assignments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    try {
+      const beforeAssignments = await pool.query(
+        `SELECT id, role, scope_type, community_id, category_id, channel_id
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = ANY($2::int[])
+         ORDER BY id`,
+        [memberSession.userId, [communityA, communityB]],
+      );
+      const beforeGrantAudit = await pool.query(
+        `SELECT id FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND target_id = $2 AND action = 'granted_scoped_role'
+         ORDER BY id`,
+        [adminSession.userId, memberSession.userId],
+      );
+      const mismatches = await Promise.all([
+        postAssignment({
+          userId: memberSession.userId,
+          role: "department_admin",
+          scopeType: "category",
+          communityId: communityB,
+          categoryId: categoryA,
+        }),
+        postAssignment({
+          userId: memberSession.userId,
+          role: "moderator",
+          scopeType: "channel",
+          communityId: communityB,
+          categoryId: categoryA,
+          channelId,
+        }),
+        postAssignment({
+          userId: memberSession.userId,
+          role: "moderator",
+          scopeType: "channel",
+          communityId: communityA,
+          categoryId: categoryB,
+          channelId,
+        }),
+      ]);
+      for (const response of mismatches) {
+        assert.equal(response.status, 400, JSON.stringify(response));
+      }
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT id, role, scope_type, community_id, category_id, channel_id
+           FROM irc_user_roles
+           WHERE user_id = $1 AND community_id = ANY($2::int[])
+           ORDER BY id`,
+          [memberSession.userId, [communityA, communityB]],
+        )).rows,
+        beforeAssignments.rows,
+      );
+      assert.deepEqual(
+        (await pool.query(
+          `SELECT id FROM irc_admin_audit_logs
+           WHERE actor_id = $1 AND target_id = $2 AND action = 'granted_scoped_role'
+           ORDER BY id`,
+          [adminSession.userId, memberSession.userId],
+        )).rows,
+        beforeGrantAudit.rows,
+      );
+
+      const validAssignment = await postAssignment({
+        userId: memberSession.userId,
+        role: "department_admin",
+        scopeType: "category",
+        communityId: communityA,
+        categoryId: categoryA,
+      });
+      assert.equal(validAssignment.status, 201, JSON.stringify(validAssignment));
+      assert.ok(validAssignment.body && typeof validAssignment.body === "object");
+      assignmentId = (validAssignment.body as { id: number }).id;
+
+      const audit = await pool.query(
+        `SELECT actor_id, actor_display_name, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND action = 'granted_scoped_role'
+           AND target_id = $2 AND target_label = $3 AND details = $4`,
+        [
+          adminSession.userId,
+          memberSession.userId,
+          targetProfile.rows[0].display_name,
+          assignmentDetails,
+        ],
+      );
+      assert.deepEqual(audit.rows, [{
+        actor_id: adminSession.userId,
+        actor_display_name: (await pool.query<{ display_name: string }>(
+          "SELECT display_name FROM irc_users WHERE clerk_id = $1",
+          [adminSession.userId],
+        )).rows[0].display_name,
+        action: "granted_scoped_role",
+        target_id: memberSession.userId,
+        target_label: targetProfile.rows[0].display_name,
+        details: assignmentDetails,
+      }]);
+    } finally {
+      if (assignmentId !== null) {
+        await pool.query("DELETE FROM irc_user_roles WHERE id = $1", [assignmentId]);
+      }
+      await pool.query(
+        `DELETE FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND action = 'granted_scoped_role'
+           AND target_id = $2 AND details = $3`,
+        [adminSession.userId, memberSession.userId, assignmentDetails],
+      );
+      await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
+      await pool.query("DELETE FROM irc_categories WHERE id = ANY($1::int[])", [[categoryA, categoryB]]);
+      await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [[communityA, communityB]]);
+    }
   });
 
   test("a non-admin cannot use health, user, or channel maintenance tools", async () => {
@@ -3395,6 +3590,8 @@ describe("admin access controls", () => {
   test("prevents suspended accounts from changing their profile", async () => {
     const suspendedSession = await createTestSession("suspended_profile");
     let suspended = false;
+    let messageId: string | null = null;
+    const messageBody = `Suspension preserves messages ${randomUUID()}`;
 
     try {
       const initial = await apiRequest(suspendedSession, "/me");
@@ -3404,6 +3601,13 @@ describe("admin access controls", () => {
       const initialDisplayName = (
         initial.body as { displayName?: unknown }
       ).displayName;
+      const seededMessage = await pool.query<{ id: string }>(
+        `INSERT INTO irc_messages (sender_id, recipient_id, body)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [suspendedSession.userId, adminSession.userId, messageBody],
+      );
+      messageId = seededMessage.rows[0].id;
 
       const suspension = await apiRequest(
         adminSession,
@@ -3430,6 +3634,14 @@ describe("admin access controls", () => {
         error: "This account is suspended.",
       });
 
+      const deniedProfileRead = await apiRequest(suspendedSession, "/me");
+      const deniedMessageRead = await apiRequest(
+        suspendedSession,
+        `/dm/${adminSession.userId}/messages`,
+      );
+      assert.equal(deniedProfileRead.status, 403, JSON.stringify(deniedProfileRead));
+      assert.equal(deniedMessageRead.status, 403, JSON.stringify(deniedMessageRead));
+
       const stored = await pool.query<{
         username: string;
         display_name: string;
@@ -3447,6 +3659,62 @@ describe("admin access controls", () => {
           account_status: "suspended",
         },
       ]);
+      const preservedMessage = await pool.query<{ id: string; body: string }>(
+        "SELECT id, body FROM irc_messages WHERE id = $1 AND sender_id = $2",
+        [messageId, suspendedSession.userId],
+      );
+      assert.deepEqual(preservedMessage.rows, [{ id: messageId, body: messageBody }]);
+
+      const suspensionAudit = await pool.query(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND target_id = $2 AND action = 'suspended_user'`,
+        [adminSession.userId, suspendedSession.userId],
+      );
+      assert.deepEqual(suspensionAudit.rows, [{
+        actor_id: adminSession.userId,
+        action: "suspended_user",
+        target_id: suspendedSession.userId,
+        target_label: suspendedSession.userId,
+        details: "Account status changed to suspended",
+      }]);
+
+      const restoration = await apiRequest(
+        adminSession,
+        `/admin/users/${suspendedSession.userId}/account-status`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountStatus: "active" }),
+        },
+      );
+      assert.equal(restoration.status, 200, JSON.stringify(restoration));
+      suspended = false;
+
+      const restoredAudit = await pool.query(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND target_id = $2
+           AND action IN ('suspended_user', 'restored_user')
+         ORDER BY id`,
+        [adminSession.userId, suspendedSession.userId],
+      );
+      assert.deepEqual(restoredAudit.rows, [
+        {
+          actor_id: adminSession.userId,
+          action: "suspended_user",
+          target_id: suspendedSession.userId,
+          target_label: suspendedSession.userId,
+          details: "Account status changed to suspended",
+        },
+        {
+          actor_id: adminSession.userId,
+          action: "restored_user",
+          target_id: suspendedSession.userId,
+          target_label: suspendedSession.userId,
+          details: "Account status changed to active",
+        },
+      ]);
     } finally {
       if (suspended) {
         await apiRequest(
@@ -3459,6 +3727,15 @@ describe("admin access controls", () => {
           },
         );
       }
+      if (messageId !== null) {
+        await pool.query("DELETE FROM irc_messages WHERE id = $1", [messageId]);
+      }
+      await pool.query(
+        `DELETE FROM irc_admin_audit_logs
+         WHERE actor_id = $1 AND target_id = $2
+           AND action IN ('suspended_user', 'restored_user')`,
+        [adminSession.userId, suspendedSession.userId],
+      );
     }
   });
 

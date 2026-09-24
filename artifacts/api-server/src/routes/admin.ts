@@ -189,6 +189,10 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     return;
   }
   const activityCursor = parseActivityCursor(req.query.activityCursor);
+  if (activityCursor === false) {
+    res.status(400).json({ error: "Invalid activity cursor." });
+    return;
+  }
 
   const effectiveActivityOffset = activityCursor ? 0 : activityOffset;
   const activityActor = parseActivityFilter(req.query.activityActor);
@@ -301,7 +305,38 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       .offset(effectiveActivityOffset),
   ]);
   const hasMoreActivity = activity.length > activityLimit;
+  const visibleActivity = activity
+    .slice(0, activityLimit)
+    .map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
   const lastActivity = activity[Math.min(activity.length, activityLimit) - 1];
+  const nextActivityCursor = hasMoreActivity && lastActivity
+    ? encodeActivityCursor({ createdAt: lastActivity.cursorCreatedAt, id: lastActivity.id })
+    : null;
+
+  res.json({
+    stats: {
+      users: Number(userStats?.users ?? 0),
+      channels: Number(channelCount?.value ?? 0),
+      messages: Number(messageCount?.value ?? 0),
+      online: Number(userStats?.online ?? 0),
+      admins: Number(userStats?.admins ?? 0),
+    },
+    users,
+    channels,
+    categories,
+    recentMessages,
+    activity: visibleActivity,
+    activityPagination: {
+      limit: activityLimit,
+      offset: effectiveActivityOffset,
+      hasMore: hasMoreActivity,
+      nextOffset: hasMoreActivity && !activityCursor ? activityOffset + activityLimit : null,
+      nextCursor: nextActivityCursor,
+    },
+  });
+});
+
+router.post("/admin/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const actor = await adminProfile(req);
   if (!actor) {
     res.status(403).json({ error: "Admin access required." });
