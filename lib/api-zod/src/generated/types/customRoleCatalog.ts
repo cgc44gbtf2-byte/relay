@@ -6,9 +6,11 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CustomRole } from './customRole';
+import type { CustomRoleCatalogPagination } from './customRoleCatalogPagination';
 import type { CustomRoleCatalogPermissionsItem } from './customRoleCatalogPermissionsItem';
 
 export interface CustomRoleCatalog {
   roles: CustomRole[];
   permissions: CustomRoleCatalogPermissionsItem[];
+  pagination?: CustomRoleCatalogPagination;
 }

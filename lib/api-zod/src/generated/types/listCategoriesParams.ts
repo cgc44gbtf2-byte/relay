@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CollectionCursorParameter } from './collectionCursorParameter';
 import type { IrcLimitParameter } from './ircLimitParameter';
 import type { IrcOffsetParameter } from './ircOffsetParameter';
 
@@ -19,4 +20,8 @@ limit?: IrcLimitParameter;
  * @maximum 9007199254740991
  */
 offset?: IrcOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };

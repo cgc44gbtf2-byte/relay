@@ -17,10 +17,11 @@ paths:
     get:
       operationId: listAdminCustomRoles
       summary: List custom role definitions and grantable permissions
-      description: Only roles are paged; the grantable permissions catalog is unchanged.
+      description: Only roles are paged; the grantable permissions catalog is unchanged. Cursor pages use immutable-key order and the initial ceiling excludes later inserts. Deleted roles are omitted; edits to role labels are reflected when each page is read. Changes to access or filtering that affect visibility can change later pages.
       parameters:
         - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/CollectionOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Role catalog
@@ -271,7 +272,7 @@ paths:
       operationId: listCommunities
       tags: [communities]
       summary: List accessible paid workspaces
-      description: The JSON response remains an array. The named community parameters override the general limit and offset.
+      description: The JSON response remains an array. The named community parameters override the general limit and offset. Cursor pages use immutable community-ID order; the first cursor establishes a ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are returned with their current names. Changes to membership, access, or filtering that affect visibility can change later pages.
       parameters:
         - $ref: "#/components/parameters/WorkspaceLimit"
         - $ref: "#/components/parameters/WorkspaceOffset"
@@ -283,6 +284,14 @@ paths:
           in: query
           description: Overrides offset for the communities array.
           schema: { type: integer, minimum: 0, maximum: 2147483647 }
+        - name: cursor
+          in: query
+          description: Optional opaque cursor for the communities page; use start to begin cursor pagination.
+          schema: { type: string }
+        - name: communitiesCursor
+          in: query
+          description: Alias for cursor, scoped to the communities array. Supply only one of cursor and communitiesCursor.
+          schema: { type: string }
       responses:
         "200":
           description: Page of paid workspaces
@@ -298,6 +307,8 @@ paths:
             X-Next-Offset:
               description: Current offset plus the page limit (also sent on the final page).
               schema: { type: integer, minimum: 0 }
+            X-Next-Cursor:
+              $ref: "#/components/headers/ListNextCursor"
         "400":
           description: Invalid pagination
           content:
@@ -308,7 +319,7 @@ paths:
       operationId: getCommunityWorkspace
       tags: [communities]
       summary: Get workspace data and bounded collection pages
-      description: Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
+      description: Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership, access, or filter changes can change visibility between pages.
       parameters:
         - name: communityId
           in: path
@@ -322,54 +333,90 @@ paths:
         - name: employeesOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: employeesCursor
+          in: query
+          description: Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: invitationsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: invitationsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: invitationsCursor
+          in: query
+          description: Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: tasksLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: tasksOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: tasksCursor
+          in: query
+          description: Optional opaque cursor for the tasks collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: channelsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: channelsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: channelsCursor
+          in: query
+          description: Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: categoriesLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: categoriesOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: categoriesCursor
+          in: query
+          description: Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: assignmentsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: assignmentsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: assignmentsCursor
+          in: query
+          description: Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: departmentsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: departmentsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: departmentsCursor
+          in: query
+          description: Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: locationsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: locationsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: locationsCursor
+          in: query
+          description: Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: teamsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: teamsOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: teamsCursor
+          in: query
+          description: Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: teamMembershipsLimit
           in: query
           description: Opt in to bounded membership pages for the selected employees; omitted retains the full array.
@@ -377,12 +424,20 @@ paths:
         - name: teamMembershipsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: teamMembershipsCursor
+          in: query
+          description: Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+          schema: { type: string }
         - name: policiesLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - name: policiesOffset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: policiesCursor
+          in: query
+          description: Optional opaque cursor for the policies collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: announcementsLimit
           in: query
           description: Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
@@ -390,6 +445,10 @@ paths:
         - name: announcementsOffset
           in: query
           schema: { type: integer, minimum: 0, maximum: 2147483647 }
+        - name: announcementsCursor
+          in: query
+          description: Optional opaque cursor for the announcements collection; use start to begin cursor pagination.
+          schema: { type: string }
       responses:
         "200":
           description: Workspace data
@@ -406,7 +465,7 @@ paths:
       operationId: getOrganizationSnapshot
       tags: [communities]
       summary: Get only the organization directory collections for a workspace
-      description: A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+      description: A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time; membership or access changes can change visibility between pages.
       parameters:
         - name: communityId
           in: path
@@ -420,36 +479,60 @@ paths:
         - name: employeesOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: employeesCursor
+          in: query
+          description: Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: invitationsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: invitationsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: invitationsCursor
+          in: query
+          description: Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: assignmentsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: assignmentsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: assignmentsCursor
+          in: query
+          description: Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: departmentsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: departmentsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: departmentsCursor
+          in: query
+          description: Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: locationsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: locationsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: locationsCursor
+          in: query
+          description: Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: teamsLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100 }
         - name: teamsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: teamsCursor
+          in: query
+          description: Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: teamMembershipsLimit
           in: query
           description: Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
@@ -457,6 +540,10 @@ paths:
         - name: teamMembershipsOffset
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: teamMembershipsCursor
+          in: query
+          description: Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+          schema: { type: string }
         - name: If-None-Match
           in: header
           schema: { type: string }
@@ -650,7 +737,7 @@ paths:
       operationId: getAdminOverview
       tags: [admin]
       summary: Get administrative statistics and activity
-      description: Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
+      description: Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Cursor pages use immutable channel/category ID order, and each initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership and access changes can change visibility between pages. Users and recent messages retain their existing shapes.
       parameters:
         - name: channelLimit
           in: query
@@ -658,12 +745,20 @@ paths:
         - name: channelOffset
           in: query
           schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+        - name: channelCursor
+          in: query
+          description: Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: categoryLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
         - name: categoryOffset
           in: query
           schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+        - name: categoryCursor
+          in: query
+          description: Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+          schema: { type: string }
         - name: activityLimit
           in: query
           schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
@@ -778,9 +873,11 @@ paths:
       operationId: listAdminUsers
       tags: [admin]
       summary: List admin-visible users
+      description: Cursor pages use immutable user-key order and the initial creation-time ceiling excludes later inserts. Deleted users are omitted and renamed users are reflected at read time; changes to filters or account visibility can change which rows match between pages.
       parameters:
         - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/CollectionOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
         - name: q
           in: query
           schema: { type: string, maxLength: 200 }
@@ -801,14 +898,18 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /admin/role-assignments:
     get:
       operationId: listAdminRoleAssignments
       tags: [admin]
       summary: List role assignments
+      description: Cursor pages use immutable assignment-ID order and the initial creation-time ceiling excludes later inserts. Deleted assignments are omitted; joined names are reflected at read time, and changes to related membership or access can change visibility.
       parameters:
         - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/CollectionOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Page of assignments, as an array
@@ -817,15 +918,33 @@ paths:
               schema:
                 type: array
                 items: { type: object }
+          headers:
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /admin/scope-options:
     get:
       operationId: listAdminScopeOptions
       tags: [admin]
       summary: List role scope options
-      description: The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+      description: The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged. Each cursor-enabled array uses immutable ID order and its initial creation-time ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time. Changes to membership, access, or filtering that affect visibility can change later pages.
       parameters:
         - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/CollectionOffset"
+        - name: communitiesCursor
+          in: query
+          description: Optional opaque cursor for the communities array; use start to begin cursor pagination.
+          schema: { type: string }
+        - name: categoriesCursor
+          in: query
+          description: Optional opaque cursor for the categories array; use start to begin cursor pagination.
+          schema: { type: string }
+        - name: channelsCursor
+          in: query
+          description: Optional opaque cursor for the channels array; use start to begin cursor pagination.
+          schema: { type: string }
+        - name: departmentsCursor
+          in: query
+          description: Optional opaque cursor for the departments array; use start to begin cursor pagination.
+          schema: { type: string }
       responses:
         "200":
           description: Paged scope option arrays
@@ -839,6 +958,29 @@ paths:
                   categories: { type: array, items: { type: object } }
                   channels: { type: array, items: { type: object } }
                   departments: { type: array, items: { type: object } }
+                  pagination:
+                    type: object
+                    properties:
+                      communities:
+                        type: object
+                        required: [nextCursor]
+                        properties:
+                          nextCursor: { type: ["string", "null"] }
+                      categories:
+                        type: object
+                        required: [nextCursor]
+                        properties:
+                          nextCursor: { type: ["string", "null"] }
+                      channels:
+                        type: object
+                        required: [nextCursor]
+                        properties:
+                          nextCursor: { type: ["string", "null"] }
+                      departments:
+                        type: object
+                        required: [nextCursor]
+                        properties:
+                          nextCursor: { type: ["string", "null"] }
   /developer/releases:
     get:
       operationId: listDeveloperReleases
@@ -860,9 +1002,11 @@ paths:
       operationId: listChannels
       tags: [irc]
       summary: List visible channels
+      description: Cursor pages use immutable channel-ID order with an initial ceiling that excludes later inserts. Deleted channels are omitted and renamed channels are reflected at read time; membership and access changes can change visibility between pages.
       parameters:
         - $ref: "#/components/parameters/IrcLimit"
         - $ref: "#/components/parameters/IrcOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Page of channels, as an array
@@ -874,12 +1018,13 @@ paths:
           headers:
             X-Has-More: { $ref: "#/components/headers/ListHasMore" }
             X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /channels/{channelId}/public-spaces:
     get:
       operationId: listChannelPublicSpaces
       tags: [irc]
       summary: List public spaces available to the channel owner
-      description: Returns an array of eligible owned public communities, excluding the channel's current community.
+      description: Returns an array of eligible owned public communities, excluding the channel's current community. Cursor pages use immutable community-ID order with an initial ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are reflected at read time; changes to ownership, eligibility, or access can change visibility between pages.
       parameters:
         - name: channelId
           in: path
@@ -887,6 +1032,7 @@ paths:
           schema: { type: integer, minimum: 1 }
         - $ref: "#/components/parameters/IrcLimit"
         - $ref: "#/components/parameters/IrcOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Page of eligible public spaces, as an array
@@ -904,14 +1050,17 @@ paths:
           headers:
             X-Has-More: { $ref: "#/components/headers/ListHasMore" }
             X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /categories:
     get:
       operationId: listCategories
       tags: [irc]
       summary: List visible categories
+      description: Cursor pages use immutable category-ID order with an initial ceiling that excludes later inserts. Deleted categories are omitted and renamed categories are reflected at read time; membership and access changes can change visibility between pages.
       parameters:
         - $ref: "#/components/parameters/IrcLimit"
         - $ref: "#/components/parameters/IrcOffset"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Page of categories, as an array
@@ -923,15 +1072,18 @@ paths:
           headers:
             X-Has-More: { $ref: "#/components/headers/ListHasMore" }
             X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /users/search:
     get:
       operationId: searchUsers
       tags: [irc]
       summary: Search visible users
+      description: Cursor pages use immutable user creation-time/ID order with an initial ceiling that excludes later inserts. Deleted users are omitted and changed names are read at continuation time; search-filter or visibility changes may add or remove matching users between pages.
       parameters:
         - $ref: "#/components/parameters/IrcLimit"
         - $ref: "#/components/parameters/IrcOffset"
         - $ref: "#/components/parameters/SearchQuery"
+        - $ref: "#/components/parameters/CollectionCursor"
       responses:
         "200":
           description: Page of users, as an array
@@ -943,6 +1095,7 @@ paths:
           headers:
             X-Has-More: { $ref: "#/components/headers/ListHasMore" }
             X-Next-Offset: { $ref: "#/components/headers/ListNextOffset" }
+            X-Next-Cursor: { $ref: "#/components/headers/ListNextCursor" }
   /dm/threads:
     get:
       operationId: listDmThreads
@@ -1013,6 +1166,11 @@ components:
       in: query
       description: Number of records to skip.
       schema: { type: integer, minimum: 0, maximum: 2147483647, default: 0 }
+    CollectionCursor:
+      name: cursor
+      in: query
+      description: Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+      schema: { type: string }
     WorkspaceLimit:
       name: limit
       in: query
@@ -1052,6 +1210,9 @@ components:
     ListNextOffset:
       description: Offset for the next page when X-Has-More is true (omitted on the final page or for too-short search queries).
       schema: { type: integer, minimum: 0 }
+    ListNextCursor:
+      description: Opaque continuation cursor for the next page; omitted when cursor pagination is not requested or no further page exists.
+      schema: { type: string }
   schemas:
     Notification:
       type: object
@@ -1164,6 +1325,7 @@ components:
         limit: { type: integer, minimum: 1, maximum: 100 }
         offset: { type: integer, minimum: 0 }
         hasMore: { type: boolean }
+        nextCursor: { type: ["string", "null"], description: Opaque continuation cursor when cursor pagination is requested; null when complete. }
     AdminOverview:
       type: object
       required: [stats, users, channels, categories, collectionPagination, recentMessages, activity, activityPagination]
@@ -1261,6 +1423,11 @@ components:
             properties:
               key: { type: string }
               description: { type: string }
+        pagination:
+          type: object
+          required: [nextCursor]
+          properties:
+            nextCursor: { type: ["string", "null"], description: Opaque cursor for the next role page, or null when complete. }
     HealthStatus:
       type: object
       properties:

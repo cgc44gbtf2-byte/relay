@@ -15,4 +15,9 @@ export interface PageInfo {
   /** @minimum 0 */
   offset: number;
   hasMore: boolean;
+  /**
+     * Opaque continuation cursor when cursor pagination is requested; null when complete.
+     * @nullable
+     */
+  nextCursor?: string | null;
 }

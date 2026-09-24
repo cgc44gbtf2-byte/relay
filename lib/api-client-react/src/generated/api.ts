@@ -128,7 +128,7 @@ export const getListAdminCustomRolesUrl = (params?: ListAdminCustomRolesParams,)
 }
 
 /**
- * Only roles are paged; the grantable permissions catalog is unchanged.
+ * Only roles are paged; the grantable permissions catalog is unchanged. Cursor pages use immutable-key order and the initial ceiling excludes later inserts. Deleted roles are omitted; edits to role labels are reflected when each page is read. Changes to access or filtering that affect visibility can change later pages.
  * @summary List custom role definitions and grantable permissions
  */
 export const listAdminCustomRoles = async (params?: ListAdminCustomRolesParams, options?: Parameters<typeof customFetch>[1]): Promise<CustomRoleCatalog> => {
@@ -1138,7 +1138,7 @@ export const getListCommunitiesUrl = (params?: ListCommunitiesParams,) => {
 }
 
 /**
- * The JSON response remains an array. The named community parameters override the general limit and offset.
+ * The JSON response remains an array. The named community parameters override the general limit and offset. Cursor pages use immutable community-ID order; the first cursor establishes a ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are returned with their current names. Changes to membership, access, or filtering that affect visibility can change later pages.
  * @summary List accessible paid workspaces
  */
 export const listCommunities = async (params?: ListCommunitiesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListCommunities200Item[]> => {
@@ -1224,7 +1224,7 @@ export const getGetCommunityWorkspaceUrl = (communityId: number,
 }
 
 /**
- * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
+ * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership, access, or filter changes can change visibility between pages.
  * @summary Get workspace data and bounded collection pages
  */
 export const getCommunityWorkspace = async (communityId: number,
@@ -1314,7 +1314,7 @@ export const getGetOrganizationSnapshotUrl = (communityId: number,
 }
 
 /**
- * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+ * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time; membership or access changes can change visibility between pages.
  * @summary Get only the organization directory collections for a workspace
  */
 export const getOrganizationSnapshot = async (communityId: number,
@@ -1954,7 +1954,7 @@ export const getGetAdminOverviewUrl = (params?: GetAdminOverviewParams,) => {
 }
 
 /**
- * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
+ * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Cursor pages use immutable channel/category ID order, and each initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership and access changes can change visibility between pages. Users and recent messages retain their existing shapes.
  * @summary Get administrative statistics and activity
  */
 export const getAdminOverview = async (params?: GetAdminOverviewParams, options?: Parameters<typeof customFetch>[1]): Promise<AdminOverview> => {
@@ -2208,6 +2208,7 @@ export const getListAdminUsersUrl = (params?: ListAdminUsersParams,) => {
 }
 
 /**
+ * Cursor pages use immutable user-key order and the initial creation-time ceiling excludes later inserts. Deleted users are omitted and renamed users are reflected at read time; changes to filters or account visibility can change which rows match between pages.
  * @summary List admin-visible users
  */
 export const listAdminUsers = async (params?: ListAdminUsersParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminUsers200Item[]> => {
@@ -2292,6 +2293,7 @@ export const getListAdminRoleAssignmentsUrl = (params?: ListAdminRoleAssignments
 }
 
 /**
+ * Cursor pages use immutable assignment-ID order and the initial creation-time ceiling excludes later inserts. Deleted assignments are omitted; joined names are reflected at read time, and changes to related membership or access can change visibility.
  * @summary List role assignments
  */
 export const listAdminRoleAssignments = async (params?: ListAdminRoleAssignmentsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminRoleAssignments200Item[]> => {
@@ -2376,7 +2378,7 @@ export const getListAdminScopeOptionsUrl = (params?: ListAdminScopeOptionsParams
 }
 
 /**
- * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+ * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged. Each cursor-enabled array uses immutable ID order and its initial creation-time ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time. Changes to membership, access, or filtering that affect visibility can change later pages.
  * @summary List role scope options
  */
 export const listAdminScopeOptions = async (params?: ListAdminScopeOptionsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListAdminScopeOptions200> => {
@@ -2545,6 +2547,7 @@ export const getListChannelsUrl = (params?: ListChannelsParams,) => {
 }
 
 /**
+ * Cursor pages use immutable channel-ID order with an initial ceiling that excludes later inserts. Deleted channels are omitted and renamed channels are reflected at read time; membership and access changes can change visibility between pages.
  * @summary List visible channels
  */
 export const listChannels = async (params?: ListChannelsParams, options?: Parameters<typeof customFetch>[1]): Promise<ListChannels200Item[]> => {
@@ -2630,7 +2633,7 @@ export const getListChannelPublicSpacesUrl = (channelId: number,
 }
 
 /**
- * Returns an array of eligible owned public communities, excluding the channel's current community.
+ * Returns an array of eligible owned public communities, excluding the channel's current community. Cursor pages use immutable community-ID order with an initial ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are reflected at read time; changes to ownership, eligibility, or access can change visibility between pages.
  * @summary List public spaces available to the channel owner
  */
 export const listChannelPublicSpaces = async (channelId: number,
@@ -2719,6 +2722,7 @@ export const getListCategoriesUrl = (params?: ListCategoriesParams,) => {
 }
 
 /**
+ * Cursor pages use immutable category-ID order with an initial ceiling that excludes later inserts. Deleted categories are omitted and renamed categories are reflected at read time; membership and access changes can change visibility between pages.
  * @summary List visible categories
  */
 export const listCategories = async (params?: ListCategoriesParams, options?: Parameters<typeof customFetch>[1]): Promise<ListCategories200Item[]> => {
@@ -2803,6 +2807,7 @@ export const getSearchUsersUrl = (params?: SearchUsersParams,) => {
 }
 
 /**
+ * Cursor pages use immutable user creation-time/ID order with an initial ceiling that excludes later inserts. Deleted users are omitted and changed names are read at continuation time; search-filter or visibility changes may add or remove matching users between pages.
  * @summary Search visible users
  */
 export const searchUsers = async (params?: SearchUsersParams, options?: Parameters<typeof customFetch>[1]): Promise<SearchUsers200Item[]> => {

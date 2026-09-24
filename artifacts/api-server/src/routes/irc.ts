@@ -132,6 +132,126 @@ function setListPageHeaders(res: Response, hasMore: boolean, nextOffset: number)
   if (hasMore) res.set("X-Next-Offset", String(nextOffset));
 }
 
+type CursorToken = { after: unknown | null; ceiling: unknown | null; context: string };
+type UserCursorKey = { createdAt: string; clerkId: string };
+
+export function cursorContext(route: string, userId: string, binding = ""): string {
+  return createHash("sha256").update(`${route}\0${userId}\0${binding}`).digest("hex");
+}
+
+export function cursorListRequest(
+  req: AuthenticatedRequest,
+  res: Response,
+  context: string,
+  isAfter: (value: unknown) => boolean,
+  isCeiling: (value: unknown) => boolean,
+  validPair: (after: unknown, ceiling: unknown) => boolean = () => true,
+): { page: { limit: number; offset: number }; cursor: CursorToken | null } | null {
+  const page = parseCollectionPage(req.query, MAX_LIST_PAGE_SIZE);
+  if (!page) {
+    res.status(400).json({ error: `Invalid pagination: limit must be 1–${MAX_LIST_PAGE_SIZE} and offset must be a nonnegative safe integer.` });
+    return null;
+  }
+  if (req.query.cursor === undefined) return { page, cursor: null };
+  const raw = req.query.cursor;
+  if (typeof raw !== "string" || req.query.offset !== undefined) {
+    res.status(400).json({ error: "Invalid cursor pagination." });
+    return null;
+  }
+  if (raw === "start") return { page, cursor: { after: null, ceiling: null, context } };
+  try {
+    if (raw.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(raw) || Buffer.from(raw, "base64url").toString("base64url") !== raw) {
+      throw new Error("Invalid base64url cursor.");
+    }
+    const decoded: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) throw new Error("Invalid cursor object.");
+    const token = decoded as Record<string, unknown>;
+    if (Object.keys(token).length !== 3 || !("after" in token) || !("ceiling" in token) || !("context" in token)
+      || token.context !== context
+      || (token.after !== null && !isAfter(token.after))
+      || (token.ceiling !== null && !isCeiling(token.ceiling))
+      || token.after === null
+      || token.ceiling === null
+      || !validPair(token.after, token.ceiling)) {
+      throw new Error("Invalid cursor fields.");
+    }
+    return { page, cursor: { after: token.after, ceiling: token.ceiling, context } };
+  } catch {
+    res.status(400).json({ error: "Invalid cursor pagination." });
+    return null;
+  }
+}
+
+export async function cursorVisibleListPage<T, A, C>(
+  after: A | null,
+  ceiling: C | null,
+  limit: number,
+  initialCeiling: () => Promise<C | null>,
+  fetchBatch: (after: A | null, ceiling: C, batchSize: number) => Promise<T[]>,
+  afterKey: (row: T) => A,
+  visible: (rows: T[]) => Promise<T[]>,
+): Promise<{ rows: T[]; hasMore: boolean; nextAfter: A | null; ceiling: C | null }> {
+  const fixedCeiling = ceiling ?? await initialCeiling();
+  if (fixedCeiling === null) return { rows: [], hasMore: false, nextAfter: null, ceiling: null };
+  const selected: T[] = [];
+  let scanAfter = after;
+  while (selected.length <= limit) {
+    const batch = await fetchBatch(scanAfter, fixedCeiling, MAX_LIST_PAGE_SIZE);
+    if (batch.length === 0) break;
+    scanAfter = afterKey(batch[batch.length - 1]);
+    for (const row of await visible(batch)) {
+      selected.push(row);
+      if (selected.length > limit) break;
+    }
+    if (batch.length < MAX_LIST_PAGE_SIZE) break;
+  }
+  const rows = selected.slice(0, limit);
+  return {
+    rows,
+    hasMore: selected.length > limit,
+    nextAfter: selected.length > limit && rows.length ? afterKey(rows[rows.length - 1]) : null,
+    ceiling: fixedCeiling,
+  };
+}
+
+function setCursorPageHeaders<A, C>(
+  res: Response,
+  page: { hasMore: boolean; nextAfter: A | null; ceiling: C | null },
+  context: string,
+): void {
+  res.set("X-Has-More", String(page.hasMore));
+  if (page.hasMore && page.nextAfter !== null && page.ceiling !== null) {
+    res.set("X-Next-Cursor", Buffer.from(JSON.stringify({
+      after: page.nextAfter,
+      ceiling: page.ceiling,
+      context,
+    })).toString("base64url"));
+  }
+}
+
+function isPositiveCursorId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isUserCursorAfter(value: unknown): value is UserCursorKey {
+  return isUserCursorKey(value);
+}
+
+function isUserCursorCeiling(value: unknown): value is UserCursorKey {
+  return isUserCursorKey(value);
+}
+
+function isUserCursorKey(value: unknown): value is UserCursorKey {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const key = value as Record<string, unknown>;
+  return Object.keys(key).length === 2
+    && typeof key.createdAt === "string"
+    && Number.isFinite(Date.parse(key.createdAt))
+    && typeof key.clerkId === "string"
+    && key.clerkId.length > 0
+    && key.clerkId.length <= 256;
+}
+
 function enforceRateLimit(
   req: AuthenticatedRequest,
   res: Response,
@@ -438,8 +558,11 @@ router.patch("/me", requireAuth, async (req: AuthenticatedRequest, res): Promise
 
 router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const page = validatedListPage(req, res);
-  if (!page) return;
+  const context = cursorContext("/channels", userId);
+  const request = cursorListRequest(req, res, context, isPositiveCursorId, isPositiveCursorId,
+    (after, ceiling) => typeof after === "number" && typeof ceiling === "number" && after <= ceiling);
+  if (!request) return;
+  const page = request.page;
   await ensureProfile(userId);
   await ensureDefaults(userId);
   const joinedIds = new Set<number>();
@@ -461,11 +584,7 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
     permissionAccess.set(communityId, access);
     return access;
   };
-  const { rows: channels, hasMore } = await visibleListPage<typeof channelsTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
-    (after) => db.select().from(channelsTable)
-      .where(after ? or(gt(channelsTable.name, after.name), and(eq(channelsTable.name, after.name), gt(channelsTable.id, after.id))) : undefined)
-      .orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(MAX_LIST_PAGE_SIZE),
-    async (batch) => {
+  const channelVisibility = async (batch: Array<typeof channelsTable.$inferSelect>) => {
       const ids = batch.map((channel) => channel.id);
       const communityIds = [...new Set(batch.flatMap((channel) => channel.communityId === null ? [] : [channel.communityId]))];
       const [joined, pending, communities, memberships] = await Promise.all([
@@ -498,7 +617,27 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
         return !channel.isPrivate || joinedIds.has(channel.id) ? channel : null;
       }));
       return visible.filter((channel): channel is typeof batch[number] => channel !== null);
-    });
+  };
+  const channelPage = request.cursor
+    ? await cursorVisibleListPage(
+      request.cursor.after as number | null,
+      request.cursor.ceiling as number | null,
+      page.limit,
+      async () => (await db.select({ id: channelsTable.id }).from(channelsTable)
+        .orderBy(desc(channelsTable.id)).limit(1))[0]?.id ?? null,
+      (after, ceiling, batchSize) => db.select().from(channelsTable)
+        .where(and(after === null ? undefined : gt(channelsTable.id, after), lte(channelsTable.id, ceiling)))
+        .orderBy(asc(channelsTable.id)).limit(batchSize),
+      (channel) => channel.id,
+      channelVisibility,
+    )
+    : await visibleListPage<typeof channelsTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
+      (after) => db.select().from(channelsTable)
+        .where(after ? or(gt(channelsTable.name, after.name), and(eq(channelsTable.name, after.name), gt(channelsTable.id, after.id))) : undefined)
+        .orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(MAX_LIST_PAGE_SIZE),
+      channelVisibility).then((result) => ({ ...result, nextAfter: null, ceiling: null }));
+  const channels = channelPage.rows;
+  const hasMore = channelPage.hasMore;
   const counts = channels.length
     ? await db
       .select({
@@ -524,7 +663,8 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
   }));
   const categories = visibleCategories.filter((category): category is typeof allCategories[number] => category !== null);
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
-  setListPageHeaders(res, hasMore, page.offset + channels.length);
+  if (request.cursor) setCursorPageHeaders(res, channelPage, context);
+  else setListPageHeaders(res, hasMore, page.offset + channels.length);
   res.json(channels.map((channel) => ({
     ...channel,
     communityName: channel.communityId === null ? "Public network" : communityNames.get(channel.communityId) ?? null,
@@ -546,13 +686,12 @@ router.get("/channels", requireAuth, async (req: AuthenticatedRequest, res): Pro
 
 router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const page = validatedListPage(req, res);
-  if (!page) return;
-  const { rows: categories, hasMore } = await visibleListPage<typeof categoriesTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
-    (after) => db.select().from(categoriesTable)
-      .where(after ? or(gt(categoriesTable.name, after.name), and(eq(categoriesTable.name, after.name), gt(categoriesTable.id, after.id))) : undefined)
-      .orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(MAX_LIST_PAGE_SIZE),
-    async (batch) => {
+  const context = cursorContext("/categories", userId);
+  const request = cursorListRequest(req, res, context, isPositiveCursorId, isPositiveCursorId,
+    (after, ceiling) => typeof after === "number" && typeof ceiling === "number" && after <= ceiling);
+  if (!request) return;
+  const page = request.page;
+  const categoryVisibility = async (batch: Array<typeof categoriesTable.$inferSelect>) => {
       const communityIds = [...new Set(batch.flatMap((category) => category.communityId === null ? [] : [category.communityId]))];
       const [permissions, categoryCommunities] = await Promise.all([
         permissionsForCommunities(userId, communityIds, ["view_business", "manage_community"]),
@@ -567,8 +706,28 @@ router.get("/categories", requireAuth, async (req: AuthenticatedRequest, res): P
         const access = permissions.get(category.communityId);
         return Boolean(access?.has("view_business") || access?.has("manage_community"));
       });
-    });
-  setListPageHeaders(res, hasMore, page.offset + categories.length);
+  };
+  const categoryPage = request.cursor
+    ? await cursorVisibleListPage(
+      request.cursor.after as number | null,
+      request.cursor.ceiling as number | null,
+      page.limit,
+      async () => (await db.select({ id: categoriesTable.id }).from(categoriesTable)
+        .orderBy(desc(categoriesTable.id)).limit(1))[0]?.id ?? null,
+      (after, ceiling, batchSize) => db.select().from(categoriesTable)
+        .where(and(after === null ? undefined : gt(categoriesTable.id, after), lte(categoriesTable.id, ceiling)))
+        .orderBy(asc(categoriesTable.id)).limit(batchSize),
+      (category) => category.id,
+      categoryVisibility,
+    )
+    : await visibleListPage<typeof categoriesTable.$inferSelect>(page, MAX_LIST_PAGE_SIZE,
+      (after) => db.select().from(categoriesTable)
+        .where(after ? or(gt(categoriesTable.name, after.name), and(eq(categoriesTable.name, after.name), gt(categoriesTable.id, after.id))) : undefined)
+        .orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(MAX_LIST_PAGE_SIZE),
+      categoryVisibility).then((result) => ({ ...result, nextAfter: null, ceiling: null }));
+  const categories = categoryPage.rows;
+  if (request.cursor) setCursorPageHeaders(res, categoryPage, context);
+  else setListPageHeaders(res, categoryPage.hasMore, page.offset + categories.length);
   res.json(categories);
 });
 
@@ -1268,8 +1427,11 @@ router.post("/channels/:channelId/file-messages", requireAuth, async (req: Authe
 
 router.get("/channels/:channelId/public-spaces", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
-  const page = validatedListPage(req, res);
-  if (!page) return;
+  const context = cursorContext("/channels/:channelId/public-spaces", userId, param(req, "channelId"));
+  const request = cursorListRequest(req, res, context, isPositiveCursorId, isPositiveCursorId,
+    (after, ceiling) => typeof after === "number" && typeof ceiling === "number" && after <= ceiling);
+  if (!request) return;
+  const page = request.page;
   const channelId = Number(param(req, "channelId"));
   if (!Number.isSafeInteger(channelId) || channelId < 1) {
     res.status(404).json(channelNotFoundError);
@@ -1292,12 +1454,30 @@ router.get("/channels/:channelId/public-spaces", requireAuth, async (req: Authen
     return;
   }
   const active = Boolean(await subscriberPaidThrough(userId));
-  const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name, plan: communitiesTable.plan })
-    .from(communitiesTable)
-    .where(and(eq(communitiesTable.ownerId, userId),
+  const eligibleCommunities = and(eq(communitiesTable.ownerId, userId),
       inArray(communitiesTable.plan, active ? ["free_community", "purchased_community", "subscriber_community"] : ["free_community", "purchased_community"]),
       channel.communityId === null ? undefined : sql`${communitiesTable.id} <> ${channel.communityId}`,
-      eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active")))
+      eq(communitiesTable.isPrivate, false), eq(communitiesTable.status, "active"));
+  if (request.cursor) {
+    const ownedPage = await cursorVisibleListPage(
+      request.cursor.after as number | null,
+      request.cursor.ceiling as number | null,
+      page.limit,
+      async () => (await db.select({ id: communitiesTable.id }).from(communitiesTable)
+        .where(eligibleCommunities).orderBy(desc(communitiesTable.id)).limit(1))[0]?.id ?? null,
+      (after, ceiling, batchSize) => db.select({ id: communitiesTable.id, name: communitiesTable.name, plan: communitiesTable.plan })
+        .from(communitiesTable)
+        .where(and(eligibleCommunities, after === null ? undefined : gt(communitiesTable.id, after), lte(communitiesTable.id, ceiling)))
+        .orderBy(asc(communitiesTable.id)).limit(batchSize),
+      (community) => community.id,
+      async (rows) => rows,
+    );
+    setCursorPageHeaders(res, ownedPage, context);
+    res.json(ownedPage.rows);
+    return;
+  }
+  const owned = await db.select({ id: communitiesTable.id, name: communitiesTable.name, plan: communitiesTable.plan })
+    .from(communitiesTable).where(eligibleCommunities)
     .orderBy(asc(communitiesTable.name), asc(communitiesTable.id))
     .limit(page.limit + 1).offset(page.offset);
   setListPageHeaders(res, owned.length > page.limit, page.offset + page.limit);
@@ -1893,21 +2073,58 @@ router.post("/channels/:channelId/moderation", requireAuth, async (req: Authenti
 router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   if (!enforceRateLimit(req, res, userSearchLimiter, "Too many user search requests.")) return;
   const userId = getUserId(req);
-  const page = validatedListPage(req, res);
-  if (!page) return;
   const rawQuery = req.query.q;
   const q = typeof rawQuery === "string" ? rawQuery.trim() : "";
   if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
     res.status(400).json({ error: "Search queries must be 200 characters or fewer." });
     return;
   }
+  const context = cursorContext("/users/search", userId, q);
+  const request = cursorListRequest(req, res, context, isUserCursorAfter, isUserCursorCeiling);
+  if (!request) return;
+  const page = request.page;
   if (q.length < 2) {
+    if (request.cursor) setCursorPageHeaders(res, { hasMore: false, nextAfter: null, ceiling: null }, context);
     res.json([]);
     return;
   }
+  const nameMatches = or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`));
+  const makeUserCursorKey = (createdAt: string, clerkId: string): UserCursorKey => ({ createdAt, clerkId });
+  const userCursorCeiling = () => db.select({
+    createdAt: sql<string>`${usersTable.createdAt}::text`,
+    clerkId: usersTable.clerkId,
+  }).from(usersTable).where(nameMatches)
+    .orderBy(desc(usersTable.createdAt), desc(usersTable.clerkId)).limit(1);
+  const userCursorBounds = (after: UserCursorKey | null, ceiling: UserCursorKey) => and(
+    sql`(${usersTable.createdAt}, ${usersTable.clerkId}) <= (${ceiling.createdAt}::timestamptz, ${ceiling.clerkId})`,
+    after === null ? undefined
+      : sql`(${usersTable.createdAt}, ${usersTable.clerkId}) > (${after.createdAt}::timestamptz, ${after.clerkId})`,
+  );
   if (await hasPermission(userId, "manage_any_community")) {
+    if (request.cursor) {
+      const cursorPage = await cursorVisibleListPage(
+        request.cursor.after as UserCursorKey | null,
+        request.cursor.ceiling as UserCursorKey | null,
+        page.limit,
+        async () => {
+          const ceiling = (await userCursorCeiling())[0];
+          return ceiling ? makeUserCursorKey(ceiling.createdAt, ceiling.clerkId) : null;
+        },
+        (after, ceiling, batchSize) => db.select({
+          user: usersTable,
+          cursorCreatedAt: sql<string>`${usersTable.createdAt}::text`,
+        }).from(usersTable)
+          .where(and(nameMatches, userCursorBounds(after, ceiling)))
+          .orderBy(asc(usersTable.createdAt), asc(usersTable.clerkId)).limit(batchSize),
+        ({ user, cursorCreatedAt }) => makeUserCursorKey(cursorCreatedAt, user.clerkId),
+        async (rows) => rows,
+      );
+      setCursorPageHeaders(res, cursorPage, context);
+      res.json(cursorPage.rows.map(({ user }) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
+      return;
+    }
     const users = await db.select().from(usersTable)
-      .where(or(ilike(usersTable.username, `%${q}%`), ilike(usersTable.displayName, `%${q}%`)))
+      .where(nameMatches)
       .orderBy(asc(usersTable.clerkId)).limit(page.limit + 1).offset(page.offset);
     const hasMore = users.length > page.limit;
     if (hasMore) users.pop();
@@ -1919,7 +2136,50 @@ router.get("/users/search", requireAuth, async (req: AuthenticatedRequest, res):
     .from(communityMembersTable)
     .where(eq(communityMembersTable.userId, userId));
   if (memberships.length === 0) {
+    if (request.cursor) setCursorPageHeaders(res, { hasMore: false, nextAfter: null, ceiling: null }, context);
     res.json([]);
+    return;
+  }
+  if (request.cursor) {
+    const communityIds = memberships.map((item) => item.communityId);
+    const cursorMembershipCeiling = () => db.select({
+      value: sql<string>`${usersTable.createdAt}::text`,
+      clerkId: usersTable.clerkId,
+    })
+      .from(communityMembersTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+      .where(and(
+        inArray(communityMembersTable.communityId, communityIds),
+        nameMatches,
+      ))
+      .orderBy(desc(usersTable.createdAt), desc(usersTable.clerkId)).limit(1);
+    const cursorMembershipFetch = (after: UserCursorKey | null, ceiling: UserCursorKey, batchSize: number) =>
+      db.selectDistinct({
+        user: usersTable,
+        cursorCreatedAt: sql<string>`${usersTable.createdAt}::text`,
+      })
+        .from(communityMembersTable)
+        .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+        .where(and(
+          inArray(communityMembersTable.communityId, communityIds),
+          nameMatches,
+          userCursorBounds(after, ceiling),
+        ))
+        .orderBy(asc(usersTable.createdAt), asc(usersTable.clerkId)).limit(batchSize);
+    const cursorPage = await cursorVisibleListPage(
+      request.cursor.after as UserCursorKey | null,
+      request.cursor.ceiling as UserCursorKey | null,
+      page.limit,
+      async () => {
+        const ceiling = (await cursorMembershipCeiling())[0];
+        return ceiling ? makeUserCursorKey(ceiling.value, ceiling.clerkId) : null;
+      },
+      cursorMembershipFetch,
+      ({ user, cursorCreatedAt }) => makeUserCursorKey(cursorCreatedAt, user.clerkId),
+      async (rows) => rows,
+    );
+    setCursorPageHeaders(res, cursorPage, context);
+    res.json(cursorPage.rows.map(({ user }) => ({ id: user.clerkId, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, status: user.status })));
     return;
   }
   const users = await db.selectDistinct({ user: usersTable })

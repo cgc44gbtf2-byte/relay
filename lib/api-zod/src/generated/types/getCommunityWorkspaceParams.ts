@@ -31,6 +31,10 @@ employeesLimit?: number;
  */
 employeesOffset?: number;
 /**
+ * Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+ */
+employeesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -39,6 +43,10 @@ invitationsLimit?: number;
  * @minimum 0
  */
 invitationsOffset?: number;
+/**
+ * Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+ */
+invitationsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -49,6 +57,10 @@ tasksLimit?: number;
  */
 tasksOffset?: number;
 /**
+ * Optional opaque cursor for the tasks collection; use start to begin cursor pagination.
+ */
+tasksCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -57,6 +69,10 @@ channelsLimit?: number;
  * @minimum 0
  */
 channelsOffset?: number;
+/**
+ * Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+ */
+channelsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -67,6 +83,10 @@ categoriesLimit?: number;
  */
 categoriesOffset?: number;
 /**
+ * Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+ */
+categoriesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -75,6 +95,10 @@ assignmentsLimit?: number;
  * @minimum 0
  */
 assignmentsOffset?: number;
+/**
+ * Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+ */
+assignmentsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -85,6 +109,10 @@ departmentsLimit?: number;
  */
 departmentsOffset?: number;
 /**
+ * Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -94,6 +122,10 @@ locationsLimit?: number;
  */
 locationsOffset?: number;
 /**
+ * Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+ */
+locationsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -102,6 +134,10 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+ */
+teamsCursor?: string;
 /**
  * Opt in to bounded membership pages for the selected employees; omitted retains the full array.
  * @minimum 1
@@ -113,6 +149,10 @@ teamMembershipsLimit?: number;
  */
 teamMembershipsOffset?: number;
 /**
+ * Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+ */
+teamMembershipsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -121,6 +161,10 @@ policiesLimit?: number;
  * @minimum 0
  */
 policiesOffset?: number;
+/**
+ * Optional opaque cursor for the policies collection; use start to begin cursor pagination.
+ */
+policiesCursor?: string;
 /**
  * Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
  * @minimum 1
@@ -132,4 +176,8 @@ announcementsLimit?: number;
  * @maximum 2147483647
  */
 announcementsOffset?: number;
+/**
+ * Optional opaque cursor for the announcements collection; use start to begin cursor pagination.
+ */
+announcementsCursor?: string;
 };

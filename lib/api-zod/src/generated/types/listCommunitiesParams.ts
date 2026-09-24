@@ -33,4 +33,12 @@ communitiesLimit?: number;
  * @maximum 2147483647
  */
 communitiesOffset?: number;
+/**
+ * Optional opaque cursor for the communities page; use start to begin cursor pagination.
+ */
+cursor?: string;
+/**
+ * Alias for cursor, scoped to the communities array. Supply only one of cursor and communitiesCursor.
+ */
+communitiesCursor?: string;
 };

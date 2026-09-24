@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CollectionCursorParameter } from './collectionCursorParameter';
 import type { CollectionLimitParameter } from './collectionLimitParameter';
 import type { CollectionOffsetParameter } from './collectionOffsetParameter';
 
@@ -21,4 +22,8 @@ limit?: CollectionLimitParameter;
  * @maximum 2147483647
  */
 offset?: CollectionOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };

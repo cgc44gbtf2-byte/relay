@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, loadAdminScopeOptions, loadCustomRoleCatalog, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
 
 describe("IRC collection pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -47,12 +47,26 @@ describe("IRC collection pagination", () => {
     await expect(pagedApi<{ id: number }>("/categories")).rejects.toThrow("Next page unavailable");
     expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/categories", "/api/categories?limit=100&offset=1"]);
   });
+
+  it("follows next cursors for cursor-enabled collections", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 1 }]), { headers: { "X-Next-Cursor": "cursor-two" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 2 }]), { headers: { "X-Next-Cursor": "cursor-three" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 3 }]), { headers: {} }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(pagedApi<{ id: number }>("/channels", true)).resolves.toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/channels?limit=100&cursor=start",
+      "/api/channels?limit=100&cursor=cursor-two",
+      "/api/channels?limit=100&cursor=cursor-three",
+    ]);
+  });
 });
 
 describe("admin and developer collection pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each(["/admin/users?q=page", "/admin/role-assignments", "/developer/releases"])(
+  it.each(["/developer/releases"])(
     "loads all 101 records from %s",
     async (path) => {
       const fetch = vi.fn((input: RequestInfo | URL) => {
@@ -67,6 +81,21 @@ describe("admin and developer collection pagination", () => {
       expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
         `/api${path}${path.includes("?") ? "&" : "?"}limit=100&offset=0`,
         `/api${path}${path.includes("?") ? "&" : "?"}limit=100&offset=100`,
+      ]);
+    },
+  );
+
+  it.each(["/admin/users?q=page", "/admin/role-assignments"])(
+    "loads cursor pages from %s",
+    async (path) => {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 1 }]), { headers: { "X-Next-Cursor": "next-token" } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 2 }]), { headers: {} }));
+      vi.stubGlobal("fetch", fetch);
+      await expect(allCollectionPages<{ id: number }>(path, true)).resolves.toEqual([{ id: 1 }, { id: 2 }]);
+      expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+        `/api${path}${path.includes("?") ? "&" : "?"}limit=100&cursor=start`,
+        `/api${path}${path.includes("?") ? "&" : "?"}limit=100&cursor=next-token`,
       ]);
     },
   );
@@ -86,15 +115,18 @@ describe("admin and developer collection pagination", () => {
   it("merges independent admin overview collections through their last pages", async () => {
     const fetch = vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
-      const offset = Number(url.searchParams.get("channelOffset") ?? 0);
+      const channelCursor = url.searchParams.get("channelCursor");
+      const categoryCursor = url.searchParams.get("categoryCursor");
+      const channelOffset = channelCursor === "start" ? 0 : channelCursor === "channel-next" ? 50 : 100;
+      const categoryOffset = categoryCursor === "start" ? 0 : categoryCursor === "category-next" ? 50 : 100;
       return jsonResponse({
         stats: { users: 1 },
         activity: [{ id: 1 }],
-        channels: Array.from({ length: Math.max(0, Math.min(50, 101 - offset)) }, (_, index) => ({ id: offset + index + 1 })),
-        categories: Array.from({ length: Math.max(0, Math.min(50, 51 - offset)) }, (_, index) => ({ id: offset + index + 1 })),
+        channels: Array.from({ length: Math.max(0, Math.min(50, 101 - channelOffset)) }, (_, index) => ({ id: channelOffset + index + 1 })),
+        categories: Array.from({ length: Math.max(0, Math.min(50, 51 - categoryOffset)) }, (_, index) => ({ id: categoryOffset + index + 1 })),
         collectionPagination: {
-          channels: { hasMore: offset + 50 <= 101 },
-          categories: { hasMore: offset + 50 <= 51 },
+          channels: { hasMore: channelOffset + 50 <= 101, nextCursor: channelOffset === 0 ? "channel-next" : channelOffset === 50 ? "channel-last" : null },
+          categories: { hasMore: categoryOffset + 50 <= 51, nextCursor: categoryOffset === 0 ? "category-next" : null },
         },
       });
     });
@@ -104,25 +136,66 @@ describe("admin and developer collection pagination", () => {
     expect(overview.categories).toHaveLength(51);
     expect(overview.activity).toEqual([{ id: 1 }]);
     expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
-      "/api/admin/overview?activityLimit=1",
-      "/api/admin/overview?activityLimit=1&channelOffset=50&categoryOffset=50",
-      "/api/admin/overview?activityLimit=1&channelOffset=100&categoryOffset=100",
+      "/api/admin/overview?activityLimit=1&channelCursor=start&categoryCursor=start",
+      "/api/admin/overview?activityLimit=1&channelCursor=channel-next&categoryCursor=category-next",
+      "/api/admin/overview?activityLimit=1&channelCursor=channel-last",
     ]);
   });
 
   it("propagates an overview second-page error", async () => {
     const fetch = vi.fn((input: RequestInfo | URL) =>
-      String(input).includes("channelOffset=50")
+      String(input).includes("channelCursor=next")
         ? jsonResponse({ error: "Overview page unavailable" }, 503)
-        : jsonResponse({ channels: [{ id: 1 }], categories: [], collectionPagination: { channels: { hasMore: true }, categories: { hasMore: false } } }));
+        : jsonResponse({ channels: [{ id: 1 }], categories: [], collectionPagination: { channels: { hasMore: true, nextCursor: "next" }, categories: { hasMore: false, nextCursor: null } } }));
     vi.stubGlobal("fetch", fetch);
     await expect(loadAdminOverview("/admin/overview")).rejects.toThrow("Overview page unavailable");
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+
+  it("follows independent scope-option and custom-role cursors", async () => {
+    const fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/admin/scope-options") {
+        const next = url.searchParams.has("communitiesCursor") && url.searchParams.get("communitiesCursor") !== "start";
+        return jsonResponse({
+          communities: [{ id: next ? 2 : 1, name: `community-${next ? 2 : 1}` }],
+          categories: [{ id: 1, name: "category", communityId: null }],
+          channels: [{ id: next ? 2 : 1, name: `channel-${next ? 2 : 1}`, communityId: null, categoryId: null }],
+          departments: [{ id: 1, name: "department", communityId: 1 }],
+          pagination: {
+            communities: { nextCursor: next ? null : "community-next" },
+            categories: { nextCursor: null },
+            channels: { nextCursor: next ? null : "channel-next" },
+            departments: { nextCursor: null },
+          },
+        });
+      }
+      const next = url.searchParams.get("cursor") === "role-next";
+      return jsonResponse({
+        roles: [{ key: next ? "second" : "first", label: "role", description: "", scopeType: "community", permissions: [], isActive: true }],
+        permissions: [],
+        pagination: { nextCursor: next ? null : "role-next" },
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    const [options, catalog] = await Promise.all([loadAdminScopeOptions(), loadCustomRoleCatalog()]);
+    expect(options.communities.map((item) => item.id)).toEqual([1, 2]);
+    expect(options.channels.map((item) => item.id)).toEqual([1, 2]);
+    expect(options.categories).toHaveLength(1);
+    expect(catalog.roles.map((role) => role.key)).toEqual(["first", "second"]);
+    const optionUrls = fetch.mock.calls.map(([input]) => new URL(String(input), "http://localhost"))
+      .filter((url) => url.pathname === "/api/admin/scope-options");
+    expect(optionUrls).toHaveLength(2);
+    expect(optionUrls[0].searchParams.get("communitiesCursor")).toBe("start");
+    expect(optionUrls[1].searchParams.get("communitiesCursor")).toBe("community-next");
+    expect(optionUrls[1].searchParams.get("channelsCursor")).toBe("channel-next");
+    expect(optionUrls[1].searchParams.has("categoriesCursor")).toBe(false);
+  });
 });
 
 describe("workspace detail pagination", () => {
-  it("advances independent page offsets and preserves finished collection metadata", () => {
+  it("advances independent cursors and preserves finished collection metadata", () => {
     type Detail = Parameters<typeof appendWorkspaceDetailPage>[0];
     const collections = {
       members: [{ id: "one" }], employees: [{ userId: "one" }], teamMemberships: [{ teamId: 1, userId: "one" }],
@@ -131,15 +204,21 @@ describe("workspace detail pagination", () => {
     };
     const pagination = Object.fromEntries(
       ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "policies", "announcements"]
-        .map((key) => [key, { limit: key === "announcements" ? 20 : 100, offset: 0, hasMore: ["employees", "channels", "announcements"].includes(key) }]),
+        .map((key) => [key, { limit: key === "announcements" ? 20 : 100, offset: 0, hasMore: ["employees", "channels", "announcements"].includes(key), nextCursor: ["employees", "channels", "announcements"].includes(key) ? `${key}-cursor` : null }]),
     ) as Detail["pagination"];
     const current = { ...collections, pagination } as unknown as Detail;
     const query = new URLSearchParams(workspaceDetailPageQuery(current));
-    expect(query.get("employeesOffset")).toBe("100");
-    expect(query.get("channelsOffset")).toBe("100");
-    expect(query.get("announcementsOffset")).toBe("20");
+    expect(query.get("employeesCursor")).toBe("employees-cursor");
+    expect(query.get("channelsCursor")).toBe("channels-cursor");
+    expect(query.get("announcementsCursor")).toBe("announcements-cursor");
+    expect(query.has("employeesOffset")).toBe(false);
+    expect(query.has("announcementsOffset")).toBe(false);
     expect(query.get("announcementsLimit")).toBe("100");
     expect(query.get("tasksLimit")).toBe("1");
+    expect(query.get("tasksOffset")).toBe("0");
+    const initialQuery = new URLSearchParams(workspaceDetailPageQuery());
+    expect(initialQuery.get("employeesCursor")).toBe("start");
+    expect(initialQuery.has("employeesOffset")).toBe(false);
     const page = {
       ...collections, members: [{ id: "two" }], employees: [{ userId: "two" }],
       teamMemberships: [{ teamId: 1, userId: "one" }, { teamId: 2, userId: "two" }],
@@ -374,7 +453,7 @@ function installApi({
       ownerCommunity: { id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner },
       communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
     });
-    if (url === "/api/categories") return jsonResponse(categories);
+    if (url === "/api/categories" || url.startsWith("/api/categories?")) return jsonResponse(categories);
     if ((url === "/api/notifications" || url.startsWith("/api/notifications?")) && method === "GET") {
       return notificationsFailure ? jsonResponse({ error: "notifications unavailable" }, 500) : jsonResponse(notifications);
     }
@@ -403,7 +482,7 @@ function installApi({
         categoryId: null,
       });
     }
-    if (url === "/api/users/search?q=or") return jsonResponse([members()[1]]);
+    if (url.startsWith("/api/users/search?q=or")) return jsonResponse([members()[1]]);
     if (url.startsWith("/api/dm/user-2/messages?before=") && method === "GET") {
       dmPaginationCalls += 1;
       if (dmPaginationFailureOnce && dmPaginationCalls === 1) {
@@ -427,7 +506,7 @@ function installApi({
         })),
       });
     }
-    if (url === "/api/channels" && method === "GET") {
+    if ((url === "/api/channels" || url.startsWith("/api/channels?")) && method === "GET") {
       channelListCalls += 1;
       if (channelFailureOnce && channelListCalls === 1) return jsonResponse({ error: "channels unavailable" }, 500);
       if (recoveryChannelFailureOnce && channelListCalls === 2) return jsonResponse({ error: "Channel list is temporarily unavailable." }, 503);
@@ -561,7 +640,7 @@ describe("community organization polling", () => {
         created = true;
         return jsonResponse(newWorkspace);
       }
-      if (url === "/api/communities") return jsonResponse(created ? [oldWorkspace, newWorkspace] : [oldWorkspace]);
+      if (url === "/api/communities" || url.startsWith("/api/communities?")) return jsonResponse(created ? [oldWorkspace, newWorkspace] : [oldWorkspace]);
       const match = url.match(/^\/api\/communities\/(71|72)\?/);
       if (match) return jsonResponse({
         community: match[1] === "72" ? newWorkspace : oldWorkspace,
@@ -604,7 +683,7 @@ describe("community organization polling", () => {
       const url = String(input);
       if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "member" });
       if (url === "/api/me") return jsonResponse(profile);
-      if (url === "/api/communities") {
+      if (url === "/api/communities" || url.startsWith("/api/communities?")) {
         listCalls++;
         return listCalls === 2 ? olderList : jsonResponse(workspaces);
       }
@@ -687,13 +766,14 @@ describe("community organization polling", () => {
           locations: { limit: 100, offset: 0, hasMore: false },
           teams: { limit: 100, offset: 0, hasMore: false },
           policies: { limit: 100, offset: 0, hasMore: false },
+          teamMemberships: { limit: 100, offset: 0, hasMore: false },
         },
       };
     };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "admin" });
-      if (url === "/api/communities") return jsonResponse([community]);
+      if (url === "/api/communities" || url.startsWith("/api/communities?")) return jsonResponse([community]);
       if (url === "/api/me") return jsonResponse(profile);
       if (url === "/api/communities/41/dashboard") return jsonResponse({
         stats: { employees: 3, online: 3, channels: 0, openTasks: 0, announcements: 0, pendingRequests: 0 },
@@ -705,6 +785,7 @@ describe("community organization polling", () => {
         documents: [], folders: [], pagination: { limit: 100, offset: 0, hasMore: false },
         folderPagination: { limit: 100, offset: 0, hasMore: false },
       });
+      if (url.startsWith("/api/communities/41/organization-snapshot?")) return jsonResponse(detail());
       if (url.startsWith("/api/communities/41?")) return jsonResponse(detail());
       return jsonResponse({});
     }));
@@ -764,7 +845,7 @@ describe("community organization polling", () => {
       channels: [], categories: [], announcements: [], invitations: [], policies: [], documents: [], tasks: [],
       pagination: Object.fromEntries([
         "employees", "invitations", "tasks", "channels", "categories", "assignments",
-        "departments", "locations", "teams", "policies",
+        "departments", "locations", "teams", "policies", "teamMemberships",
       ].map((key) => [key, { limit: 100, offset: 0, hasMore: false }])),
     });
     let resolveMutation!: () => void;
@@ -780,10 +861,12 @@ describe("community organization polling", () => {
     });
     let workspaceADetailCalls = 0;
     let workspaceBDetailCalls = 0;
+    let workspaceASnapshotCalls = 0;
+    let workspaceBSnapshotCalls = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [], role: "admin" });
-      if (url === "/api/communities") return jsonResponse([workspaceA, workspaceB]);
+      if (url === "/api/communities" || url.startsWith("/api/communities?")) return jsonResponse([workspaceA, workspaceB]);
       if (url === "/api/me") return jsonResponse(profile);
       if (url === "/api/communities/51/departments/11/manager" && init?.method === "PATCH") return mutationResponse;
       if (url.startsWith("/api/communities/51?")) {
@@ -793,6 +876,14 @@ describe("community organization polling", () => {
       if (url.startsWith("/api/communities/52?")) {
         workspaceBDetailCalls += 1;
         return workspaceBDetailCalls === 1 ? workspaceBResponse : jsonResponse(detail(workspaceB));
+      }
+      if (url.startsWith("/api/communities/51/organization-snapshot?")) {
+        workspaceASnapshotCalls += 1;
+        return jsonResponse(detail(workspaceA));
+      }
+      if (url.startsWith("/api/communities/52/organization-snapshot?")) {
+        workspaceBSnapshotCalls += 1;
+        return jsonResponse(detail(workspaceB));
       }
       if (/\/api\/communities\/(51|52)\/dashboard$/.test(url)) return jsonResponse({
         stats: { employees: 2, online: 2, channels: 0, openTasks: 0, announcements: 0, pendingRequests: 0 },
@@ -837,7 +928,9 @@ describe("community organization polling", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
-    expect(workspaceBDetailCalls).toBe(2);
+    expect(workspaceBSnapshotCalls).toBe(1);
+    expect(workspaceASnapshotCalls).toBe(0);
+    expect(workspaceBDetailCalls).toBe(1);
     expect(workspaceADetailCalls).toBe(1);
     expect(screen.getByRole("heading", { name: "Workspace B" })).toBeTruthy();
   });
@@ -959,16 +1052,16 @@ describe("deleted room recovery", () => {
     const newerResponse = new Promise<Response>((resolve) => { resolveNewer = resolve; });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/users/search?q=al") return olderResponse;
-      if (url === "/api/users/search?q=alex") return newerResponse;
+      if (url.startsWith("/api/users/search?q=al&") || url === "/api/users/search?q=al") return olderResponse;
+      if (url.startsWith("/api/users/search?q=alex&") || url === "/api/users/search?q=alex") return newerResponse;
       return baseFetch(input, init);
     }));
 
     const search = screen.getByPlaceholderText("find a person");
     fireEvent.change(search, { target: { value: "al" } });
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/users/search?q=al", expect.anything()));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("/api/users/search?q=al&limit=100&cursor=start"))).toBe(true));
     fireEvent.change(search, { target: { value: "alex" } });
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/users/search?q=alex", expect.anything()));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("/api/users/search?q=alex&limit=100&cursor=start"))).toBe(true));
 
     await act(async () => {
       resolveNewer(new Response(JSON.stringify([{ ...profile, id: "user-alex", displayName: "Alex" }]), {
@@ -1664,13 +1757,13 @@ describe("deleted room recovery", () => {
     vi.mocked(fetch).mockImplementation((input, init) => {
       const url = String(input);
       if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [] });
-      if (url === "/api/communities") return jsonResponse([community]);
+      if (url === "/api/communities" || url.startsWith("/api/communities?")) return jsonResponse([community]);
       if (url.startsWith("/api/communities/1?")) return jsonResponse({
         community, canManage: false, isOwner: false, members: [profile], employees: [],
         channels: [], categories: [], assignments: [], announcements: [], invitations: [],
         departments: [], locations: [], teams: [], policies: [], documents: [], tasks: [task],
       });
-      if (url === "/api/communities/1/tasks/42") return jsonResponse(task);
+       if (url === "/api/communities/1/tasks/42" || url.startsWith("/api/communities/1/tasks/42?")) return jsonResponse(task);
       if (url.startsWith("/api/communities/1/documents")) return jsonResponse({ documents: [], folders: [] });
       return originalFetch(input, init);
     });
@@ -1680,7 +1773,7 @@ describe("deleted room recovery", () => {
     await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/communities/1?taskId=42"));
     expect(await screen.findByRole("heading", { name: "Prepare monthly report" })).toBeTruthy();
     expect(screen.getAllByText("Matching task details")).toHaveLength(2);
-    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/api/communities/1/tasks/42")).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith("/api/communities/1/tasks/42?"))).toBe(true);
   });
 
   it("keeps notification navigation inside the signed-in workspace", async () => {
@@ -1855,7 +1948,7 @@ describe("admin channel and category deletion permissions", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/admin/status") return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
-      if (url === "/api/admin/overview") return jsonResponse({
+      if (url.startsWith("/api/admin/overview")) return jsonResponse({
         stats: { users: 1, channels: 1, messages: 0, online: 1, admins: 1 },
         users: [],
         channels: [channel],
@@ -2066,7 +2159,7 @@ describe("admin activity date filters", () => {
     fireEvent.change(screen.getByTestId("input-activity-start-date"), { target: { value: "2026-04-01" } });
     fireEvent.change(screen.getByTestId("input-activity-end-date"), { target: { value: "2026-04-03" } });
 
-    const filteredPath = "/api/admin/overview?activityActor=Alpha&activityAction=change&activityStartDate=2026-04-01&activityEndDate=2026-04-03";
+    const filteredPath = "/api/admin/overview?activityActor=Alpha&activityAction=change&activityStartDate=2026-04-01&activityEndDate=2026-04-03&channelCursor=start&categoryCursor=start";
     await waitFor(() => expect(overviewRequests).toContain(filteredPath));
 
     fireEvent.click(screen.getByTestId("button-export-admin-activity"));
@@ -2078,7 +2171,7 @@ describe("admin activity date filters", () => {
     expect(await screen.findByText("Activity history downloaded.")).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("button-clear-activity-filters"));
-    await waitFor(() => expect(overviewRequests).toContain("/api/admin/overview"));
+    await waitFor(() => expect(overviewRequests.some((request) => request.startsWith("/api/admin/overview?"))).toBe(true));
     expect((screen.getByTestId("input-activity-start-date") as HTMLInputElement).value).toBe("");
     expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
     anchorClick.mockRestore();

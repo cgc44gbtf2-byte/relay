@@ -40,6 +40,84 @@ const MAX_ACTIVITY_CURSOR_LENGTH = 256;
 const COLLECTION_LIMIT = 50;
 const MAX_COLLECTION_LIMIT = 100;
 const MAX_COLLECTION_OFFSET = 2_147_483_647;
+const MAX_COLLECTION_CURSOR_LENGTH = 512;
+
+type CollectionCursor = {
+  after: string | number | null;
+  ceiling: string;
+  context: string;
+};
+
+type ParsedCollectionCursor =
+  | { mode: "start" }
+  | { mode: "continue"; cursor: CollectionCursor }
+  | null
+  | false;
+
+function parseCollectionCursor(
+  value: unknown,
+  afterType: "string" | "number",
+  context: string,
+): ParsedCollectionCursor {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length > MAX_COLLECTION_CURSOR_LENGTH) return false;
+  if (value === "start") return { mode: "start" };
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  try {
+    const decoded = Buffer.from(value, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== value) return false;
+    const parsed: unknown = JSON.parse(decoded);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+    const record = parsed as Record<string, unknown>;
+    if (Object.keys(record).sort().join(",") !== "after,ceiling,context" || record.context !== context) return false;
+    if (typeof record.ceiling !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(record.ceiling)) return false;
+    const dateTime = record.ceiling.slice(0, 19);
+    const parsedDate = new Date(`${dateTime}Z`);
+    if (!Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 19) !== dateTime) return false;
+    const validAfter = afterType === "number"
+      ? typeof record.after === "number" && Number.isSafeInteger(record.after) && record.after >= 0
+      : typeof record.after === "string" && record.after.length > 0;
+    return validAfter ? { mode: "continue", cursor: record as CollectionCursor } : false;
+  } catch {
+    return false;
+  }
+}
+
+async function collectionCursorCeiling(): Promise<string> {
+  const [row] = await db.select({
+    ceiling: sql<string>`to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+  }).from(usersTable).limit(1);
+  return row!.ceiling;
+}
+
+function encodeCollectionCursor(cursor: CollectionCursor): string {
+  return Buffer.from(JSON.stringify({
+    after: cursor.after,
+    ceiling: cursor.ceiling,
+    context: cursor.context,
+  }), "utf8").toString("base64url");
+}
+
+function collectionCursorContext(
+  route: string,
+  collection: string,
+  filters: Record<string, string> = {},
+): string {
+  return JSON.stringify({ route, collection, filters });
+}
+
+function cursorForNextPage<T extends { id: string | number }>(
+  rows: T[],
+  limit: number,
+  cursor: CollectionCursor,
+): string | null {
+  const last = rows[limit - 1];
+  return rows.length > limit && last
+    ? encodeCollectionCursor({ after: last.id, ceiling: cursor.ceiling, context: cursor.context })
+    : null;
+}
+
 function collectionPage(req: AuthenticatedRequest, prefix = "") {
   const limit = parseActivityQueryInteger(req.query[prefix ? `${prefix}Limit` : "limit"], COLLECTION_LIMIT, MAX_COLLECTION_LIMIT, 1);
   const offset = parseActivityQueryInteger(req.query[prefix ? `${prefix}Offset` : "offset"], 0, MAX_COLLECTION_OFFSET);
@@ -267,6 +345,27 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
   const channelPage = collectionPage(req, "channel");
   const categoryPage = collectionPage(req, "category");
   if (!channelPage || !categoryPage) { invalidCollectionPage(res); return; }
+  const channelCursorContext = collectionCursorContext("/admin/overview", "channels");
+  const categoryCursorContext = collectionCursorContext("/admin/overview", "categories");
+  const channelCursorQuery = parseCollectionCursor(req.query.channelCursor, "number", channelCursorContext);
+  const categoryCursorQuery = parseCollectionCursor(req.query.categoryCursor, "number", categoryCursorContext);
+  if (channelCursorQuery === false || categoryCursorQuery === false ||
+    (channelCursorQuery && channelPage.offset !== 0) || (categoryCursorQuery && categoryPage.offset !== 0)) {
+    res.status(400).json({ error: "Invalid collection cursor or offset." });
+    return;
+  }
+  const [channelCursor, categoryCursor] = await Promise.all(
+    [channelCursorQuery, categoryCursorQuery].map(async (query, index) => {
+      if (!query) return null;
+      return query.mode === "start"
+        ? {
+          after: null,
+          ceiling: await collectionCursorCeiling(),
+          context: index === 0 ? channelCursorContext : categoryCursorContext,
+        }
+        : query.cursor;
+    }),
+  );
   const activityLimit = parseActivityQueryInteger(
     req.query.activityLimit,
     DEFAULT_ACTIVITY_LIMIT,
@@ -307,8 +406,8 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     [channelCount],
     [messageCount],
     users,
-    channels,
-    categories,
+    rawChannels,
+    rawCategories,
     recentMessages,
     activity,
   ] = await Promise.all([
@@ -351,9 +450,15 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       .leftJoin(channelMembersTable, eq(channelMembersTable.channelId, channelsTable.id))
       .leftJoin(communitiesTable, eq(communitiesTable.id, channelsTable.communityId))
       .groupBy(channelsTable.id, communitiesTable.name)
-      .orderBy(asc(channelsTable.name), asc(channelsTable.id))
-      .limit(channelPage.limit)
-      .offset(channelPage.offset),
+      .where(and(
+        channelCursor ? sql`${channelsTable.createdAt} <= ${channelCursor.ceiling}::timestamptz` : undefined,
+        channelCursor && channelCursor.after !== null ? sql`${channelsTable.id} > ${channelCursor.after}` : undefined,
+      ))
+      .orderBy(...(channelCursor
+        ? [asc(channelsTable.id)]
+        : [asc(channelsTable.name), asc(channelsTable.id)]))
+      .limit(channelPage.limit + (channelCursor ? 1 : 0))
+      .offset(channelCursor ? 0 : channelPage.offset),
     db
       .select({
         id: categoriesTable.id,
@@ -365,9 +470,15 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       })
       .from(categoriesTable)
       .leftJoin(communitiesTable, eq(communitiesTable.id, categoriesTable.communityId))
-      .orderBy(asc(categoriesTable.name), asc(categoriesTable.id))
-      .limit(categoryPage.limit)
-      .offset(categoryPage.offset),
+      .where(and(
+        categoryCursor ? sql`${categoriesTable.createdAt} <= ${categoryCursor.ceiling}::timestamptz` : undefined,
+        categoryCursor && categoryCursor.after !== null ? sql`${categoriesTable.id} > ${categoryCursor.after}` : undefined,
+      ))
+      .orderBy(...(categoryCursor
+        ? [asc(categoriesTable.id)]
+        : [asc(categoriesTable.name), asc(categoriesTable.id)]))
+      .limit(categoryPage.limit + (categoryCursor ? 1 : 0))
+      .offset(categoryCursor ? 0 : categoryPage.offset),
     db
       .select({
         id: messagesTable.id,
@@ -410,6 +521,14 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       .limit(activityLimit + 1)
       .offset(effectiveActivityOffset),
   ]);
+  const channels = channelCursor ? rawChannels.slice(0, channelPage.limit) : rawChannels;
+  const categories = categoryCursor ? rawCategories.slice(0, categoryPage.limit) : rawCategories;
+  const channelNextCursor = channelCursor
+    ? cursorForNextPage(rawChannels, channelPage.limit, channelCursor)
+    : null;
+  const categoryNextCursor = categoryCursor
+    ? cursorForNextPage(rawCategories, categoryPage.limit, categoryCursor)
+    : null;
   const hasMoreActivity = activity.length > activityLimit;
   const visibleActivity = (activityAfterCursor
     ? activity.slice(0, activityLimit).reverse()
@@ -438,8 +557,16 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     channels,
     categories,
     collectionPagination: {
-      channels: { ...channelPage, hasMore: channels.length === channelPage.limit },
-      categories: { ...categoryPage, hasMore: categories.length === categoryPage.limit },
+      channels: {
+        ...channelPage,
+        hasMore: channelCursor ? Boolean(channelNextCursor) : channels.length === channelPage.limit,
+        ...(channelCursorQuery ? { nextCursor: channelNextCursor } : {}),
+      },
+      categories: {
+        ...categoryPage,
+        hasMore: categoryCursor ? Boolean(categoryNextCursor) : categories.length === categoryPage.limit,
+        ...(categoryCursorQuery ? { nextCursor: categoryNextCursor } : {}),
+      },
     },
     recentMessages,
     activity: visibleActivity,
@@ -609,6 +736,22 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
   const role = typeof req.query.role === "string" ? req.query.role : "";
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";
   const accountStatus = req.query.accountStatus === "active" || req.query.accountStatus === "suspended" ? req.query.accountStatus : "";
+  const cursorContext = collectionCursorContext("/admin/users", "users", {
+    q: query,
+    role,
+    status,
+    accountStatus,
+  });
+  const cursorQuery = parseCollectionCursor(req.query.cursor, "string", cursorContext);
+  if (cursorQuery === false || (cursorQuery && page.offset !== 0)) {
+    res.status(400).json({ error: "Invalid collection cursor or offset." });
+    return;
+  }
+  const cursor = cursorQuery
+    ? cursorQuery.mode === "start"
+      ? { after: null, ceiling: await collectionCursorCeiling(), context: cursorContext }
+      : cursorQuery.cursor
+    : null;
   const filters = [
     query
       ? or(
@@ -632,11 +775,22 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
       accountStatus: usersTable.accountStatus,
     })
     .from(usersTable)
-    .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(usersTable.createdAt), desc(usersTable.clerkId))
-    .limit(page.limit)
-    .offset(page.offset);
-  res.json(users);
+    .where(and(
+      ...(filters.length ? filters : []),
+      cursor ? sql`${usersTable.createdAt} <= ${cursor.ceiling}::timestamptz` : undefined,
+      cursor && cursor.after !== null ? sql`${usersTable.clerkId} > ${cursor.after}` : undefined,
+    ))
+    .orderBy(...(cursor
+      ? [asc(usersTable.clerkId)]
+      : [desc(usersTable.createdAt), desc(usersTable.clerkId)]))
+    .limit(page.limit + (cursor ? 1 : 0))
+    .offset(cursor ? 0 : page.offset);
+  const visibleUsers = cursor ? users.slice(0, page.limit) : users;
+  if (cursor) {
+    const nextCursor = cursorForNextPage(users, page.limit, cursor);
+    if (nextCursor) res.setHeader("X-Next-Cursor", nextCursor);
+  }
+  res.json(visibleUsers);
 });
 
 router.patch("/admin/users/:userId/account-status", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -738,6 +892,17 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
   }
   const page = collectionPage(req);
   if (!page) { invalidCollectionPage(res); return; }
+  const cursorContext = collectionCursorContext("/admin/role-assignments", "role-assignments");
+  const cursorQuery = parseCollectionCursor(req.query.cursor, "number", cursorContext);
+  if (cursorQuery === false || (cursorQuery && page.offset !== 0)) {
+    res.status(400).json({ error: "Invalid collection cursor or offset." });
+    return;
+  }
+  const cursor = cursorQuery
+    ? cursorQuery.mode === "start"
+      ? { after: null, ceiling: await collectionCursorCeiling(), context: cursorContext }
+      : cursorQuery.cursor
+    : null;
   const assignments = await db
     .select({
       id: userRolesTable.id,
@@ -762,9 +927,21 @@ router.get("/admin/role-assignments", requireAuth, async (req: AuthenticatedRequ
     .leftJoin(categoriesTable, eq(categoriesTable.id, userRolesTable.categoryId))
     .leftJoin(departmentsTable, eq(departmentsTable.id, userRolesTable.departmentId))
     .leftJoin(channelsTable, eq(channelsTable.id, userRolesTable.channelId))
-    .orderBy(desc(userRolesTable.createdAt), desc(userRolesTable.id))
-    .limit(page.limit).offset(page.offset);
-  res.json(assignments);
+    .where(and(
+      cursor ? sql`${userRolesTable.createdAt} <= ${cursor.ceiling}::timestamptz` : undefined,
+      cursor && cursor.after !== null ? sql`${userRolesTable.id} > ${cursor.after}` : undefined,
+    ))
+    .orderBy(...(cursor
+      ? [asc(userRolesTable.id)]
+      : [desc(userRolesTable.createdAt), desc(userRolesTable.id)]))
+    .limit(page.limit + (cursor ? 1 : 0))
+    .offset(cursor ? 0 : page.offset);
+  const visibleAssignments = cursor ? assignments.slice(0, page.limit) : assignments;
+  if (cursor) {
+    const nextCursor = cursorForNextPage(assignments, page.limit, cursor);
+    if (nextCursor) res.setHeader("X-Next-Cursor", nextCursor);
+  }
+  res.json(visibleAssignments);
 });
 
 router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -774,13 +951,77 @@ router.get("/admin/scope-options", requireAuth, async (req: AuthenticatedRequest
   }
   const page = collectionPage(req);
   if (!page) { invalidCollectionPage(res); return; }
-  const [communities, categories, channels, departments] = await Promise.all([
-    db.select({ id: communitiesTable.id, name: communitiesTable.name }).from(communitiesTable).orderBy(asc(communitiesTable.name), asc(communitiesTable.id)).limit(page.limit).offset(page.offset),
-    db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId }).from(categoriesTable).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(page.limit).offset(page.offset),
-    db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId }).from(channelsTable).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(page.limit).offset(page.offset),
-    db.select({ id: departmentsTable.id, name: departmentsTable.name, communityId: departmentsTable.communityId }).from(departmentsTable).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(page.limit).offset(page.offset),
+  const cursorQueries = [
+    parseCollectionCursor(req.query.communitiesCursor, "number", collectionCursorContext("/admin/scope-options", "communities")),
+    parseCollectionCursor(req.query.categoriesCursor, "number", collectionCursorContext("/admin/scope-options", "categories")),
+    parseCollectionCursor(req.query.channelsCursor, "number", collectionCursorContext("/admin/scope-options", "channels")),
+    parseCollectionCursor(req.query.departmentsCursor, "number", collectionCursorContext("/admin/scope-options", "departments")),
+  ] as const;
+  if (cursorQueries.some((cursor) => cursor === false) ||
+    (cursorQueries.some(Boolean) && page.offset !== 0)) {
+    res.status(400).json({ error: "Invalid collection cursor or offset." });
+    return;
+  }
+  const cursors = await Promise.all(cursorQueries.map(async (query, index) => {
+    if (!query) return null;
+    return query.mode === "start"
+      ? {
+        after: null,
+        ceiling: await collectionCursorCeiling(),
+        context: collectionCursorContext(
+          "/admin/scope-options",
+          ["communities", "categories", "channels", "departments"][index]!,
+        ),
+      }
+      : query.cursor;
+  }));
+  const [rawCommunities, rawCategories, rawChannels, rawDepartments] = await Promise.all([
+    db.select({ id: communitiesTable.id, name: communitiesTable.name })
+      .from(communitiesTable)
+      .where(and(
+        cursors[0] ? sql`${communitiesTable.createdAt} <= ${cursors[0].ceiling}::timestamptz` : undefined,
+        cursors[0] && cursors[0].after !== null ? sql`${communitiesTable.id} > ${cursors[0].after}` : undefined,
+      ))
+      .orderBy(...(cursors[0] ? [asc(communitiesTable.id)] : [asc(communitiesTable.name), asc(communitiesTable.id)]))
+      .limit(page.limit + (cursors[0] ? 1 : 0)).offset(cursors[0] ? 0 : page.offset),
+    db.select({ id: categoriesTable.id, name: categoriesTable.name, communityId: categoriesTable.communityId })
+      .from(categoriesTable)
+      .where(and(
+        cursors[1] ? sql`${categoriesTable.createdAt} <= ${cursors[1].ceiling}::timestamptz` : undefined,
+        cursors[1] && cursors[1].after !== null ? sql`${categoriesTable.id} > ${cursors[1].after}` : undefined,
+      ))
+      .orderBy(...(cursors[1] ? [asc(categoriesTable.id)] : [asc(categoriesTable.name), asc(categoriesTable.id)]))
+      .limit(page.limit + (cursors[1] ? 1 : 0)).offset(cursors[1] ? 0 : page.offset),
+    db.select({ id: channelsTable.id, name: channelsTable.name, communityId: channelsTable.communityId, categoryId: channelsTable.categoryId })
+      .from(channelsTable)
+      .where(and(
+        cursors[2] ? sql`${channelsTable.createdAt} <= ${cursors[2].ceiling}::timestamptz` : undefined,
+        cursors[2] && cursors[2].after !== null ? sql`${channelsTable.id} > ${cursors[2].after}` : undefined,
+      ))
+      .orderBy(...(cursors[2] ? [asc(channelsTable.id)] : [asc(channelsTable.name), asc(channelsTable.id)]))
+      .limit(page.limit + (cursors[2] ? 1 : 0)).offset(cursors[2] ? 0 : page.offset),
+    db.select({ id: departmentsTable.id, name: departmentsTable.name, communityId: departmentsTable.communityId })
+      .from(departmentsTable)
+      .where(and(
+        cursors[3] ? sql`${departmentsTable.createdAt} <= ${cursors[3].ceiling}::timestamptz` : undefined,
+        cursors[3] && cursors[3].after !== null ? sql`${departmentsTable.id} > ${cursors[3].after}` : undefined,
+      ))
+      .orderBy(...(cursors[3] ? [asc(departmentsTable.id)] : [asc(departmentsTable.name), asc(departmentsTable.id)]))
+      .limit(page.limit + (cursors[3] ? 1 : 0)).offset(cursors[3] ? 0 : page.offset),
   ]);
-  res.json({ communities, categories, channels, departments });
+  const [communities, categories, channels, departments] = [
+    rawCommunities, rawCategories, rawChannels, rawDepartments,
+  ].map((rows, index) => cursors[index] ? rows.slice(0, page.limit) : rows);
+  const response: Record<string, unknown> = { communities, categories, channels, departments };
+  if (cursorQueries.some(Boolean)) {
+    response.pagination = {
+      communities: { nextCursor: cursors[0] ? cursorForNextPage(rawCommunities, page.limit, cursors[0]) : null },
+      categories: { nextCursor: cursors[1] ? cursorForNextPage(rawCategories, page.limit, cursors[1]) : null },
+      channels: { nextCursor: cursors[2] ? cursorForNextPage(rawChannels, page.limit, cursors[2]) : null },
+      departments: { nextCursor: cursors[3] ? cursorForNextPage(rawDepartments, page.limit, cursors[3]) : null },
+    };
+  }
+  res.json(response);
 });
 
 router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -790,19 +1031,48 @@ router.get("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest,
   }
   const page = collectionPage(req);
   if (!page) { invalidCollectionPage(res); return; }
+  const cursorContext = collectionCursorContext("/admin/custom-roles", "custom-roles");
+  const cursorQuery = parseCollectionCursor(req.query.cursor, "string", cursorContext);
+  if (cursorQuery === false || (cursorQuery && page.offset !== 0)) {
+    res.status(400).json({ error: "Invalid collection cursor or offset." });
+    return;
+  }
+  const cursor = cursorQuery
+    ? cursorQuery.mode === "start"
+      ? { after: null, ceiling: await collectionCursorCeiling(), context: cursorContext }
+      : cursorQuery.cursor
+    : null;
   await ensurePermissionCatalog();
-  const roles = await db.select().from(customRolesTable).orderBy(asc(customRolesTable.label), asc(customRolesTable.key)).limit(page.limit).offset(page.offset);
-  const links = roles.length ? await db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
+  const roles = await db.select().from(customRolesTable)
+    .where(and(
+      cursor ? sql`${customRolesTable.createdAt} <= ${cursor.ceiling}::timestamptz` : undefined,
+      cursor && cursor.after !== null ? sql`${customRolesTable.key} > ${cursor.after}` : undefined,
+    ))
+    .orderBy(...(cursor
+      ? [asc(customRolesTable.key)]
+      : [asc(customRolesTable.label), asc(customRolesTable.key)]))
+    .limit(page.limit + (cursor ? 1 : 0))
+    .offset(cursor ? 0 : page.offset);
+  const visibleRoles = cursor ? roles.slice(0, page.limit) : roles;
+  const links = visibleRoles.length ? await db.select({ role: rolePermissionsTable.role, permission: permissionDefinitionsTable.key })
       .from(rolePermissionsTable)
       .innerJoin(permissionDefinitionsTable, eq(permissionDefinitionsTable.id, rolePermissionsTable.permissionId))
-      .where(inArray(rolePermissionsTable.role, roles.map((role) => role.key))) : [];
-  res.json(ListAdminCustomRolesResponse.parse({
-    roles: roles.map((role) => ({ ...role, permissions: links.filter((link) => link.role === role.key).map((link) => link.permission) })),
+      .where(inArray(rolePermissionsTable.role, visibleRoles.map((role) => role.key))) : [];
+  const response = ListAdminCustomRolesResponse.parse({
+    roles: visibleRoles.map((role) => ({ ...role, permissions: links.filter((link) => link.role === role.key).map((link) => link.permission) })),
     permissions: CUSTOM_ROLE_PERMISSIONS.map((key) => ({
       key,
       description: PERMISSION_DESCRIPTIONS[key],
     })),
-  }));
+  });
+  res.json(cursor
+    ? {
+      ...response,
+      pagination: {
+        nextCursor: cursorForNextPage(roles.map((role) => ({ id: role.key })), page.limit, cursor),
+      },
+    }
+    : response);
 });
 
 function parseCustomRoleBody(body: unknown) {

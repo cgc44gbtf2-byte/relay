@@ -9,10 +9,12 @@ import type { ListAdminScopeOptions200CategoriesItem } from './listAdminScopeOpt
 import type { ListAdminScopeOptions200ChannelsItem } from './listAdminScopeOptions200ChannelsItem';
 import type { ListAdminScopeOptions200CommunitiesItem } from './listAdminScopeOptions200CommunitiesItem';
 import type { ListAdminScopeOptions200DepartmentsItem } from './listAdminScopeOptions200DepartmentsItem';
+import type { ListAdminScopeOptions200Pagination } from './listAdminScopeOptions200Pagination';
 
 export type ListAdminScopeOptions200 = {
   communities: ListAdminScopeOptions200CommunitiesItem[];
   categories: ListAdminScopeOptions200CategoriesItem[];
   channels: ListAdminScopeOptions200ChannelsItem[];
   departments: ListAdminScopeOptions200DepartmentsItem[];
+  pagination?: ListAdminScopeOptions200Pagination;
 };

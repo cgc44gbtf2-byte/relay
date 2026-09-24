@@ -24,13 +24,15 @@ const page = (id: number, suffix: string): Page => ({
   departments: [{ id: Number(suffix), managerId: `dept-manager-${suffix}` }],
   locations: [{ id: Number(suffix), name: `location-${suffix}` }],
   teams: [{ id: Number(suffix), managerId: `team-manager-${suffix}` }],
-  teamMemberships: [{ teamId: Number(suffix), userId: "employee-1" }],
+  teamMemberships: [{ teamId: Number(suffix), userId: "employee-1", status: "active" }],
   pagination: {
-    employees: { hasMore: false },
-    assignments: { hasMore: false },
-    departments: { hasMore: false },
-    locations: { hasMore: false },
-    teams: { hasMore: false },
+    employees: { hasMore: true, nextCursor: "employees-next" },
+    invitations: { hasMore: true, nextCursor: "invitations-next" },
+    assignments: { hasMore: true, nextCursor: "assignments-next" },
+    departments: { hasMore: true, nextCursor: "departments-next" },
+    locations: { hasMore: true, nextCursor: "locations-next" },
+    teams: { hasMore: true, nextCursor: "teams-next" },
+    teamMemberships: { hasMore: true, nextCursor: "memberships-next" },
   },
 });
 
@@ -69,7 +71,9 @@ describe("organization freshness", () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls.every(([path]) => path.startsWith("/communities/12/organization-snapshot?"))).toBe(true);
     expect(request.mock.calls.every(([path]) => !/tasks|announcements|policies|channels|categories|view=summary/.test(path))).toBe(true);
-    expect(request.mock.calls[1][0]).toContain("employeesOffset=100");
+    expect(request.mock.calls[0][0]).toContain("employeesCursor=start");
+    expect(request.mock.calls[1][0]).toContain("employeesCursor=employees-next");
+    expect(request.mock.calls[1][0]).not.toContain("employeesOffset=");
     expect(request.mock.calls[1][0]).toContain("employeesLimit=75");
   });
 
@@ -98,7 +102,7 @@ describe("organization freshness", () => {
     const merged = mergeOrganizationPages(current, [first, second]);
 
     expect(merged.employees).toHaveLength(175);
-    expect(merged.employees.at(-1)).toEqual({ userId: "fresh-174" });
+    expect(merged.employees.at(-1)).toMatchObject({ userId: "fresh-174", teamIds: [] });
     expect(merged.invitations).toEqual(first.invitations);
   });
 
@@ -111,7 +115,8 @@ describe("organization freshness", () => {
     second.invitations = current.invitations.slice(100).map((item) => ({ ...item, emailDeliveryStatus: "bounced" }));
     const request = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
     const pages = await fetchOrganizationPages<Page>(12, current, request);
-    expect(request.mock.calls[1][0]).toContain("invitationsOffset=100");
+    expect(request.mock.calls[1][0]).toContain("invitationsCursor=invitations-next");
+    expect(request.mock.calls[1][0]).not.toContain("invitationsOffset=");
     expect(request.mock.calls[1][0]).toContain("invitationsLimit=75");
     const merged = mergeOrganizationPages(current, pages);
     expect(merged.invitations).toHaveLength(175);

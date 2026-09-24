@@ -18,6 +18,10 @@ channelLimit?: number;
  */
 channelOffset?: number;
 /**
+ * Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+ */
+channelCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -27,6 +31,10 @@ categoryLimit?: number;
  * @maximum 2147483647
  */
 categoryOffset?: number;
+/**
+ * Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+ */
+categoryCursor?: string;
 /**
  * @minimum 1
  * @maximum 50

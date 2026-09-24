@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { clerkClient } from "@clerk/express";
-import { and, asc, count, desc, eq, exists, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gt, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { sendInvitationEmail } from "../lib/invitation-email";
 import { finishInvitationSend } from "../lib/invitation-delivery";
@@ -312,6 +312,130 @@ function validPageQuery(req: AuthenticatedRequest, names: readonly string[]): bo
   return true;
 }
 
+export type CursorKey = number | string | [number, string];
+type CursorState = {
+  active: boolean;
+  after: CursorKey | null;
+  ceiling: CursorKey | null;
+  context: string;
+  keyType: "number" | "string" | "pair";
+};
+
+export function communityCursorRequest(
+  req: AuthenticatedRequest,
+  queryNames: readonly string[],
+  context: string,
+  keyType: CursorState["keyType"],
+): CursorState | null {
+  const present = queryNames.filter((name) => req.query[name] !== undefined);
+  if (!present.length) return { active: false, after: null, ceiling: null, context, keyType };
+  if (present.length !== 1) return null;
+  const raw = req.query[present[0]];
+  if (typeof raw !== "string") return null;
+  if (raw === "start") return { active: true, after: null, ceiling: null, context, keyType };
+  if (!/^[A-Za-z0-9_-]+$/.test(raw)) return null;
+  try {
+    const json = Buffer.from(raw, "base64url").toString("utf8");
+    if (Buffer.from(json, "utf8").toString("base64url") !== raw) return null;
+    const value: unknown = JSON.parse(json);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const payload = value as Record<string, unknown>;
+    if (Object.keys(payload).length !== 3 || !("after" in payload) || !("ceiling" in payload) || !("context" in payload)) return null;
+    if (payload.context !== context) return null;
+    const validKey = (key: unknown): key is CursorKey => keyType === "number"
+      ? typeof key === "number" && Number.isSafeInteger(key) && key > 0
+      : keyType === "pair"
+        ? Array.isArray(key) && key.length === 2 && typeof key[0] === "number" && Number.isSafeInteger(key[0]) && key[0] > 0
+          && typeof key[1] === "string" && key[1].length > 0 && key[1].length <= 512
+        : typeof key === "string" && key.length > 0 && key.length <= 512;
+    if (!validKey(payload.after) || !validKey(payload.ceiling)) return null;
+    const compareKeys = (left: CursorKey, right: CursorKey): number => Array.isArray(left) && Array.isArray(right)
+      ? left[0] === right[0] ? left[1] < right[1] ? -1 : left[1] > right[1] ? 1 : 0 : left[0] - right[0]
+      : left < right ? -1 : left > right ? 1 : 0;
+    if (compareKeys(payload.after, payload.ceiling) > 0) return null;
+    return { active: true, after: payload.after, ceiling: payload.ceiling, context, keyType };
+  } catch {
+    return null;
+  }
+}
+
+async function cursorCeiling(state: CursorState, getCeiling: () => Promise<CursorKey | null>): Promise<CursorState> {
+  if (state.active && state.ceiling === null) return { ...state, ceiling: await getCeiling() };
+  return state;
+}
+
+export function communityCursorToken(after: CursorKey, ceiling: CursorKey, context: string): string {
+  return Buffer.from(JSON.stringify({ after, ceiling, context }), "utf8").toString("base64url");
+}
+
+export async function communityCursorPage<T>(
+  after: number | null,
+  ceiling: number | null,
+  limit: number,
+  initialCeiling: () => Promise<number | null>,
+  fetchBatch: (after: number | null, ceiling: number, limit: number) => Promise<T[]>,
+  keyFor: (row: T) => number,
+): Promise<{ rows: T[]; hasMore: boolean; nextAfter: number | null; ceiling: number | null }> {
+  const fixedCeiling = ceiling ?? await initialCeiling();
+  if (fixedCeiling === null) return { rows: [], hasMore: false, nextAfter: null, ceiling: null };
+  const batch = await fetchBatch(after, fixedCeiling, limit + 1);
+  const rows = batch.slice(0, limit);
+  const hasMore = batch.length > limit;
+  return {
+    rows,
+    hasMore,
+    nextAfter: hasMore && rows.length ? keyFor(rows[rows.length - 1]) : null,
+    ceiling: fixedCeiling,
+  };
+}
+
+function cursorCondition(column: any, state: CursorState) {
+  if (!state.active) return undefined;
+  if (state.ceiling === null) return sql`false`;
+  if (Array.isArray(state.after) || Array.isArray(state.ceiling)) return sql`false`;
+  const conditions = [];
+  if (state.after !== null) conditions.push(gt(column, state.after));
+  if (state.ceiling !== null) conditions.push(lte(column, state.ceiling));
+  return conditions.length ? and(...conditions) : undefined;
+}
+
+function tupleCursorCondition(firstColumn: any, secondColumn: any, state: CursorState) {
+  if (!state.active) return undefined;
+  if (!Array.isArray(state.ceiling)) return sql`false`;
+  const [ceilingFirst, ceilingSecond] = state.ceiling;
+  const conditions = [or(
+    sql`${firstColumn} < ${ceilingFirst}`,
+    and(eq(firstColumn, ceilingFirst), lte(secondColumn, ceilingSecond)),
+  )!];
+  if (Array.isArray(state.after)) {
+    const [afterFirst, afterSecond] = state.after;
+    conditions.push(or(
+      gt(firstColumn, afterFirst),
+      and(eq(firstColumn, afterFirst), gt(secondColumn, afterSecond)),
+    )!);
+  }
+  return and(...conditions);
+}
+
+function encodedNextCursor(state: CursorState, after: CursorKey, hasMore: boolean): string | null {
+  if (!hasMore || state.ceiling === null) return null;
+  return communityCursorToken(after, state.ceiling, state.context);
+}
+
+function cursorPageInfo<T>(state: CursorState, rows: T[], limit: number, key: (row: T) => CursorKey) {
+  if (!state.active) return {};
+  const consumed = rows[Math.min(limit, rows.length) - 1];
+  return { nextCursor: consumed ? encodedNextCursor(state, key(consumed), rows.length > limit) : null };
+}
+
+function membershipCursorKey(row: { userId: string; teamId: number }): [number, string] {
+  return [row.teamId, row.userId];
+}
+
+function appendCursorCondition(base: any, cursor: any) {
+  return cursor ? and(base, cursor) : base;
+}
+
 function slugify(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
@@ -504,12 +628,46 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
     res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
     return;
   }
+  let cursor = communityCursorRequest(req, ["cursor", "communitiesCursor"], `communities:${userId}`, "number");
+  if (!cursor) {
+    res.status(400).json({ error: "Invalid pagination cursor." });
+    return;
+  }
   await ensureProfile(userId);
   const page = pageParam(req, "communities");
-  const communities = await db.select().from(communitiesTable)
-    .where(eq(communitiesTable.plan, "paid_workspace"))
-    .orderBy(asc(communitiesTable.name), asc(communitiesTable.id))
-    .limit(page.limit + 1).offset(page.offset);
+  let cursorHasMore = false;
+  let cursorAfter: number | null = null;
+  let communities: Array<typeof communitiesTable.$inferSelect>;
+  if (cursor.active) {
+    const cursorPage = await communityCursorPage(
+      typeof cursor.after === "number" ? cursor.after : null,
+      typeof cursor.ceiling === "number" ? cursor.ceiling : null,
+      page.limit,
+      async () => {
+        const [row] = await db.select({ key: communitiesTable.id }).from(communitiesTable)
+          .where(eq(communitiesTable.plan, "paid_workspace")).orderBy(desc(communitiesTable.id)).limit(1);
+        return row?.key ?? null;
+      },
+      async (after, ceiling, limit) => {
+        const keyRange = after === null
+          ? lte(communitiesTable.id, ceiling)
+          : and(gt(communitiesTable.id, after), lte(communitiesTable.id, ceiling));
+        return db.select().from(communitiesTable)
+          .where(appendCursorCondition(eq(communitiesTable.plan, "paid_workspace"), keyRange))
+          .orderBy(asc(communitiesTable.id)).limit(limit);
+      },
+      (row) => row.id,
+    );
+    communities = cursorPage.rows;
+    cursorHasMore = cursorPage.hasMore;
+    cursorAfter = cursorPage.nextAfter;
+    cursor = { ...cursor, ceiling: cursorPage.ceiling };
+  } else {
+    communities = await db.select().from(communitiesTable)
+      .where(eq(communitiesTable.plan, "paid_workspace"))
+      .orderBy(asc(communitiesTable.name), asc(communitiesTable.id))
+      .limit(page.limit + 1).offset(page.offset);
+  }
   const memberships = await db.select({ communityId: communityMembersTable.communityId })
     .from(communityMembersTable)
     .where(and(eq(communityMembersTable.userId, userId), inArray(communityMembersTable.communityId, communities.slice(0, page.limit).map((item) => item.id))));
@@ -531,8 +689,12 @@ router.get("/communities", requireAuth, async (req: AuthenticatedRequest, res): 
     ) return null;
     return { ...community, joined, canManage };
   }).filter((community): community is NonNullable<typeof community> => community !== null);
-  res.set("X-Has-More", String(communities.length > page.limit));
+  res.set("X-Has-More", String(cursor.active ? cursorHasMore : communities.length > page.limit));
   res.set("X-Next-Offset", String(page.offset + page.limit));
+  if (cursor.active) {
+    const next = cursorAfter === null ? null : encodedNextCursor(cursor, cursorAfter, cursorHasMore);
+    if (next) res.set("X-Next-Cursor", next);
+  }
   res.json(result);
 });
 
@@ -747,6 +909,18 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
     res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
     return;
   }
+  const cursorContext = `organization-snapshot:${communityId}:${userId}`;
+  let employeesCursor = communityCursorRequest(req, ["employeesCursor"], `${cursorContext}:employees`, "string");
+  let assignmentsCursor = communityCursorRequest(req, ["assignmentsCursor"], `${cursorContext}:assignments`, "number");
+  let departmentsCursor = communityCursorRequest(req, ["departmentsCursor"], `${cursorContext}:departments`, "number");
+  let locationsCursor = communityCursorRequest(req, ["locationsCursor"], `${cursorContext}:locations`, "number");
+  let teamsCursor = communityCursorRequest(req, ["teamsCursor"], `${cursorContext}:teams`, "number");
+  let invitationsCursor = communityCursorRequest(req, ["invitationsCursor"], `${cursorContext}:invitations`, "number");
+  let teamMembershipsCursor = communityCursorRequest(req, ["teamMembershipsCursor"], `${cursorContext}:teamMemberships`, "pair");
+  if (!employeesCursor || !assignmentsCursor || !departmentsCursor || !locationsCursor || !teamsCursor || !invitationsCursor || !teamMembershipsCursor) {
+    res.status(400).json({ error: "Invalid pagination cursor." });
+    return;
+  }
   const employeesPage = pageParam(req, "employees");
   const invitationsPage = pageParam(req, "invitations");
   const assignmentsPage = pageParam(req, "assignments");
@@ -754,30 +928,81 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
   const locationsPage = pageParam(req, "locations");
   const teamsPage = pageParam(req, "teams");
   const membershipPage = pageParam(req, "teamMemberships");
-  const pagedMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined;
+  const pagedMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined || teamMembershipsCursor.active;
+  [employeesCursor, assignmentsCursor, departmentsCursor, locationsCursor, teamsCursor, invitationsCursor, teamMembershipsCursor] = await Promise.all([
+    cursorCeiling(employeesCursor, async () => {
+      const [row] = await db.select({ key: usersTable.clerkId }).from(communityMembersTable)
+        .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+        .where(eq(communityMembersTable.communityId, communityId)).orderBy(desc(usersTable.clerkId)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(assignmentsCursor, async () => {
+      const [row] = await db.select({ key: userRolesTable.id }).from(userRolesTable).where(eq(userRolesTable.communityId, communityId)).orderBy(desc(userRolesTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(departmentsCursor, async () => {
+      const [row] = await db.select({ key: departmentsTable.id }).from(departmentsTable).where(eq(departmentsTable.communityId, communityId)).orderBy(desc(departmentsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(locationsCursor, async () => {
+      const [row] = await db.select({ key: locationsTable.id }).from(locationsTable).where(eq(locationsTable.communityId, communityId)).orderBy(desc(locationsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(teamsCursor, async () => {
+      const [row] = await db.select({ key: teamsTable.id }).from(teamsTable).where(eq(teamsTable.communityId, communityId)).orderBy(desc(teamsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(invitationsCursor, async () => {
+      const [row] = await db.select({ key: workspaceInvitationsTable.id }).from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, communityId)).orderBy(desc(workspaceInvitationsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(teamMembershipsCursor, async () => {
+      const [row] = await db.select({ userId: teamMembersTable.userId, teamId: teamMembersTable.teamId }).from(teamMembersTable)
+        .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(eq(teamsTable.communityId, communityId))
+        .orderBy(desc(teamMembersTable.teamId), desc(teamMembersTable.userId)).limit(1);
+      return row ? [row.teamId, row.userId] : null;
+    }),
+  ]);
   const [members, assignments, departments, locations, teams, invitations] = await Promise.all([
-    db.select({
+    (employeesCursor.active
+      ? db.select({
+        id: usersTable.clerkId, username: usersTable.username, displayName: usersTable.displayName,
+        presenceStatus: usersTable.status, status: usersTable.status, joinedAt: communityMembersTable.joinedAt,
+      }).from(communityMembersTable).innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+        .where(appendCursorCondition(eq(communityMembersTable.communityId, communityId), cursorCondition(usersTable.clerkId, employeesCursor)))
+        .orderBy(asc(usersTable.clerkId)).limit(employeesPage.limit + 1)
+      : db.select({
       id: usersTable.clerkId, username: usersTable.username, displayName: usersTable.displayName,
       presenceStatus: usersTable.status, status: usersTable.status, joinedAt: communityMembersTable.joinedAt,
     }).from(communityMembersTable).innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
       .where(eq(communityMembersTable.communityId, communityId))
       .orderBy(asc(usersTable.displayName), asc(communityMembersTable.userId))
-      .limit(employeesPage.limit + 1).offset(employeesPage.offset),
-    db.select().from(userRolesTable).where(eq(userRolesTable.communityId, communityId))
-      .orderBy(asc(userRolesTable.userId), asc(userRolesTable.id))
-      .limit(assignmentsPage.limit + 1).offset(assignmentsPage.offset),
-    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, communityId))
-      .orderBy(asc(departmentsTable.name), asc(departmentsTable.id))
-      .limit(departmentsPage.limit + 1).offset(departmentsPage.offset),
-    db.select().from(locationsTable).where(eq(locationsTable.communityId, communityId))
-      .orderBy(asc(locationsTable.name), asc(locationsTable.id))
-      .limit(locationsPage.limit + 1).offset(locationsPage.offset),
-    db.select().from(teamsTable).where(eq(teamsTable.communityId, communityId))
-      .orderBy(asc(teamsTable.name), asc(teamsTable.id))
-      .limit(teamsPage.limit + 1).offset(teamsPage.offset),
-    db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, communityId))
-      .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id))
-      .limit(invitationsPage.limit + 1).offset(invitationsPage.offset),
+      .limit(employeesPage.limit + 1).offset(employeesPage.offset)),
+    assignmentsCursor.active
+      ? db.select().from(userRolesTable).where(appendCursorCondition(eq(userRolesTable.communityId, communityId), cursorCondition(userRolesTable.id, assignmentsCursor)))
+        .orderBy(asc(userRolesTable.id)).limit(assignmentsPage.limit + 1)
+      : db.select().from(userRolesTable).where(eq(userRolesTable.communityId, communityId))
+        .orderBy(asc(userRolesTable.userId), asc(userRolesTable.id)).limit(assignmentsPage.limit + 1).offset(assignmentsPage.offset),
+    departmentsCursor.active
+      ? db.select().from(departmentsTable).where(appendCursorCondition(eq(departmentsTable.communityId, communityId), cursorCondition(departmentsTable.id, departmentsCursor)))
+        .orderBy(asc(departmentsTable.id)).limit(departmentsPage.limit + 1)
+      : db.select().from(departmentsTable).where(eq(departmentsTable.communityId, communityId))
+        .orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(departmentsPage.limit + 1).offset(departmentsPage.offset),
+    locationsCursor.active
+      ? db.select().from(locationsTable).where(appendCursorCondition(eq(locationsTable.communityId, communityId), cursorCondition(locationsTable.id, locationsCursor)))
+        .orderBy(asc(locationsTable.id)).limit(locationsPage.limit + 1)
+      : db.select().from(locationsTable).where(eq(locationsTable.communityId, communityId))
+        .orderBy(asc(locationsTable.name), asc(locationsTable.id)).limit(locationsPage.limit + 1).offset(locationsPage.offset),
+    teamsCursor.active
+      ? db.select().from(teamsTable).where(appendCursorCondition(eq(teamsTable.communityId, communityId), cursorCondition(teamsTable.id, teamsCursor)))
+        .orderBy(asc(teamsTable.id)).limit(teamsPage.limit + 1)
+      : db.select().from(teamsTable).where(eq(teamsTable.communityId, communityId))
+        .orderBy(asc(teamsTable.name), asc(teamsTable.id)).limit(teamsPage.limit + 1).offset(teamsPage.offset),
+    invitationsCursor.active
+      ? db.select().from(workspaceInvitationsTable).where(appendCursorCondition(eq(workspaceInvitationsTable.communityId, communityId), cursorCondition(workspaceInvitationsTable.id, invitationsCursor)))
+        .orderBy(asc(workspaceInvitationsTable.id)).limit(invitationsPage.limit + 1)
+      : db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, communityId))
+        .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id)).limit(invitationsPage.limit + 1).offset(invitationsPage.offset),
   ]);
   // The viewer's team memberships remain available even when their directory
   // row falls on a later page, matching the workspace detail response.
@@ -786,8 +1011,10 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
     teamId: teamMembersTable.teamId, userId: teamMembersTable.userId, role: teamMembersTable.role,
     status: teamMembersTable.status, joinedAt: teamMembersTable.joinedAt, endedAt: teamMembersTable.endedAt,
   }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-    .where(and(eq(teamsTable.communityId, communityId), pagedMemberships ? undefined : inArray(teamMembersTable.userId, memberIds)))
-    .orderBy(asc(teamMembersTable.userId), asc(teamMembersTable.teamId));
+    .where(and(eq(teamsTable.communityId, communityId), pagedMemberships ? undefined : inArray(teamMembersTable.userId, memberIds),
+      tupleCursorCondition(teamMembersTable.teamId, teamMembersTable.userId, teamMembershipsCursor)))
+    .orderBy(teamMembershipsCursor.active ? asc(teamMembersTable.teamId) : asc(teamMembersTable.userId),
+      teamMembershipsCursor.active ? asc(teamMembersTable.userId) : asc(teamMembersTable.teamId));
   const [profiles, teamMemberships] = await Promise.all([
     memberIds.length ? db.select({
       userId: employeeProfilesTable.userId, employeeNumber: employeeProfilesTable.employeeNumber,
@@ -799,7 +1026,9 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
       eq(employeeProfilesTable.communityId, communityId), inArray(employeeProfilesTable.userId, memberIds),
     )) : Promise.resolve([] as Array<Pick<typeof employeeProfilesTable.$inferSelect,
       "userId" | "employeeNumber" | "jobTitle" | "employmentStatus" | "departmentId" | "locationId" | "managerId" | "onboardedAt" | "offboardedAt">>),
-    pagedMemberships ? membershipQuery.limit(membershipPage.limit + 1).offset(membershipPage.offset) : memberIds.length ? membershipQuery : Promise.resolve([] as Array<typeof teamMembersTable.$inferSelect>),
+    pagedMemberships
+      ? teamMembershipsCursor.active ? membershipQuery.limit(membershipPage.limit + 1) : membershipQuery.limit(membershipPage.limit + 1).offset(membershipPage.offset)
+      : memberIds.length ? membershipQuery : Promise.resolve([] as Array<typeof teamMembersTable.$inferSelect>),
   ]);
   const profilesById = new Map(profiles.map((profile) => [profile.userId, profile]));
   const snapshot = {
@@ -823,13 +1052,14 @@ router.get("/communities/:communityId/organization-snapshot", requireAuth, async
     teams: teams.slice(0, teamsPage.limit),
     invitations: invitations.slice(0, invitationsPage.limit).map(safeInvitation),
     pagination: {
-      ...(pagedMemberships ? { teamMemberships: { ...membershipPage, hasMore: teamMemberships.length > membershipPage.limit } } : {}),
-      employees: { ...employeesPage, hasMore: members.length > employeesPage.limit },
-      invitations: { ...invitationsPage, hasMore: invitations.length > invitationsPage.limit },
-      assignments: { ...assignmentsPage, hasMore: assignments.length > assignmentsPage.limit },
-      departments: { ...departmentsPage, hasMore: departments.length > departmentsPage.limit },
-      locations: { ...locationsPage, hasMore: locations.length > locationsPage.limit },
-      teams: { ...teamsPage, hasMore: teams.length > teamsPage.limit },
+      ...(pagedMemberships ? { teamMemberships: { ...membershipPage, hasMore: teamMemberships.length > membershipPage.limit,
+        ...cursorPageInfo(teamMembershipsCursor, teamMemberships, membershipPage.limit, membershipCursorKey) } } : {}),
+      employees: { ...employeesPage, hasMore: members.length > employeesPage.limit, ...cursorPageInfo(employeesCursor, members, employeesPage.limit, (row) => row.id) },
+      invitations: { ...invitationsPage, hasMore: invitations.length > invitationsPage.limit, ...cursorPageInfo(invitationsCursor, invitations, invitationsPage.limit, (row) => row.id) },
+      assignments: { ...assignmentsPage, hasMore: assignments.length > assignmentsPage.limit, ...cursorPageInfo(assignmentsCursor, assignments, assignmentsPage.limit, (row) => row.id) },
+      departments: { ...departmentsPage, hasMore: departments.length > departmentsPage.limit, ...cursorPageInfo(departmentsCursor, departments, departmentsPage.limit, (row) => row.id) },
+      locations: { ...locationsPage, hasMore: locations.length > locationsPage.limit, ...cursorPageInfo(locationsCursor, locations, locationsPage.limit, (row) => row.id) },
+      teams: { ...teamsPage, hasMore: teams.length > teamsPage.limit, ...cursorPageInfo(teamsCursor, teams, teamsPage.limit, (row) => row.id) },
     },
   };
   const etag = `"${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}"`;
@@ -858,6 +1088,24 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     res.status(400).json({ error: "Pagination limits must be positive integers and offsets must be non-negative integers." });
     return;
   }
+  const cursorContext = `workspace-detail:${community.id}:${userId}`;
+  let employeesCursor = communityCursorRequest(req, ["employeesCursor"], `${cursorContext}:employees`, "string");
+  let tasksCursor = communityCursorRequest(req, ["tasksCursor"], `${cursorContext}:tasks`, "number");
+  let channelsCursor = communityCursorRequest(req, ["channelsCursor"], `${cursorContext}:channels`, "number");
+  let categoriesCursor = communityCursorRequest(req, ["categoriesCursor"], `${cursorContext}:categories`, "number");
+  let assignmentsCursor = communityCursorRequest(req, ["assignmentsCursor"], `${cursorContext}:assignments`, "number");
+  let announcementsCursor = communityCursorRequest(req, ["announcementsCursor"], `${cursorContext}:announcements`, "number");
+  let departmentsCursor = communityCursorRequest(req, ["departmentsCursor"], `${cursorContext}:departments`, "number");
+  let locationsCursor = communityCursorRequest(req, ["locationsCursor"], `${cursorContext}:locations`, "number");
+  let teamsCursor = communityCursorRequest(req, ["teamsCursor"], `${cursorContext}:teams`, "number");
+  let invitationsCursor = communityCursorRequest(req, ["invitationsCursor"], `${cursorContext}:invitations`, "number");
+  let policiesCursor = communityCursorRequest(req, ["policiesCursor"], `${cursorContext}:policies`, "number");
+  let teamMembershipsCursor = communityCursorRequest(req, ["teamMembershipsCursor"], `${cursorContext}:teamMemberships`, "pair");
+  if (!employeesCursor || !tasksCursor || !channelsCursor || !categoriesCursor || !assignmentsCursor || !announcementsCursor
+    || !departmentsCursor || !locationsCursor || !teamsCursor || !invitationsCursor || !policiesCursor || !teamMembershipsCursor) {
+    res.status(400).json({ error: "Invalid pagination cursor." });
+    return;
+  }
   await activateDueAnnouncements(community.id);
   const employeePage = pageParam(req, "employees");
   const invitationPage = pageParam(req, "invitations");
@@ -869,7 +1117,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const locationPage = pageParam(req, "locations");
   const teamPage = pageParam(req, "teams");
   const teamMembershipPage = pageParam(req, "teamMemberships");
-  const pageTeamMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined;
+  const pageTeamMemberships = req.query.teamMembershipsLimit !== undefined || req.query.teamMembershipsOffset !== undefined || teamMembershipsCursor.active;
   const policyPage = pageParam(req, "policies");
   // Preserve the historic 20-item first announcement page.
   const announcementPage = {
@@ -915,11 +1163,79 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   const channelVisibility = viewerIsMember || canManage
     ? eq(channelsTable.communityId, community.id)
     : and(eq(channelsTable.communityId, community.id), eq(channelsTable.isPrivate, false));
-  const pagedTasks = await db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id))
-    .orderBy(desc(workspaceTasksTable.updatedAt), desc(workspaceTasksTable.id))
-    .limit(taskPage.limit + 1).offset(taskPage.offset);
+  [employeesCursor, tasksCursor, channelsCursor, categoriesCursor, assignmentsCursor, announcementsCursor,
+    departmentsCursor, locationsCursor, teamsCursor, invitationsCursor, policiesCursor, teamMembershipsCursor] = await Promise.all([
+    cursorCeiling(employeesCursor, async () => {
+      const [row] = await db.select({ key: usersTable.clerkId }).from(communityMembersTable)
+        .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+        .where(eq(communityMembersTable.communityId, community.id)).orderBy(desc(usersTable.clerkId)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(tasksCursor, async () => {
+      const [row] = await db.select({ key: workspaceTasksTable.id }).from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id)).orderBy(desc(workspaceTasksTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(channelsCursor, async () => {
+      const [row] = await db.select({ key: channelsTable.id }).from(channelsTable).where(channelVisibility).orderBy(desc(channelsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(categoriesCursor, async () => {
+      const [row] = await db.select({ key: categoriesTable.id }).from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(desc(categoriesTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(assignmentsCursor, async () => {
+      const [row] = await db.select({ key: userRolesTable.id }).from(userRolesTable).where(eq(userRolesTable.communityId, community.id)).orderBy(desc(userRolesTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(announcementsCursor, async () => {
+      const [row] = await db.select({ key: serverAnnouncementsTable.id }).from(serverAnnouncementsTable).where(announcementVisibility).orderBy(desc(serverAnnouncementsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(departmentsCursor, async () => {
+      const [row] = await db.select({ key: departmentsTable.id }).from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(desc(departmentsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(locationsCursor, async () => {
+      const [row] = await db.select({ key: locationsTable.id }).from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(desc(locationsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(teamsCursor, async () => {
+      const [row] = await db.select({ key: teamsTable.id }).from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(desc(teamsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(invitationsCursor, async () => {
+      const [row] = await db.select({ key: workspaceInvitationsTable.id }).from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id)).orderBy(desc(workspaceInvitationsTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(policiesCursor, async () => {
+      const [row] = await db.select({ key: workspacePoliciesTable.id }).from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.id)).limit(1);
+      return row?.key ?? null;
+    }),
+    cursorCeiling(teamMembershipsCursor, async () => {
+      const [row] = await db.select({ userId: teamMembersTable.userId, teamId: teamMembersTable.teamId }).from(teamMembersTable)
+        .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(eq(teamsTable.communityId, community.id))
+        .orderBy(desc(teamMembersTable.teamId), desc(teamMembersTable.userId)).limit(1);
+      return row ? [row.teamId, row.userId] : null;
+    }),
+  ]);
+  const pagedTasks = tasksCursor.active
+    ? await db.select().from(workspaceTasksTable)
+      .where(appendCursorCondition(eq(workspaceTasksTable.communityId, community.id), cursorCondition(workspaceTasksTable.id, tasksCursor)))
+      .orderBy(asc(workspaceTasksTable.id)).limit(taskPage.limit + 1)
+    : await db.select().from(workspaceTasksTable).where(eq(workspaceTasksTable.communityId, community.id))
+      .orderBy(desc(workspaceTasksTable.updatedAt), desc(workspaceTasksTable.id)).limit(taskPage.limit + 1).offset(taskPage.offset);
   const selectedTaskIds = pagedTasks.slice(0, taskPage.limit).map((task) => task.id);
-  const pagedMembers = await db.select({
+  const pagedMembers = employeesCursor.active ? await db.select({
+    id: usersTable.clerkId,
+    username: usersTable.username,
+    displayName: usersTable.displayName,
+    presenceStatus: usersTable.status,
+    status: usersTable.status,
+    joinedAt: communityMembersTable.joinedAt,
+  }).from(communityMembersTable)
+    .innerJoin(usersTable, eq(usersTable.clerkId, communityMembersTable.userId))
+    .where(appendCursorCondition(eq(communityMembersTable.communityId, community.id), cursorCondition(usersTable.clerkId, employeesCursor)))
+    .orderBy(asc(usersTable.clerkId)).limit(employeePage.limit + 1) : await db.select({
     id: usersTable.clerkId,
     username: usersTable.username,
     displayName: usersTable.displayName,
@@ -934,11 +1250,14 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
   // The viewer's profile and team memberships also determine announcement
   // visibility, even when their directory entry is on a later page.
   const selectedMemberIds = [...new Set([...pagedMembers.map((member) => member.id), userId])];
-  const returnedAnnouncementIds = (await db.select({ id: serverAnnouncementsTable.id })
-    .from(serverAnnouncementsTable)
-    .where(announcementVisibility)
-    .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
-    .limit(announcementPage.limit).offset(announcementPage.offset)).map((row) => row.id);
+  const returnedAnnouncementRows = announcementsCursor.active
+    ? await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
+      .where(appendCursorCondition(announcementVisibility, cursorCondition(serverAnnouncementsTable.id, announcementsCursor)))
+      .orderBy(asc(serverAnnouncementsTable.id)).limit(announcementPage.limit + 1)
+    : await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
+      .where(announcementVisibility).orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
+      .limit(announcementPage.limit).offset(announcementPage.offset);
+  const returnedAnnouncementIds = returnedAnnouncementRows.map((row) => row.id);
   const taskCommentsQuery = summaryView
     ? Promise.resolve([] as Array<{
       id: number;
@@ -992,13 +1311,21 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     endedAt: teamMembersTable.endedAt,
   }).from(teamMembersTable)
     .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-    .where(and(eq(teamsTable.communityId, community.id), pageTeamMemberships ? undefined : inArray(teamMembersTable.userId, selectedMemberIds)))
-    .orderBy(asc(teamMembersTable.userId), asc(teamMembersTable.teamId));
+    .where(and(eq(teamsTable.communityId, community.id), pageTeamMemberships ? undefined : inArray(teamMembersTable.userId, selectedMemberIds),
+      tupleCursorCondition(teamMembersTable.teamId, teamMembersTable.userId, teamMembershipsCursor)))
+    .orderBy(pageTeamMemberships && teamMembershipsCursor.active ? asc(teamMembersTable.teamId) : asc(teamMembersTable.userId),
+      pageTeamMemberships && teamMembershipsCursor.active ? asc(teamMembersTable.userId) : asc(teamMembersTable.teamId));
   const [members, channels, categories, assignments, announcements, departments, locations, teams, employees, invitations, policies, tasks, taskComments, taskAttachments, teamMemberships, announcementReceipts, announcementAcks, announcementAttachments] = await Promise.all([
      Promise.resolve(pagedMembers),
-    db.select().from(channelsTable).where(channelVisibility).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
-    db.select().from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(categoryPage.limit + 1).offset(categoryPage.offset),
-    db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)).orderBy(asc(userRolesTable.userId), asc(userRolesTable.id)).limit(assignmentPage.limit + 1).offset(assignmentPage.offset),
+     channelsCursor.active
+       ? db.select().from(channelsTable).where(appendCursorCondition(channelVisibility, cursorCondition(channelsTable.id, channelsCursor))).orderBy(asc(channelsTable.id)).limit(channelPage.limit + 1)
+       : db.select().from(channelsTable).where(channelVisibility).orderBy(asc(channelsTable.name), asc(channelsTable.id)).limit(channelPage.limit + 1).offset(channelPage.offset),
+     categoriesCursor.active
+       ? db.select().from(categoriesTable).where(appendCursorCondition(eq(categoriesTable.communityId, community.id), cursorCondition(categoriesTable.id, categoriesCursor))).orderBy(asc(categoriesTable.id)).limit(categoryPage.limit + 1)
+       : db.select().from(categoriesTable).where(eq(categoriesTable.communityId, community.id)).orderBy(asc(categoriesTable.name), asc(categoriesTable.id)).limit(categoryPage.limit + 1).offset(categoryPage.offset),
+     assignmentsCursor.active
+       ? db.select().from(userRolesTable).where(appendCursorCondition(eq(userRolesTable.communityId, community.id), cursorCondition(userRolesTable.id, assignmentsCursor))).orderBy(asc(userRolesTable.id)).limit(assignmentPage.limit + 1)
+       : db.select().from(userRolesTable).where(eq(userRolesTable.communityId, community.id)).orderBy(asc(userRolesTable.userId), asc(userRolesTable.id)).limit(assignmentPage.limit + 1).offset(assignmentPage.offset),
      db.select({
       id: serverAnnouncementsTable.id,
       title: serverAnnouncementsTable.title,
@@ -1014,14 +1341,20 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
       status: serverAnnouncementsTable.status,
       createdAt: serverAnnouncementsTable.createdAt,
       author: usersTable.displayName,
-    }).from(serverAnnouncementsTable)
+     }).from(serverAnnouncementsTable)
       .innerJoin(usersTable, eq(usersTable.clerkId, serverAnnouncementsTable.authorId))
-       .where(announcementVisibility)
-       .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
-       .limit(announcementPage.limit + 1).offset(announcementPage.offset),
-    db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(departmentPage.limit + 1).offset(departmentPage.offset),
-    db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name), asc(locationsTable.id)).limit(locationPage.limit + 1).offset(locationPage.offset),
-    db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name), asc(teamsTable.id)).limit(teamPage.limit + 1).offset(teamPage.offset),
+        .where(announcementsCursor.active ? appendCursorCondition(announcementVisibility, cursorCondition(serverAnnouncementsTable.id, announcementsCursor)) : announcementVisibility)
+        .orderBy(announcementsCursor.active ? asc(serverAnnouncementsTable.id) : desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
+        .limit(announcementPage.limit + 1).offset(announcementsCursor.active ? 0 : announcementPage.offset),
+     departmentsCursor.active
+       ? db.select().from(departmentsTable).where(appendCursorCondition(eq(departmentsTable.communityId, community.id), cursorCondition(departmentsTable.id, departmentsCursor))).orderBy(asc(departmentsTable.id)).limit(departmentPage.limit + 1)
+       : db.select().from(departmentsTable).where(eq(departmentsTable.communityId, community.id)).orderBy(asc(departmentsTable.name), asc(departmentsTable.id)).limit(departmentPage.limit + 1).offset(departmentPage.offset),
+     locationsCursor.active
+       ? db.select().from(locationsTable).where(appendCursorCondition(eq(locationsTable.communityId, community.id), cursorCondition(locationsTable.id, locationsCursor))).orderBy(asc(locationsTable.id)).limit(locationPage.limit + 1)
+       : db.select().from(locationsTable).where(eq(locationsTable.communityId, community.id)).orderBy(asc(locationsTable.name), asc(locationsTable.id)).limit(locationPage.limit + 1).offset(locationPage.offset),
+     teamsCursor.active
+       ? db.select().from(teamsTable).where(appendCursorCondition(eq(teamsTable.communityId, community.id), cursorCondition(teamsTable.id, teamsCursor))).orderBy(asc(teamsTable.id)).limit(teamPage.limit + 1)
+       : db.select().from(teamsTable).where(eq(teamsTable.communityId, community.id)).orderBy(asc(teamsTable.name), asc(teamsTable.id)).limit(teamPage.limit + 1).offset(teamPage.offset),
     db.select({
       communityId: employeeProfilesTable.communityId,
       userId: employeeProfilesTable.userId,
@@ -1039,14 +1372,23 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
        .where(selectedMemberIds.length
          ? and(eq(employeeProfilesTable.communityId, community.id), inArray(employeeProfilesTable.userId, selectedMemberIds))
          : sql`false`),
-     db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id))
-       .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id))
-       .limit(invitationPage.limit + 1).offset(invitationPage.offset),
-     db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id)).orderBy(desc(workspacePoliciesTable.createdAt), desc(workspacePoliciesTable.id)).limit(policyPage.limit + 1).offset(policyPage.offset),
+      invitationsCursor.active
+        ? db.select().from(workspaceInvitationsTable).where(appendCursorCondition(eq(workspaceInvitationsTable.communityId, community.id), cursorCondition(workspaceInvitationsTable.id, invitationsCursor)))
+          .orderBy(asc(workspaceInvitationsTable.id)).limit(invitationPage.limit + 1)
+        : db.select().from(workspaceInvitationsTable).where(eq(workspaceInvitationsTable.communityId, community.id))
+          .orderBy(desc(workspaceInvitationsTable.createdAt), desc(workspaceInvitationsTable.id)).limit(invitationPage.limit + 1).offset(invitationPage.offset),
+      policiesCursor.active
+        ? db.select().from(workspacePoliciesTable).where(appendCursorCondition(eq(workspacePoliciesTable.communityId, community.id), cursorCondition(workspacePoliciesTable.id, policiesCursor)))
+          .orderBy(asc(workspacePoliciesTable.id)).limit(policyPage.limit + 1)
+        : db.select().from(workspacePoliciesTable).where(eq(workspacePoliciesTable.communityId, community.id))
+          .orderBy(desc(workspacePoliciesTable.createdAt), desc(workspacePoliciesTable.id)).limit(policyPage.limit + 1).offset(policyPage.offset),
      Promise.resolve(pagedTasks),
     taskCommentsQuery,
     taskAttachmentsQuery,
-    pageTeamMemberships ? teamMembershipsQuery.limit(teamMembershipPage.limit + 1).offset(teamMembershipPage.offset) : teamMembershipsQuery,
+      pageTeamMemberships
+        ? teamMembershipsCursor.active ? teamMembershipsQuery.limit(teamMembershipPage.limit + 1)
+          : teamMembershipsQuery.limit(teamMembershipPage.limit + 1).offset(teamMembershipPage.offset)
+        : teamMembershipsQuery,
      returnedAnnouncementIds.length ? db.select({
       announcementId: announcementReadReceiptsTable.announcementId,
       userId: announcementReadReceiptsTable.userId,
@@ -1137,18 +1479,19 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     isOwner: community.ownerId === userId,
     teamMemberships: pageTeamMemberships ? teamMemberships.slice(0, teamMembershipPage.limit) : teamMemberships,
      pagination: {
-       ...(pageTeamMemberships ? { teamMemberships: { ...teamMembershipPage, hasMore: teamMemberships.length > teamMembershipPage.limit } } : {}),
-       employees: { limit: employeePage.limit, offset: employeePage.offset, hasMore: members.length > employeePage.limit },
-       invitations: { limit: invitationPage.limit, offset: invitationPage.offset, hasMore: invitations.length > invitationPage.limit },
-       tasks: { limit: taskPage.limit, offset: taskPage.offset, hasMore: tasks.length > taskPage.limit },
-       channels: { limit: channelPage.limit, offset: channelPage.offset, hasMore: channels.length > channelPage.limit },
-       categories: { limit: categoryPage.limit, offset: categoryPage.offset, hasMore: categories.length > categoryPage.limit },
-       assignments: { limit: assignmentPage.limit, offset: assignmentPage.offset, hasMore: assignments.length > assignmentPage.limit },
-       departments: { limit: departmentPage.limit, offset: departmentPage.offset, hasMore: departments.length > departmentPage.limit },
-       locations: { limit: locationPage.limit, offset: locationPage.offset, hasMore: locations.length > locationPage.limit },
-       teams: { limit: teamPage.limit, offset: teamPage.offset, hasMore: teams.length > teamPage.limit },
-       policies: { limit: policyPage.limit, offset: policyPage.offset, hasMore: policies.length > policyPage.limit },
-        announcements: { limit: announcementPage.limit, offset: announcementPage.offset, hasMore: announcements.length > announcementPage.limit },
+        ...(pageTeamMemberships ? { teamMemberships: { ...teamMembershipPage, hasMore: teamMemberships.length > teamMembershipPage.limit,
+          ...cursorPageInfo(teamMembershipsCursor, teamMemberships, teamMembershipPage.limit, membershipCursorKey) } } : {}),
+        employees: { limit: employeePage.limit, offset: employeePage.offset, hasMore: members.length > employeePage.limit, ...cursorPageInfo(employeesCursor, members, employeePage.limit, (row) => row.id) },
+        invitations: { limit: invitationPage.limit, offset: invitationPage.offset, hasMore: invitations.length > invitationPage.limit, ...cursorPageInfo(invitationsCursor, invitations, invitationPage.limit, (row) => row.id) },
+        tasks: { limit: taskPage.limit, offset: taskPage.offset, hasMore: tasks.length > taskPage.limit, ...cursorPageInfo(tasksCursor, pagedTasks, taskPage.limit, (row) => row.id) },
+        channels: { limit: channelPage.limit, offset: channelPage.offset, hasMore: channels.length > channelPage.limit, ...cursorPageInfo(channelsCursor, channels, channelPage.limit, (row) => row.id) },
+        categories: { limit: categoryPage.limit, offset: categoryPage.offset, hasMore: categories.length > categoryPage.limit, ...cursorPageInfo(categoriesCursor, categories, categoryPage.limit, (row) => row.id) },
+        assignments: { limit: assignmentPage.limit, offset: assignmentPage.offset, hasMore: assignments.length > assignmentPage.limit, ...cursorPageInfo(assignmentsCursor, assignments, assignmentPage.limit, (row) => row.id) },
+        departments: { limit: departmentPage.limit, offset: departmentPage.offset, hasMore: departments.length > departmentPage.limit, ...cursorPageInfo(departmentsCursor, departments, departmentPage.limit, (row) => row.id) },
+        locations: { limit: locationPage.limit, offset: locationPage.offset, hasMore: locations.length > locationPage.limit, ...cursorPageInfo(locationsCursor, locations, locationPage.limit, (row) => row.id) },
+        teams: { limit: teamPage.limit, offset: teamPage.offset, hasMore: teams.length > teamPage.limit, ...cursorPageInfo(teamsCursor, teams, teamPage.limit, (row) => row.id) },
+        policies: { limit: policyPage.limit, offset: policyPage.offset, hasMore: policies.length > policyPage.limit, ...cursorPageInfo(policiesCursor, policies, policyPage.limit, (row) => row.id) },
+         announcements: { limit: announcementPage.limit, offset: announcementPage.offset, hasMore: announcements.length > announcementPage.limit, ...cursorPageInfo(announcementsCursor, announcements, announcementPage.limit, (row) => row.id) },
      },
   });
 });

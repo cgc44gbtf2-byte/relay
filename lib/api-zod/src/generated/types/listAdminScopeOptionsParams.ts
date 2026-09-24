@@ -21,4 +21,20 @@ limit?: CollectionLimitParameter;
  * @maximum 2147483647
  */
 offset?: CollectionOffsetParameter;
+/**
+ * Optional opaque cursor for the communities array; use start to begin cursor pagination.
+ */
+communitiesCursor?: string;
+/**
+ * Optional opaque cursor for the categories array; use start to begin cursor pagination.
+ */
+categoriesCursor?: string;
+/**
+ * Optional opaque cursor for the channels array; use start to begin cursor pagination.
+ */
+channelsCursor?: string;
+/**
+ * Optional opaque cursor for the departments array; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
 };

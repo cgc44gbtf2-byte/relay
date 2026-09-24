@@ -31,6 +31,10 @@ employeesLimit?: number;
  */
 employeesOffset?: number;
 /**
+ * Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+ */
+employeesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -39,6 +43,10 @@ invitationsLimit?: number;
  * @minimum 0
  */
 invitationsOffset?: number;
+/**
+ * Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+ */
+invitationsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -49,6 +57,10 @@ assignmentsLimit?: number;
  */
 assignmentsOffset?: number;
 /**
+ * Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+ */
+assignmentsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -57,6 +69,10 @@ departmentsLimit?: number;
  * @minimum 0
  */
 departmentsOffset?: number;
+/**
+ * Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -67,6 +83,10 @@ locationsLimit?: number;
  */
 locationsOffset?: number;
 /**
+ * Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+ */
+locationsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -75,6 +95,10 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+ */
+teamsCursor?: string;
 /**
  * Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
  * @minimum 1
@@ -85,4 +109,8 @@ teamMembershipsLimit?: number;
  * @minimum 0
  */
 teamMembershipsOffset?: number;
+/**
+ * Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+ */
+teamMembershipsCursor?: string;
 };

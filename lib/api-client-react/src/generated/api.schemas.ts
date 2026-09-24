@@ -46,6 +46,11 @@ export interface PageInfo {
   /** @minimum 0 */
   offset: number;
   hasMore: boolean;
+  /**
+     * Opaque continuation cursor when cursor pagination is requested; null when complete.
+     * @nullable
+     */
+  nextCursor?: string | null;
 }
 
 export interface DocumentListResponse {
@@ -298,9 +303,18 @@ export type CustomRoleCatalogPermissionsItem = {
   description: string;
 };
 
+export type CustomRoleCatalogPagination = {
+  /**
+     * Opaque cursor for the next role page
+     * @nullable
+     */
+  nextCursor: string | null;
+};
+
 export interface CustomRoleCatalog {
   roles: CustomRole[];
   permissions: CustomRoleCatalogPermissionsItem[];
+  pagination?: CustomRoleCatalogPagination;
 }
 
 export interface HealthStatus {
@@ -446,6 +460,11 @@ export type CollectionLimitParameter = number;
 export type CollectionOffsetParameter = number;
 
 /**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+export type CollectionCursorParameter = string;
+
+/**
  * Default limit for workspace collections; values above 100 are capped.
  */
 export type WorkspaceLimitParameter = number;
@@ -484,6 +503,10 @@ limit?: CollectionLimitParameter;
  * @maximum 2147483647
  */
 offset?: CollectionOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type RetireAdminCustomRole200 = {
@@ -544,6 +567,14 @@ communitiesLimit?: number;
  * @maximum 2147483647
  */
 communitiesOffset?: number;
+/**
+ * Optional opaque cursor for the communities page; use start to begin cursor pagination.
+ */
+cursor?: string;
+/**
+ * Alias for cursor, scoped to the communities array. Supply only one of cursor and communitiesCursor.
+ */
+communitiesCursor?: string;
 };
 
 export type ListCommunities200Item = { [key: string]: unknown };
@@ -571,6 +602,10 @@ employeesLimit?: number;
  */
 employeesOffset?: number;
 /**
+ * Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+ */
+employeesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -579,6 +614,10 @@ invitationsLimit?: number;
  * @minimum 0
  */
 invitationsOffset?: number;
+/**
+ * Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+ */
+invitationsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -589,6 +628,10 @@ tasksLimit?: number;
  */
 tasksOffset?: number;
 /**
+ * Optional opaque cursor for the tasks collection; use start to begin cursor pagination.
+ */
+tasksCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -597,6 +640,10 @@ channelsLimit?: number;
  * @minimum 0
  */
 channelsOffset?: number;
+/**
+ * Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+ */
+channelsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -607,6 +654,10 @@ categoriesLimit?: number;
  */
 categoriesOffset?: number;
 /**
+ * Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+ */
+categoriesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -615,6 +666,10 @@ assignmentsLimit?: number;
  * @minimum 0
  */
 assignmentsOffset?: number;
+/**
+ * Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+ */
+assignmentsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -625,6 +680,10 @@ departmentsLimit?: number;
  */
 departmentsOffset?: number;
 /**
+ * Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -634,6 +693,10 @@ locationsLimit?: number;
  */
 locationsOffset?: number;
 /**
+ * Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+ */
+locationsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -642,6 +705,10 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+ */
+teamsCursor?: string;
 /**
  * Opt in to bounded membership pages for the selected employees; omitted retains the full array.
  * @minimum 1
@@ -653,6 +720,10 @@ teamMembershipsLimit?: number;
  */
 teamMembershipsOffset?: number;
 /**
+ * Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+ */
+teamMembershipsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -661,6 +732,10 @@ policiesLimit?: number;
  * @minimum 0
  */
 policiesOffset?: number;
+/**
+ * Optional opaque cursor for the policies collection; use start to begin cursor pagination.
+ */
+policiesCursor?: string;
 /**
  * Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.
  * @minimum 1
@@ -672,6 +747,10 @@ announcementsLimit?: number;
  * @maximum 2147483647
  */
 announcementsOffset?: number;
+/**
+ * Optional opaque cursor for the announcements collection; use start to begin cursor pagination.
+ */
+announcementsCursor?: string;
 };
 
 export type GetOrganizationSnapshotParams = {
@@ -697,6 +776,10 @@ employeesLimit?: number;
  */
 employeesOffset?: number;
 /**
+ * Optional opaque cursor for the employees collection; use start to begin cursor pagination.
+ */
+employeesCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -705,6 +788,10 @@ invitationsLimit?: number;
  * @minimum 0
  */
 invitationsOffset?: number;
+/**
+ * Optional opaque cursor for the invitations collection; use start to begin cursor pagination.
+ */
+invitationsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -715,6 +802,10 @@ assignmentsLimit?: number;
  */
 assignmentsOffset?: number;
 /**
+ * Optional opaque cursor for the assignments collection; use start to begin cursor pagination.
+ */
+assignmentsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -723,6 +814,10 @@ departmentsLimit?: number;
  * @minimum 0
  */
 departmentsOffset?: number;
+/**
+ * Optional opaque cursor for the departments collection; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
 /**
  * @minimum 1
  * @maximum 100
@@ -733,6 +828,10 @@ locationsLimit?: number;
  */
 locationsOffset?: number;
 /**
+ * Optional opaque cursor for the locations collection; use start to begin cursor pagination.
+ */
+locationsCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -741,6 +840,10 @@ teamsLimit?: number;
  * @minimum 0
  */
 teamsOffset?: number;
+/**
+ * Optional opaque cursor for the teams collection; use start to begin cursor pagination.
+ */
+teamsCursor?: string;
 /**
  * Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.
  * @minimum 1
@@ -751,6 +854,10 @@ teamMembershipsLimit?: number;
  * @minimum 0
  */
 teamMembershipsOffset?: number;
+/**
+ * Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.
+ */
+teamMembershipsCursor?: string;
 };
 
 export type ListModerationLogsParams = {
@@ -890,6 +997,10 @@ channelLimit?: number;
  */
 channelOffset?: number;
 /**
+ * Optional opaque cursor for the channels collection; use start to begin cursor pagination.
+ */
+channelCursor?: string;
+/**
  * @minimum 1
  * @maximum 100
  */
@@ -899,6 +1010,10 @@ categoryLimit?: number;
  * @maximum 2147483647
  */
 categoryOffset?: number;
+/**
+ * Optional opaque cursor for the categories collection; use start to begin cursor pagination.
+ */
+categoryCursor?: string;
 /**
  * @minimum 1
  * @maximum 50
@@ -999,6 +1114,10 @@ limit?: CollectionLimitParameter;
  */
 offset?: CollectionOffsetParameter;
 /**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
+/**
  * @maxLength 200
  */
 q?: string;
@@ -1038,6 +1157,10 @@ limit?: CollectionLimitParameter;
  * @maximum 2147483647
  */
 offset?: CollectionOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type ListAdminRoleAssignments200Item = { [key: string]: unknown };
@@ -1055,6 +1178,22 @@ limit?: CollectionLimitParameter;
  * @maximum 2147483647
  */
 offset?: CollectionOffsetParameter;
+/**
+ * Optional opaque cursor for the communities array; use start to begin cursor pagination.
+ */
+communitiesCursor?: string;
+/**
+ * Optional opaque cursor for the categories array; use start to begin cursor pagination.
+ */
+categoriesCursor?: string;
+/**
+ * Optional opaque cursor for the channels array; use start to begin cursor pagination.
+ */
+channelsCursor?: string;
+/**
+ * Optional opaque cursor for the departments array; use start to begin cursor pagination.
+ */
+departmentsCursor?: string;
 };
 
 export type ListAdminScopeOptions200CommunitiesItem = { [key: string]: unknown };
@@ -1065,11 +1204,39 @@ export type ListAdminScopeOptions200ChannelsItem = { [key: string]: unknown };
 
 export type ListAdminScopeOptions200DepartmentsItem = { [key: string]: unknown };
 
+export type ListAdminScopeOptions200PaginationCommunities = {
+  /** @nullable */
+  nextCursor: string | null;
+};
+
+export type ListAdminScopeOptions200PaginationCategories = {
+  /** @nullable */
+  nextCursor: string | null;
+};
+
+export type ListAdminScopeOptions200PaginationChannels = {
+  /** @nullable */
+  nextCursor: string | null;
+};
+
+export type ListAdminScopeOptions200PaginationDepartments = {
+  /** @nullable */
+  nextCursor: string | null;
+};
+
+export type ListAdminScopeOptions200Pagination = {
+  communities?: ListAdminScopeOptions200PaginationCommunities;
+  categories?: ListAdminScopeOptions200PaginationCategories;
+  channels?: ListAdminScopeOptions200PaginationChannels;
+  departments?: ListAdminScopeOptions200PaginationDepartments;
+};
+
 export type ListAdminScopeOptions200 = {
   communities: ListAdminScopeOptions200CommunitiesItem[];
   categories: ListAdminScopeOptions200CategoriesItem[];
   channels: ListAdminScopeOptions200ChannelsItem[];
   departments: ListAdminScopeOptions200DepartmentsItem[];
+  pagination?: ListAdminScopeOptions200Pagination;
 };
 
 export type ListDeveloperReleasesParams = {
@@ -1100,6 +1267,10 @@ limit?: IrcLimitParameter;
  * @maximum 9007199254740991
  */
 offset?: IrcOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type ListChannels200Item = { [key: string]: unknown };
@@ -1115,6 +1286,10 @@ limit?: IrcLimitParameter;
  * @maximum 9007199254740991
  */
 offset?: IrcOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type ListChannelPublicSpaces200Item = {
@@ -1134,6 +1309,10 @@ limit?: IrcLimitParameter;
  * @maximum 9007199254740991
  */
 offset?: IrcOffsetParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type ListCategories200Item = { [key: string]: unknown };
@@ -1153,6 +1332,10 @@ offset?: IrcOffsetParameter;
  * @maxLength 200
  */
 q?: SearchQueryParameter;
+/**
+ * Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.
+ */
+cursor?: CollectionCursorParameter;
 };
 
 export type SearchUsers200Item = { [key: string]: unknown };

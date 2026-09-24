@@ -9,7 +9,7 @@ import * as zod from 'zod';
 
 
 /**
- * Only roles are paged; the grantable permissions catalog is unchanged.
+ * Only roles are paged; the grantable permissions catalog is unchanged. Cursor pages use immutable-key order and the initial ceiling excludes later inserts. Deleted roles are omitted; edits to role labels are reflected when each page is read. Changes to access or filtering that affect visibility can change later pages.
  * @summary List custom role definitions and grantable permissions
  */
 export const listAdminCustomRolesQueryLimitDefault = 50;
@@ -23,7 +23,8 @@ export const listAdminCustomRolesQueryOffsetMax = 2147483647;
 
 export const ListAdminCustomRolesQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listAdminCustomRolesQueryLimitMax).default(listAdminCustomRolesQueryLimitDefault).describe('Number of records to return.'),
-  "offset": zod.coerce.number().int().min(listAdminCustomRolesQueryOffsetMin).max(listAdminCustomRolesQueryOffsetMax).default(listAdminCustomRolesQueryOffsetDefault).describe('Number of records to skip.')
+  "offset": zod.coerce.number().int().min(listAdminCustomRolesQueryOffsetMin).max(listAdminCustomRolesQueryOffsetMax).default(listAdminCustomRolesQueryOffsetDefault).describe('Number of records to skip.'),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const ListAdminCustomRolesResponse = zod.object({
@@ -41,7 +42,10 @@ export const ListAdminCustomRolesResponse = zod.object({
   "permissions": zod.array(zod.object({
   "key": zod.string(),
   "description": zod.string()
-}))
+})),
+  "pagination": zod.object({
+  "nextCursor": zod.string().nullable().describe('Opaque cursor for the next role page')
+}).optional()
 })
 
 
@@ -319,7 +323,7 @@ export const ListNotificationsResponse = zod.array(ListNotificationsResponseItem
 
 
 /**
- * The JSON response remains an array. The named community parameters override the general limit and offset.
+ * The JSON response remains an array. The named community parameters override the general limit and offset. Cursor pages use immutable community-ID order; the first cursor establishes a ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are returned with their current names. Changes to membership, access, or filtering that affect visibility can change later pages.
  * @summary List accessible paid workspaces
  */
 export const listCommunitiesQueryLimitDefault = 100;
@@ -340,7 +344,9 @@ export const ListCommunitiesQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listCommunitiesQueryLimitMax).default(listCommunitiesQueryLimitDefault).describe('Default limit for workspace collections; values above 100 are capped.'),
   "offset": zod.coerce.number().int().min(listCommunitiesQueryOffsetMin).max(listCommunitiesQueryOffsetMax).default(listCommunitiesQueryOffsetDefault).describe('Default offset for workspace collections.'),
   "communitiesLimit": zod.coerce.number().int().min(1).max(listCommunitiesQueryCommunitiesLimitMax).optional().describe('Overrides limit for the communities array; values above 100 are capped.'),
-  "communitiesOffset": zod.coerce.number().int().min(listCommunitiesQueryCommunitiesOffsetMin).max(listCommunitiesQueryCommunitiesOffsetMax).optional().describe('Overrides offset for the communities array.')
+  "communitiesOffset": zod.coerce.number().int().min(listCommunitiesQueryCommunitiesOffsetMin).max(listCommunitiesQueryCommunitiesOffsetMax).optional().describe('Overrides offset for the communities array.'),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor for the communities page; use start to begin cursor pagination.'),
+  "communitiesCursor": zod.coerce.string().optional().describe('Alias for cursor, scoped to the communities array. Supply only one of cursor and communitiesCursor.')
 })
 
 export const ListCommunitiesResponseItem = zod.object({
@@ -350,7 +356,7 @@ export const ListCommunitiesResponse = zod.array(ListCommunitiesResponseItem)
 
 
 /**
- * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page.
+ * Named collection parameters override the general limit and offset. Collection limits above 100 are capped at 100. Each collection retains its existing array shape; pagination describes each page. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership, access, or filter changes can change visibility between pages.
  * @summary Get workspace data and bounded collection pages
  */
 export const GetCommunityWorkspaceParams = zod.object({
@@ -440,28 +446,40 @@ export const GetCommunityWorkspaceQueryParams = zod.object({
   "offset": zod.coerce.number().int().min(getCommunityWorkspaceQueryOffsetMin).max(getCommunityWorkspaceQueryOffsetMax).default(getCommunityWorkspaceQueryOffsetDefault).describe('Default offset for workspace collections.'),
   "employeesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryEmployeesLimitMax).default(getCommunityWorkspaceQueryEmployeesLimitDefault),
   "employeesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryEmployeesOffsetMin).default(getCommunityWorkspaceQueryEmployeesOffsetDefault),
+  "employeesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the employees collection; use start to begin cursor pagination.'),
   "invitationsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryInvitationsLimitMax).default(getCommunityWorkspaceQueryInvitationsLimitDefault),
   "invitationsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryInvitationsOffsetMin).default(getCommunityWorkspaceQueryInvitationsOffsetDefault),
+  "invitationsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the invitations collection; use start to begin cursor pagination.'),
   "tasksLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTasksLimitMax).default(getCommunityWorkspaceQueryTasksLimitDefault),
   "tasksOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTasksOffsetMin).default(getCommunityWorkspaceQueryTasksOffsetDefault),
+  "tasksCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the tasks collection; use start to begin cursor pagination.'),
   "channelsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryChannelsLimitMax).default(getCommunityWorkspaceQueryChannelsLimitDefault),
   "channelsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryChannelsOffsetMin).default(getCommunityWorkspaceQueryChannelsOffsetDefault),
+  "channelsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the channels collection; use start to begin cursor pagination.'),
   "categoriesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryCategoriesLimitMax).default(getCommunityWorkspaceQueryCategoriesLimitDefault),
   "categoriesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryCategoriesOffsetMin).default(getCommunityWorkspaceQueryCategoriesOffsetDefault),
+  "categoriesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the categories collection; use start to begin cursor pagination.'),
   "assignmentsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryAssignmentsLimitMax).default(getCommunityWorkspaceQueryAssignmentsLimitDefault),
   "assignmentsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryAssignmentsOffsetMin).default(getCommunityWorkspaceQueryAssignmentsOffsetDefault),
+  "assignmentsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the assignments collection; use start to begin cursor pagination.'),
   "departmentsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryDepartmentsLimitMax).default(getCommunityWorkspaceQueryDepartmentsLimitDefault),
   "departmentsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryDepartmentsOffsetMin).default(getCommunityWorkspaceQueryDepartmentsOffsetDefault),
+  "departmentsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the departments collection; use start to begin cursor pagination.'),
   "locationsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryLocationsLimitMax).default(getCommunityWorkspaceQueryLocationsLimitDefault),
   "locationsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryLocationsOffsetMin).default(getCommunityWorkspaceQueryLocationsOffsetDefault),
+  "locationsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the locations collection; use start to begin cursor pagination.'),
   "teamsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamsLimitMax).default(getCommunityWorkspaceQueryTeamsLimitDefault),
   "teamsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamsOffsetMin).default(getCommunityWorkspaceQueryTeamsOffsetDefault),
+  "teamsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the teams collection; use start to begin cursor pagination.'),
   "teamMembershipsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryTeamMembershipsLimitMax).optional().describe('Opt in to bounded membership pages for the selected employees; omitted retains the full array.'),
   "teamMembershipsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryTeamMembershipsOffsetMin).optional(),
+  "teamMembershipsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.'),
   "policiesLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryPoliciesLimitMax).default(getCommunityWorkspaceQueryPoliciesLimitDefault),
   "policiesOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryPoliciesOffsetMin).default(getCommunityWorkspaceQueryPoliciesOffsetDefault),
+  "policiesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the policies collection; use start to begin cursor pagination.'),
   "announcementsLimit": zod.coerce.number().int().min(1).max(getCommunityWorkspaceQueryAnnouncementsLimitMax).optional().describe('Overrides limit for announcements; the default is 20 when no general limit is supplied. Values above 100 are capped.'),
-  "announcementsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryAnnouncementsOffsetMin).max(getCommunityWorkspaceQueryAnnouncementsOffsetMax).optional()
+  "announcementsOffset": zod.coerce.number().int().min(getCommunityWorkspaceQueryAnnouncementsOffsetMin).max(getCommunityWorkspaceQueryAnnouncementsOffsetMax).optional(),
+  "announcementsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the announcements collection; use start to begin cursor pagination.')
 })
 
 export const getCommunityWorkspaceResponsePaginationLimitMax = 100;
@@ -513,13 +531,14 @@ export const GetCommunityWorkspaceResponse = zod.object({
   "pagination": zod.record(zod.string(), zod.object({
   "limit": zod.number().int().min(1).max(getCommunityWorkspaceResponsePaginationLimitMax),
   "offset": zod.number().int().min(getCommunityWorkspaceResponsePaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }))
 })
 
 
 /**
- * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details.
+ * A matching If-None-Match header returns 304. Collection pages use the same bounded pagination as workspace details. Cursor pages use immutable-key order and each collection's initial ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time; membership or access changes can change visibility between pages.
  * @summary Get only the organization directory collections for a workspace
  */
 export const GetOrganizationSnapshotParams = zod.object({
@@ -568,18 +587,25 @@ export const GetOrganizationSnapshotQueryParams = zod.object({
   "offset": zod.coerce.number().int().min(getOrganizationSnapshotQueryOffsetMin).max(getOrganizationSnapshotQueryOffsetMax).default(getOrganizationSnapshotQueryOffsetDefault).describe('Default offset for workspace collections.'),
   "employeesLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryEmployeesLimitMax).optional(),
   "employeesOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryEmployeesOffsetMin).optional(),
+  "employeesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the employees collection; use start to begin cursor pagination.'),
   "invitationsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryInvitationsLimitMax).optional(),
   "invitationsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryInvitationsOffsetMin).optional(),
+  "invitationsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the invitations collection; use start to begin cursor pagination.'),
   "assignmentsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryAssignmentsLimitMax).optional(),
   "assignmentsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryAssignmentsOffsetMin).optional(),
+  "assignmentsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the assignments collection; use start to begin cursor pagination.'),
   "departmentsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryDepartmentsLimitMax).optional(),
   "departmentsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryDepartmentsOffsetMin).optional(),
+  "departmentsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the departments collection; use start to begin cursor pagination.'),
   "locationsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryLocationsLimitMax).optional(),
   "locationsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryLocationsOffsetMin).optional(),
+  "locationsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the locations collection; use start to begin cursor pagination.'),
   "teamsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryTeamsLimitMax).optional(),
   "teamsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamsOffsetMin).optional(),
+  "teamsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the teams collection; use start to begin cursor pagination.'),
   "teamMembershipsLimit": zod.coerce.number().int().min(1).max(getOrganizationSnapshotQueryTeamMembershipsLimitMax).optional().describe('Opt in to bounded workspace membership pages; omitted retains complete memberships for the selected employees.'),
-  "teamMembershipsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamMembershipsOffsetMin).optional()
+  "teamMembershipsOffset": zod.coerce.number().int().min(getOrganizationSnapshotQueryTeamMembershipsOffsetMin).optional(),
+  "teamMembershipsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for team memberships; membership changes can affect which rows are visible between pages.')
 })
 
 export const GetOrganizationSnapshotHeader = zod.object({
@@ -620,7 +646,8 @@ export const GetOrganizationSnapshotResponse = zod.object({
   "pagination": zod.record(zod.string(), zod.object({
   "limit": zod.number().int().min(1).max(getOrganizationSnapshotResponsePaginationLimitMax),
   "offset": zod.number().int().min(getOrganizationSnapshotResponsePaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }))
 })
 
@@ -712,7 +739,8 @@ export const ListCommunityActivityResponse = zod.object({
   "pagination": zod.object({
   "limit": zod.number().int().min(1).max(listCommunityActivityResponsePaginationLimitMax),
   "offset": zod.number().int().min(listCommunityActivityResponsePaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 })
 })
 
@@ -770,12 +798,14 @@ export const ListCommunityDocumentsResponse = zod.object({
   "pagination": zod.object({
   "limit": zod.number().int().min(1).max(listCommunityDocumentsResponsePaginationLimitMax),
   "offset": zod.number().int().min(listCommunityDocumentsResponsePaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }),
   "foldersPagination": zod.object({
   "limit": zod.number().int().min(1).max(listCommunityDocumentsResponseFoldersPaginationLimitMax),
   "offset": zod.number().int().min(listCommunityDocumentsResponseFoldersPaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }).optional()
 })
 
@@ -828,12 +858,14 @@ export const GetCommunityDocumentResponse = zod.object({
   "versions": zod.object({
   "limit": zod.number().int().min(1).max(getCommunityDocumentResponseChildrenPaginationVersionsLimitMax),
   "offset": zod.number().int().min(getCommunityDocumentResponseChildrenPaginationVersionsOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }).optional(),
   "permissions": zod.object({
   "limit": zod.number().int().min(1).max(getCommunityDocumentResponseChildrenPaginationPermissionsLimitMax),
   "offset": zod.number().int().min(getCommunityDocumentResponseChildrenPaginationPermissionsOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }).optional()
 }).optional()
 })
@@ -887,12 +919,14 @@ export const GetCommunityTaskResponse = zod.object({
   "comments": zod.object({
   "limit": zod.number().int().min(1).max(getCommunityTaskResponseChildrenPaginationCommentsLimitMax),
   "offset": zod.number().int().min(getCommunityTaskResponseChildrenPaginationCommentsOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }).optional(),
   "attachments": zod.object({
   "limit": zod.number().int().min(1).max(getCommunityTaskResponseChildrenPaginationAttachmentsLimitMax),
   "offset": zod.number().int().min(getCommunityTaskResponseChildrenPaginationAttachmentsOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }).optional()
 }).optional()
 })
@@ -930,13 +964,14 @@ export const ListCommunityTeamMembersResponse = zod.object({
   "pagination": zod.object({
   "limit": zod.number().int().min(1).max(listCommunityTeamMembersResponsePaginationLimitMax),
   "offset": zod.number().int().min(listCommunityTeamMembersResponsePaginationOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 })
 })
 
 
 /**
- * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Users and recent messages retain their existing shapes.
+ * Channel and category pages are independent; collectionPagination reports the requested limit and offset and an approximate hasMore flag (true when a full page is returned). Cursor pages use immutable channel/category ID order, and each initial ceiling excludes later inserts. Deleted records are omitted and renamed records are reflected at read time; membership and access changes can change visibility between pages. Users and recent messages retain their existing shapes.
  * @summary Get administrative statistics and activity
  */
 export const getAdminOverviewQueryChannelLimitDefault = 50;
@@ -975,8 +1010,10 @@ export const getAdminOverviewQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\
 export const GetAdminOverviewQueryParams = zod.object({
   "channelLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryChannelLimitMax).default(getAdminOverviewQueryChannelLimitDefault),
   "channelOffset": zod.coerce.number().int().min(getAdminOverviewQueryChannelOffsetMin).max(getAdminOverviewQueryChannelOffsetMax).default(getAdminOverviewQueryChannelOffsetDefault),
+  "channelCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the channels collection; use start to begin cursor pagination.'),
   "categoryLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryCategoryLimitMax).default(getAdminOverviewQueryCategoryLimitDefault),
   "categoryOffset": zod.coerce.number().int().min(getAdminOverviewQueryCategoryOffsetMin).max(getAdminOverviewQueryCategoryOffsetMax).default(getAdminOverviewQueryCategoryOffsetDefault),
+  "categoryCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the categories collection; use start to begin cursor pagination.'),
   "activityLimit": zod.coerce.number().int().min(1).max(getAdminOverviewQueryActivityLimitMax).default(getAdminOverviewQueryActivityLimitDefault),
   "activityOffset": zod.coerce.number().int().min(getAdminOverviewQueryActivityOffsetMin).max(getAdminOverviewQueryActivityOffsetMax).default(getAdminOverviewQueryActivityOffsetDefault),
   "activityCursor": zod.coerce.string().max(getAdminOverviewQueryActivityCursorMax).optional(),
@@ -1020,12 +1057,14 @@ export const GetAdminOverviewResponse = zod.object({
   "channels": zod.object({
   "limit": zod.number().int().min(1).max(getAdminOverviewResponseCollectionPaginationChannelsLimitMax),
   "offset": zod.number().int().min(getAdminOverviewResponseCollectionPaginationChannelsOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 }),
   "categories": zod.object({
   "limit": zod.number().int().min(1).max(getAdminOverviewResponseCollectionPaginationCategoriesLimitMax),
   "offset": zod.number().int().min(getAdminOverviewResponseCollectionPaginationCategoriesOffsetMin),
-  "hasMore": zod.boolean()
+  "hasMore": zod.boolean(),
+  "nextCursor": zod.string().nullish().describe('Opaque continuation cursor when cursor pagination is requested; null when complete.')
 })
 }),
   "recentMessages": zod.array(zod.object({
@@ -1095,6 +1134,7 @@ export const ExportAdminActivityResponse = zod.unknown()
 
 
 /**
+ * Cursor pages use immutable user-key order and the initial creation-time ceiling excludes later inserts. Deleted users are omitted and renamed users are reflected at read time; changes to filters or account visibility can change which rows match between pages.
  * @summary List admin-visible users
  */
 export const listAdminUsersQueryLimitDefault = 50;
@@ -1111,6 +1151,7 @@ export const listAdminUsersQueryQMax = 200;
 export const ListAdminUsersQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listAdminUsersQueryLimitMax).default(listAdminUsersQueryLimitDefault).describe('Number of records to return.'),
   "offset": zod.coerce.number().int().min(listAdminUsersQueryOffsetMin).max(listAdminUsersQueryOffsetMax).default(listAdminUsersQueryOffsetDefault).describe('Number of records to skip.'),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.'),
   "q": zod.coerce.string().max(listAdminUsersQueryQMax).optional(),
   "role": zod.coerce.string().optional(),
   "status": zod.enum(['online', 'offline']).optional(),
@@ -1124,6 +1165,7 @@ export const ListAdminUsersResponse = zod.array(ListAdminUsersResponseItem)
 
 
 /**
+ * Cursor pages use immutable assignment-ID order and the initial creation-time ceiling excludes later inserts. Deleted assignments are omitted; joined names are reflected at read time, and changes to related membership or access can change visibility.
  * @summary List role assignments
  */
 export const listAdminRoleAssignmentsQueryLimitDefault = 50;
@@ -1137,7 +1179,8 @@ export const listAdminRoleAssignmentsQueryOffsetMax = 2147483647;
 
 export const ListAdminRoleAssignmentsQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listAdminRoleAssignmentsQueryLimitMax).default(listAdminRoleAssignmentsQueryLimitDefault).describe('Number of records to return.'),
-  "offset": zod.coerce.number().int().min(listAdminRoleAssignmentsQueryOffsetMin).max(listAdminRoleAssignmentsQueryOffsetMax).default(listAdminRoleAssignmentsQueryOffsetDefault).describe('Number of records to skip.')
+  "offset": zod.coerce.number().int().min(listAdminRoleAssignmentsQueryOffsetMin).max(listAdminRoleAssignmentsQueryOffsetMax).default(listAdminRoleAssignmentsQueryOffsetDefault).describe('Number of records to skip.'),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const ListAdminRoleAssignmentsResponseItem = zod.object({
@@ -1147,7 +1190,7 @@ export const ListAdminRoleAssignmentsResponse = zod.array(ListAdminRoleAssignmen
 
 
 /**
- * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged.
+ * The same limit and offset are applied independently to each array; the JSON object and its array fields are unchanged. Each cursor-enabled array uses immutable ID order and its initial creation-time ceiling excludes later inserts. Deleted records are omitted and renames are reflected at read time. Changes to membership, access, or filtering that affect visibility can change later pages.
  * @summary List role scope options
  */
 export const listAdminScopeOptionsQueryLimitDefault = 50;
@@ -1161,7 +1204,11 @@ export const listAdminScopeOptionsQueryOffsetMax = 2147483647;
 
 export const ListAdminScopeOptionsQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listAdminScopeOptionsQueryLimitMax).default(listAdminScopeOptionsQueryLimitDefault).describe('Number of records to return.'),
-  "offset": zod.coerce.number().int().min(listAdminScopeOptionsQueryOffsetMin).max(listAdminScopeOptionsQueryOffsetMax).default(listAdminScopeOptionsQueryOffsetDefault).describe('Number of records to skip.')
+  "offset": zod.coerce.number().int().min(listAdminScopeOptionsQueryOffsetMin).max(listAdminScopeOptionsQueryOffsetMax).default(listAdminScopeOptionsQueryOffsetDefault).describe('Number of records to skip.'),
+  "communitiesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the communities array; use start to begin cursor pagination.'),
+  "categoriesCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the categories array; use start to begin cursor pagination.'),
+  "channelsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the channels array; use start to begin cursor pagination.'),
+  "departmentsCursor": zod.coerce.string().optional().describe('Optional opaque cursor for the departments array; use start to begin cursor pagination.')
 })
 
 export const ListAdminScopeOptionsResponse = zod.object({
@@ -1176,7 +1223,21 @@ export const ListAdminScopeOptionsResponse = zod.object({
 }).passthrough()),
   "departments": zod.array(zod.object({
 
-}).passthrough())
+}).passthrough()),
+  "pagination": zod.object({
+  "communities": zod.object({
+  "nextCursor": zod.string().nullable()
+}).optional(),
+  "categories": zod.object({
+  "nextCursor": zod.string().nullable()
+}).optional(),
+  "channels": zod.object({
+  "nextCursor": zod.string().nullable()
+}).optional(),
+  "departments": zod.object({
+  "nextCursor": zod.string().nullable()
+}).optional()
+}).optional()
 })
 
 
@@ -1204,6 +1265,7 @@ export const ListDeveloperReleasesResponse = zod.array(ListDeveloperReleasesResp
 
 
 /**
+ * Cursor pages use immutable channel-ID order with an initial ceiling that excludes later inserts. Deleted channels are omitted and renamed channels are reflected at read time; membership and access changes can change visibility between pages.
  * @summary List visible channels
  */
 export const listChannelsQueryLimitDefault = 100;
@@ -1217,7 +1279,8 @@ export const listChannelsQueryOffsetMax = 9007199254740991;
 
 export const ListChannelsQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listChannelsQueryLimitMax).default(listChannelsQueryLimitDefault),
-  "offset": zod.coerce.number().int().min(listChannelsQueryOffsetMin).max(listChannelsQueryOffsetMax).default(listChannelsQueryOffsetDefault)
+  "offset": zod.coerce.number().int().min(listChannelsQueryOffsetMin).max(listChannelsQueryOffsetMax).default(listChannelsQueryOffsetDefault),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const ListChannelsResponseItem = zod.object({
@@ -1227,7 +1290,7 @@ export const ListChannelsResponse = zod.array(ListChannelsResponseItem)
 
 
 /**
- * Returns an array of eligible owned public communities, excluding the channel's current community.
+ * Returns an array of eligible owned public communities, excluding the channel's current community. Cursor pages use immutable community-ID order with an initial ceiling that excludes later inserts. Deleted communities are omitted and renamed communities are reflected at read time; changes to ownership, eligibility, or access can change visibility between pages.
  * @summary List public spaces available to the channel owner
  */
 
@@ -1248,7 +1311,8 @@ export const listChannelPublicSpacesQueryOffsetMax = 9007199254740991;
 
 export const ListChannelPublicSpacesQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listChannelPublicSpacesQueryLimitMax).default(listChannelPublicSpacesQueryLimitDefault),
-  "offset": zod.coerce.number().int().min(listChannelPublicSpacesQueryOffsetMin).max(listChannelPublicSpacesQueryOffsetMax).default(listChannelPublicSpacesQueryOffsetDefault)
+  "offset": zod.coerce.number().int().min(listChannelPublicSpacesQueryOffsetMin).max(listChannelPublicSpacesQueryOffsetMax).default(listChannelPublicSpacesQueryOffsetDefault),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const ListChannelPublicSpacesResponseItem = zod.object({
@@ -1260,6 +1324,7 @@ export const ListChannelPublicSpacesResponse = zod.array(ListChannelPublicSpaces
 
 
 /**
+ * Cursor pages use immutable category-ID order with an initial ceiling that excludes later inserts. Deleted categories are omitted and renamed categories are reflected at read time; membership and access changes can change visibility between pages.
  * @summary List visible categories
  */
 export const listCategoriesQueryLimitDefault = 100;
@@ -1273,7 +1338,8 @@ export const listCategoriesQueryOffsetMax = 9007199254740991;
 
 export const ListCategoriesQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(listCategoriesQueryLimitMax).default(listCategoriesQueryLimitDefault),
-  "offset": zod.coerce.number().int().min(listCategoriesQueryOffsetMin).max(listCategoriesQueryOffsetMax).default(listCategoriesQueryOffsetDefault)
+  "offset": zod.coerce.number().int().min(listCategoriesQueryOffsetMin).max(listCategoriesQueryOffsetMax).default(listCategoriesQueryOffsetDefault),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const ListCategoriesResponseItem = zod.object({
@@ -1283,6 +1349,7 @@ export const ListCategoriesResponse = zod.array(ListCategoriesResponseItem)
 
 
 /**
+ * Cursor pages use immutable user creation-time/ID order with an initial ceiling that excludes later inserts. Deleted users are omitted and changed names are read at continuation time; search-filter or visibility changes may add or remove matching users between pages.
  * @summary Search visible users
  */
 export const searchUsersQueryLimitDefault = 100;
@@ -1299,7 +1366,8 @@ export const searchUsersQueryQMax = 200;
 export const SearchUsersQueryParams = zod.object({
   "limit": zod.coerce.number().int().min(1).max(searchUsersQueryLimitMax).default(searchUsersQueryLimitDefault),
   "offset": zod.coerce.number().int().min(searchUsersQueryOffsetMin).max(searchUsersQueryOffsetMax).default(searchUsersQueryOffsetDefault),
-  "q": zod.coerce.string().max(searchUsersQueryQMax).optional()
+  "q": zod.coerce.string().max(searchUsersQueryQMax).optional(),
+  "cursor": zod.coerce.string().optional().describe('Optional opaque cursor; use start to begin cursor pagination. Cursor pagination continues by this token instead of by offset; endpoint-specific validation rules apply.')
 })
 
 export const SearchUsersResponseItem = zod.object({

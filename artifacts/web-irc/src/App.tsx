@@ -193,20 +193,48 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await apiResponse<T>(path, init)).data;
 }
 
-export async function allCollectionPages<T>(path: string): Promise<T[]> {
+function withQuery(path: string, values: Record<string, string>): string {
+  const query = new URLSearchParams(values).toString();
+  return `${path}${path.includes("?") ? "&" : "?"}${query}`;
+}
+
+export async function allCollectionPages<T>(path: string, useCursor = false): Promise<T[]> {
   const items: T[] = [];
   const pageSize = 100;
+  if (useCursor) {
+    let cursor = "start";
+    while (true) {
+      const { data, response } = await apiResponse<T[]>(
+        withQuery(path, { limit: String(pageSize), cursor }),
+      );
+      items.push(...data);
+      const nextCursor = response.headers.get("X-Next-Cursor");
+      if (!nextCursor) return items;
+      cursor = nextCursor;
+    }
+  }
   for (let offset = 0; offset <= 2_147_483_647; offset += pageSize) {
-    const separator = path.includes("?") ? "&" : "?";
-    const page = await api<T[]>(`${path}${separator}limit=${pageSize}&offset=${offset}`);
+    const page = await api<T[]>(withQuery(path, { limit: String(pageSize), offset: String(offset) }));
     items.push(...page);
     if (page.length < pageSize) return items;
   }
   throw new Error("Collection exceeds the supported pagination range.");
 }
 
-export async function pagedApi<T>(path: string): Promise<T[]> {
+export async function pagedApi<T>(path: string, useCursor = false): Promise<T[]> {
   const results: T[] = [];
+  if (useCursor) {
+    let cursor = "start";
+    while (true) {
+      const { data, response } = await apiResponse<T[]>(
+        withQuery(path, { limit: "100", cursor }),
+      );
+      results.push(...data);
+      const nextCursor = response.headers.get("X-Next-Cursor");
+      if (!nextCursor) return results;
+      cursor = nextCursor;
+    }
+  }
   let offset = 0;
   while (true) {
     const { data, response } = await apiResponse<T[]>(
@@ -592,7 +620,7 @@ function ChatApp() {
 
   const refreshChannels = async (): Promise<Channel[]> => {
     if (channelRefreshRef.current) return channelRefreshRef.current;
-    const request = pagedApi<Channel>("/channels").then((list) => {
+    const request = pagedApi<Channel>("/channels", true).then((list) => {
       setChannels(list);
       setChannelRefreshError("");
       return list;
@@ -653,7 +681,7 @@ function ChatApp() {
     }
   };
   const refreshChannelOrganization = async (): Promise<Channel[]> => {
-    const [list] = await Promise.all([refreshChannels(), pagedApi<Category>("/categories").then(setCategories)]);
+    const [list] = await Promise.all([refreshChannels(), pagedApi<Category>("/categories", true).then(setCategories)]);
     return list;
   };
   refreshChannelOrganizationRef.current = refreshChannelOrganization;
@@ -696,8 +724,8 @@ function ChatApp() {
     setBootstrapError("");
     Promise.allSettled([
       api<Profile>("/me"),
-      pagedApi<Channel>("/channels"),
-      pagedApi<Category>("/categories"),
+      pagedApi<Channel>("/channels", true),
+      pagedApi<Category>("/categories", true),
       api<Notification[]>("/notifications?limit=100&offset=0"),
     ]).then(([meResult, channelsResult, categoriesResult, notificationsResult]) => {
       if (cancelled) return;
@@ -903,7 +931,7 @@ function ChatApp() {
       };
     }
     const timer = window.setTimeout(() => {
-      pagedApi<Profile>(`/users/search?q=${encodeURIComponent(query)}`)
+      pagedApi<Profile>(`/users/search?q=${encodeURIComponent(query)}`, true)
         .then((results) => {
           if (userSearchRequestRef.current === requestId) setUserResults(results);
         })
@@ -1503,7 +1531,7 @@ type ConsoleOverview = {
   users: Array<{ id: string; username: string; displayName: string; role: string; status: string; accountStatus: "active" | "suspended"; createdAt: string; lastSeenAt: string }>;
   channels: Array<{ id: number; name: string; topic: string; memberCount: number; communityId: number | null; categoryId: number | null; communityName: string | null; createdAt: string }>;
   categories: Array<{ id: number; name: string; description: string; communityId: number | null; communityName: string | null; communityOwnerId: string | null }>;
-  collectionPagination?: { channels: { hasMore: boolean }; categories: { hasMore: boolean } };
+  collectionPagination?: { channels: { hasMore: boolean; nextCursor?: string | null }; categories: { hasMore: boolean; nextCursor?: string | null } };
   recentMessages: Array<{ id: string; body: string; sender: string; channelId: number | null; createdAt: string }>;
   activity: Array<{ id: string; action: string; targetId?: string | null; targetLabel?: string | null; details?: string | null; createdAt: string; actor?: string | { username?: string; displayName?: string } | null }>;
   activityPagination: {
@@ -1516,22 +1544,34 @@ type ConsoleOverview = {
     newerHasMore: boolean;
   };
 };
-export async function loadAdminOverview<T extends { channels: unknown[]; categories?: unknown[]; collectionPagination?: { channels: { hasMore: boolean }; categories: { hasMore: boolean } } }>(path: string): Promise<T> {
-  const result = await api<T>(path);
+export async function loadAdminOverview<T extends { channels: unknown[]; categories?: unknown[]; collectionPagination?: { channels: { hasMore: boolean; nextCursor?: string | null }; categories: { hasMore: boolean; nextCursor?: string | null } } }>(path: string): Promise<T> {
+  const result = await api<T>(withQuery(path, { channelCursor: "start", categoryCursor: "start" }));
   let channels = result.channels;
   let categories = result.categories ?? [];
-  let moreChannels = result.collectionPagination?.channels.hasMore ?? false;
-  let moreCategories = result.collectionPagination?.categories.hasMore ?? false;
-  for (let offset = 50; moreChannels || moreCategories; offset += 50) {
-    if (offset > 2_147_483_647) throw new Error("Overview exceeds the supported pagination range.");
-    const separator = path.includes("?") ? "&" : "?";
-    const page = await api<T>(`${path}${separator}channelOffset=${offset}&categoryOffset=${offset}`);
-    channels = [...channels, ...page.channels];
-    categories = [...categories, ...(page.categories ?? [])];
-    moreChannels = page.collectionPagination?.channels.hasMore ?? false;
-    moreCategories = page.collectionPagination?.categories.hasMore ?? false;
+  let channelCursor = result.collectionPagination?.channels.nextCursor ?? null;
+  let categoryCursor = result.collectionPagination?.categories.nextCursor ?? null;
+  while (channelCursor || categoryCursor) {
+    const query: Record<string, string> = {};
+    if (channelCursor) query.channelCursor = channelCursor;
+    if (categoryCursor) query.categoryCursor = categoryCursor;
+    const page = await api<T>(withQuery(path, query));
+    if (channelCursor) channels = [...channels, ...page.channels];
+    if (categoryCursor) categories = [...categories, ...(page.categories ?? [])];
+    channelCursor = channelCursor ? page.collectionPagination?.channels.nextCursor ?? null : null;
+    categoryCursor = categoryCursor ? page.collectionPagination?.categories.nextCursor ?? null : null;
   }
-  return { ...result, channels, ...(result.categories ? { categories } : {}) };
+  return {
+    ...result,
+    channels,
+    ...(result.categories ? { categories } : {}),
+    ...(result.collectionPagination ? {
+      collectionPagination: {
+        ...result.collectionPagination,
+        channels: { ...result.collectionPagination.channels, hasMore: Boolean(channelCursor), nextCursor: channelCursor },
+        categories: { ...result.collectionPagination.categories, hasMore: Boolean(categoryCursor), nextCursor: categoryCursor },
+      },
+    } : {}),
+  } as T;
 }
 type AdminAssignment = {
   id: number;
@@ -1555,6 +1595,7 @@ type AdminScopeOptions = {
   categories: Array<{ id: number; name: string; communityId: number | null }>;
   departments: Array<{ id: number; name: string; communityId: number }>;
   channels: Array<{ id: number; name: string; communityId: number | null; categoryId: number | null }>;
+  pagination?: Record<"communities" | "categories" | "channels" | "departments", { nextCursor: string | null }>;
 };
 type CustomRole = {
   key: string;
@@ -1567,7 +1608,43 @@ type CustomRole = {
 type CustomRoleCatalog = {
   roles: CustomRole[];
   permissions: Array<{ key: string; description: string }>;
+  pagination?: { nextCursor: string | null };
 };
+
+export async function loadAdminScopeOptions(): Promise<AdminScopeOptions> {
+  const combined: AdminScopeOptions = { communities: [], categories: [], channels: [], departments: [] };
+  const cursors: Record<"communities" | "categories" | "channels" | "departments", string | null> = {
+    communities: "start", categories: "start", channels: "start", departments: "start",
+  };
+  while (Object.values(cursors).some(Boolean)) {
+    const query: Record<string, string> = { limit: "100" };
+    for (const key of Object.keys(cursors) as Array<keyof typeof cursors>) {
+      if (cursors[key]) query[`${key}Cursor`] = cursors[key]!;
+    }
+    const page = await api<AdminScopeOptions>(withQuery("/admin/scope-options", query));
+    for (const key of Object.keys(cursors) as Array<keyof typeof cursors>) {
+      if (!cursors[key]) continue;
+      if (key === "communities") combined.communities.push(...page.communities);
+      else if (key === "categories") combined.categories.push(...page.categories);
+      else if (key === "channels") combined.channels.push(...page.channels);
+      else combined.departments.push(...page.departments);
+      cursors[key] = page.pagination?.[key]?.nextCursor ?? null;
+    }
+  }
+  return combined;
+}
+
+export async function loadCustomRoleCatalog(): Promise<CustomRoleCatalog> {
+  let cursor = "start";
+  const catalog = await api<CustomRoleCatalog>(withQuery("/admin/custom-roles", { limit: "100", cursor }));
+  cursor = catalog.pagination?.nextCursor ?? "";
+  while (cursor) {
+    const page = await api<CustomRoleCatalog>(withQuery("/admin/custom-roles", { limit: "100", cursor }));
+    catalog.roles.push(...page.roles);
+    cursor = page.pagination?.nextCursor ?? "";
+  }
+  return catalog;
+}
 
 function EmptyAdminState({ label }: { label: string }) {
   return <div className="flex items-center gap-3 px-5 py-8 font-mono text-xs text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-primary/70" />{label}</div>;
@@ -2137,28 +2214,9 @@ function AdminConsole() {
   const loadRoleData = async () => {
     try {
       const [assignments, options, catalog] = await Promise.all([
-        allCollectionPages<AdminAssignment>("/admin/role-assignments"),
-        (async () => {
-          const combined: AdminScopeOptions = { communities: [], categories: [], channels: [], departments: [] };
-          for (let offset = 0; offset <= 2_147_483_647; offset += 100) {
-            const page = await api<AdminScopeOptions>(`/admin/scope-options?limit=100&offset=${offset}`);
-            combined.communities.push(...page.communities);
-            combined.categories.push(...page.categories);
-            combined.channels.push(...page.channels);
-            combined.departments.push(...page.departments);
-            if (Object.values(page).every((items) => items.length < 100)) return combined;
-          }
-          throw new Error("Scope options exceed the supported pagination range.");
-        })(),
-        (async () => {
-          const catalog = await api<CustomRoleCatalog>("/admin/custom-roles?limit=100");
-          for (let offset = 100; catalog.roles.length === offset; offset += 100) {
-            const page = await api<CustomRoleCatalog>(`/admin/custom-roles?limit=100&offset=${offset}`);
-            catalog.roles.push(...page.roles);
-            if (page.roles.length < 100) break;
-          }
-          return catalog;
-        })(),
+        allCollectionPages<AdminAssignment>("/admin/role-assignments", true),
+        loadAdminScopeOptions(),
+        loadCustomRoleCatalog(),
       ]);
       setRoleAssignments(assignments);
       setScopeOptions(options);
@@ -2179,7 +2237,7 @@ function AdminConsole() {
     if (statusFilter !== "all") params.set("status", statusFilter);
     if (accountStatusFilter !== "all") params.set("accountStatus", accountStatusFilter);
     let cancelled = false;
-    allCollectionPages<ConsoleOverview["users"][number]>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`)
+    allCollectionPages<ConsoleOverview["users"][number]>(`/admin/users${params.toString() ? `?${params.toString()}` : ""}`, true)
       .then((result) => { if (!cancelled) { setDirectory(result); setDirectoryLoaded(true); } })
       .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load accounts"); });
     return () => { cancelled = true; };
@@ -2604,7 +2662,7 @@ type CommunityDetail = {
   canManage: boolean;
   canManageOrganization: boolean;
   isOwner: boolean;
-  pagination?: Record<WorkspaceDetailCollection, { hasMore: boolean; offset: number; limit: number }>;
+  pagination?: Record<WorkspaceDetailCollection, { hasMore: boolean; offset: number; limit: number; nextCursor?: string | null }>;
 };
 const workspaceDetailCollections = ["employees", "invitations", "tasks", "channels", "categories", "assignments", "departments", "locations", "teams", "teamMemberships", "policies", "announcements"] as const;
 type WorkspaceDetailCollection = typeof workspaceDetailCollections[number];
@@ -2613,10 +2671,13 @@ export function workspaceDetailPageQuery(detail?: CommunityDetail): string {
   const query = new URLSearchParams({ view: "summary" });
   for (const key of workspaceDetailCollections) {
     const page = detail?.pagination?.[key];
+    const hasMore = Boolean(detail && page?.hasMore);
     // Inactive collections still get a cheap page because the detail response
     // retains its existing shape; do not advance their pagination metadata.
-    query.set(`${key}Limit`, String(!detail ? key === "announcements" ? 20 : 100 : page?.hasMore ? 100 : 1));
-    query.set(`${key}Offset`, String(detail && page?.hasMore ? page.offset + page.limit : 0));
+    query.set(`${key}Limit`, String(!detail ? key === "announcements" ? 20 : 100 : hasMore ? 100 : 1));
+    if (!detail) query.set(`${key}Cursor`, "start");
+    else if (hasMore && page?.nextCursor) query.set(`${key}Cursor`, page.nextCursor);
+    else query.set(`${key}Offset`, String(hasMore && page ? page.offset + page.limit : 0));
   }
   return query.toString();
 }
@@ -4211,7 +4272,7 @@ function CommunityConsole() {
     const generation = ++communitiesRequestGeneration.current;
     const [nextPermissions, nextCommunities, me] = await Promise.all([
       api<PermissionSnapshot>("/permissions/me"),
-      pagedApi<CommunitySummary>("/communities"),
+      pagedApi<CommunitySummary>("/communities", true),
       api<Profile>("/me"),
     ]);
     if (generation !== communitiesRequestGeneration.current || requestedCommunityIdRef.current !== requestedCommunityId) return;

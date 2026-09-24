@@ -27,6 +27,7 @@ type TestSession = {
 type ApiResponse = {
   status: number;
   body: unknown;
+  headers: Headers;
 };
 
 let server: Server;
@@ -131,7 +132,7 @@ async function apiRequestWithToken(
   } catch {
     // Keep non-JSON error responses available in the assertion output.
   }
-  return { status: response.status, body };
+  return { status: response.status, body, headers: response.headers };
 }
 
 function createExpiredToken(userId: string): string {
@@ -162,7 +163,7 @@ async function unauthenticatedApiRequest(
   } catch {
     // Keep non-JSON error responses available in the assertion output.
   }
-  return { status: response.status, body };
+  return { status: response.status, body, headers: response.headers };
 }
 
 function expectRejectedWebSocket(url: string): Promise<void> {
@@ -1570,8 +1571,11 @@ describe("admin access controls", () => {
       "/admin/overview?channelLimit=101",
       "/admin/overview?categoryOffset=-1",
       "/admin/users?limit=0",
+      "/admin/users?cursor=not-a-valid-cursor",
       "/admin/role-assignments?offset=NaN",
+      "/admin/role-assignments?cursor=eyJhZnRlciI6MSwiY2VpbGluZyI6Im5vdC1hLWRhdGUifQ",
       "/admin/scope-options?limit=1&limit=2",
+      "/admin/scope-options?channelsCursor=invalid!",
       "/admin/custom-roles?limit=101",
       "/developer/releases?offset=2147483648",
       "/developer/releases?limit=101",
@@ -1681,6 +1685,99 @@ describe("admin access controls", () => {
     } finally {
       await pool.query("DELETE FROM irc_users WHERE username LIKE $1", [`${marker}%`]);
     }
+  });
+
+  test("admin user cursor pages remain stable across inserts, deletes, and renames", async () => {
+    const marker = `cursor_${randomUUID().replaceAll("-", "")}`;
+    const ids = Array.from({ length: 5 }, (_, index) => `${marker}_${String(index + 1).padStart(2, "0")}`);
+    const lateId = `${marker}_00_late`;
+    try {
+      await pool.query(
+        `INSERT INTO irc_users (clerk_id, username, display_name)
+         SELECT $1 || '_' || lpad(series::text, 2, '0'), $1 || '_' || lpad(series::text, 2, '0'), $1
+         FROM generate_series(1, 5) AS series`,
+        [marker],
+      );
+      const first = await apiRequest(adminSession, `/admin/users?q=${marker}&limit=2&cursor=start`);
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      const firstRows = first.body as Array<{ id: string }>;
+      assert.deepEqual(firstRows.map((row) => row.id), ids.slice(0, 2));
+      const nextCursor = first.headers.get("x-next-cursor");
+      assert.ok(nextCursor, "first cursor page should advertise a continuation");
+      const decoded = JSON.parse(Buffer.from(nextCursor, "base64url").toString("utf8")) as {
+        after: string;
+        ceiling: string;
+        context: string;
+      };
+      assert.deepEqual(Object.keys(decoded).sort(), ["after", "ceiling", "context"]);
+      assert.equal(decoded.after, ids[1]);
+      assert.equal(decoded.context, JSON.stringify({
+        route: "/admin/users",
+        collection: "users",
+        filters: { q: marker, role: "", status: "", accountStatus: "" },
+      }));
+
+      const denied = await apiRequest(memberSession, `/admin/users?q=${marker}&limit=2&cursor=${encodeURIComponent(nextCursor)}`);
+      assert.equal(denied.status, 403, "each continuation request must re-check admin access");
+      const changedFilter = await apiRequest(
+        adminSession,
+        `/admin/users?q=${marker}_different&limit=2&cursor=${encodeURIComponent(nextCursor)}`,
+      );
+      assert.equal(changedFilter.status, 400, "a cursor cannot be continued with a different normalized filter");
+      const changedCollection = await apiRequest(
+        adminSession,
+        `/admin/custom-roles?limit=2&cursor=${encodeURIComponent(nextCursor)}`,
+      );
+      assert.equal(changedCollection.status, 400, "a cursor cannot be reused by another admin collection");
+
+      await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [ids[2]]);
+      await pool.query("UPDATE irc_users SET display_name = $2 WHERE clerk_id = $1", [ids[3], `${marker}_renamed`]);
+      await pool.query(
+        "INSERT INTO irc_users (clerk_id, username, display_name) VALUES ($1, $2, $3)",
+        [lateId, lateId, marker],
+      );
+
+      const observed = [...firstRows.map((row) => row.id)];
+      let cursor = nextCursor;
+      while (cursor) {
+        const response = await apiRequest(
+          adminSession,
+          `/admin/users?q=${marker}&limit=2&cursor=${encodeURIComponent(cursor)}`,
+        );
+        assert.equal(response.status, 200, JSON.stringify(response.body));
+        const rows = response.body as Array<{ id: string }>;
+        observed.push(...rows.map((row) => row.id));
+        cursor = response.headers.get("x-next-cursor") ?? "";
+      }
+      assert.deepEqual(observed, [ids[0], ids[1], ids[3], ids[4]]);
+      assert.equal(new Set(observed).size, observed.length, "cursor pages should not duplicate rows");
+    } finally {
+      await pool.query("DELETE FROM irc_users WHERE clerk_id = ANY($1::text[])", [[...ids, lateId]]);
+    }
+  });
+
+  test("admin cursor contracts are available for nested collection responses", async () => {
+    const scope = await apiRequest(adminSession, "/admin/scope-options?limit=1&communitiesCursor=start&channelsCursor=start");
+    assert.equal(scope.status, 200, JSON.stringify(scope.body));
+    const scopeBody = scope.body as { pagination?: Record<string, { nextCursor: string | null }> };
+    assert.ok(scopeBody.pagination);
+    assert.ok("communities" in scopeBody.pagination!);
+    assert.ok("channels" in scopeBody.pagination!);
+
+    const roles = await apiRequest(adminSession, "/admin/custom-roles?limit=1&cursor=start");
+    assert.equal(roles.status, 200, JSON.stringify(roles.body));
+    assert.ok((roles.body as { pagination?: { nextCursor: string | null } }).pagination);
+
+    const overview = await apiRequest(adminSession, "/admin/overview?channelLimit=1&categoryLimit=1&channelCursor=start&categoryCursor=start");
+    assert.equal(overview.status, 200, JSON.stringify(overview.body));
+    const overviewPagination = (overview.body as {
+      collectionPagination: {
+        channels: { nextCursor?: string | null };
+        categories: { nextCursor?: string | null };
+      };
+    }).collectionPagination;
+    assert.ok("nextCursor" in overviewPagination.channels);
+    assert.ok("nextCursor" in overviewPagination.categories);
   });
 
   test("sends one admin DM alert for a pending upgrade without granting a slot", async () => {

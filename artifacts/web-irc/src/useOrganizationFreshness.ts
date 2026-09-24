@@ -11,7 +11,7 @@ export type OrganizationPage = {
   teams: unknown[];
   teamMemberships: unknown[];
   invitations: unknown[];
-  pagination?: Record<string, { hasMore: boolean; limit?: number; offset?: number }>;
+  pagination?: Record<string, { hasMore: boolean; limit?: number; offset?: number; nextCursor?: string | null }>;
 };
 
 export async function requestOrganizationSnapshot(
@@ -35,26 +35,21 @@ export async function requestOrganizationSnapshot(
 
 type OrganizationLengths = Pick<OrganizationPage, "employees" | "assignments" | "departments" | "locations" | "teams" | "invitations" | "teamMemberships">;
 
-function pageQuery(lengths: OrganizationLengths, offset: number): string {
-  const limit = (items: unknown[]) => offset === 0
-    ? PAGE_SIZE
-    : Math.min(PAGE_SIZE, Math.max(1, items.length - offset));
-  const params = new URLSearchParams({
-    employeesLimit: String(limit(lengths.employees)),
-    employeesOffset: String(offset),
-    invitationsLimit: String(limit(lengths.invitations)),
-    invitationsOffset: String(offset),
-    assignmentsLimit: String(limit(lengths.assignments)),
-    assignmentsOffset: String(offset),
-    departmentsLimit: String(limit(lengths.departments)),
-    departmentsOffset: String(offset),
-    locationsLimit: String(limit(lengths.locations)),
-    locationsOffset: String(offset),
-    teamsLimit: String(limit(lengths.teams)),
-    teamsOffset: String(offset),
-    teamMembershipsLimit: String(limit(lengths.teamMemberships)),
-    teamMembershipsOffset: String(offset),
-  });
+const organizationCollectionKeys = [
+  "employees", "invitations", "assignments", "departments", "locations", "teams", "teamMemberships",
+] as const;
+type OrganizationCollection = typeof organizationCollectionKeys[number];
+
+function pageQuery(lengths: OrganizationLengths, pageIndexes: Record<OrganizationCollection, number>, cursors: Partial<Record<OrganizationCollection, string>>): string {
+  const params = new URLSearchParams();
+  for (const key of organizationCollectionKeys) {
+    const pageIndex = pageIndexes[key];
+    const limit = Math.min(PAGE_SIZE, Math.max(1, lengths[key].length - pageIndex * PAGE_SIZE));
+    params.set(`${key}Limit`, String(limit));
+    const cursor = cursors[key];
+    if (cursor) params.set(`${key}Cursor`, cursor);
+    else params.set(`${key}Offset`, String(pageIndex * PAGE_SIZE));
+  }
   return params.toString();
 }
 
@@ -64,20 +59,45 @@ export async function fetchOrganizationPages<T extends OrganizationPage>(
   current: OrganizationLengths,
   request: (path: string) => Promise<T>,
 ): Promise<T[]> {
-  const loaded = Math.max(
-    PAGE_SIZE,
-    current.employees.length,
-    current.assignments.length,
-    current.departments.length,
-    current.locations.length,
-    current.teams.length,
-    current.teamMemberships.length,
-    current.invitations.length,
+  const pageTargets = Object.fromEntries(organizationCollectionKeys.map((key) => [
+    key, Math.max(1, Math.ceil(current[key].length / PAGE_SIZE)),
+  ])) as Record<OrganizationCollection, number>;
+  const pageIndexes = Object.fromEntries(organizationCollectionKeys.map((key) => [key, 0])) as Record<OrganizationCollection, number>;
+  let cursors: Partial<Record<OrganizationCollection, string>> = Object.fromEntries(
+    organizationCollectionKeys.map((key) => [key, "start"]),
   );
+  let active = new Set<OrganizationCollection>(organizationCollectionKeys);
   const pages: T[] = [];
-  for (let offset = 0; offset < loaded; offset += PAGE_SIZE) {
+  while (active.size > 0) {
     // Sequential requests keep a refresh bounded and avoid a request burst.
-    pages.push(await request(`/communities/${workspaceId}/organization-snapshot?${pageQuery(current, offset)}`));
+    const response = await request(`/communities/${workspaceId}/organization-snapshot?${pageQuery(current, pageIndexes, cursors)}`);
+    const nextPage = {
+      ...response,
+      members: active.has("employees") ? response.members : [],
+      employees: active.has("employees") ? response.employees : [],
+      invitations: active.has("invitations") ? response.invitations : [],
+      assignments: active.has("assignments") ? response.assignments : [],
+      departments: active.has("departments") ? response.departments : [],
+      locations: active.has("locations") ? response.locations : [],
+      teams: active.has("teams") ? response.teams : [],
+      teamMemberships: active.has("teamMemberships") ? response.teamMemberships : [],
+    };
+    pages.push(nextPage);
+    const remaining = new Set<OrganizationCollection>();
+    for (const key of active) {
+      pageIndexes[key] += 1;
+      const pagination = response.pagination?.[key];
+      if (pageIndexes[key] < pageTargets[key] && pagination?.nextCursor) {
+        cursors[key] = pagination.nextCursor;
+        remaining.add(key);
+      } else if (pageIndexes[key] < pageTargets[key] && pagination && !("nextCursor" in pagination) && pagination.hasMore) {
+        delete cursors[key];
+        remaining.add(key);
+      } else {
+        delete cursors[key];
+      }
+    }
+    active = remaining;
   }
   return pages;
 }
