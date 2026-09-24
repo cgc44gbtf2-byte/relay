@@ -995,10 +995,10 @@ describe("deleted room recovery", () => {
     } as MessageEvent));
     await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
     expect(latestWebSocket).toBe(deletedRoomSocket);
-    const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
-    expect(frames).toEqual(expect.arrayContaining([
-      { type: "subscribe", channelId: 2 },
-    ]));
+    await waitFor(() => {
+      const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
+      expect(frames).toContainEqual({ type: "subscribe", channelId: 2 });
+    });
 
     latestWebSocket?.onmessage?.({
       data: JSON.stringify({ type: "typing", channelId: 1, userId: "user-2", active: true }),
