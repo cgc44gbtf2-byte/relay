@@ -10,6 +10,12 @@ const scriptPath = fileURLToPath(
 const fixturePath = fileURLToPath(
   new URL("./fixtures/scheduled-cleanup-wrong-command.yml", import.meta.url),
 );
+const schemaIsolationFixturePath = fileURLToPath(
+  new URL(
+    "./fixtures/scheduled-cleanup-schema-without-database-isolation.yml",
+    import.meta.url,
+  ),
+);
 
 test("rejects a scheduled cleanup job that invokes the wrong command", async () => {
   const result = await runValidator(fixturePath);
@@ -19,6 +25,13 @@ test("rejects a scheduled cleanup job that invokes the wrong command", async () 
     result.output,
     /must unset DATABASE_URL and invoke the scheduled cleanup command/,
   );
+});
+
+test("rejects schema setup that does not unset DATABASE_URL", async () => {
+  const result = await runValidator(schemaIsolationFixturePath);
+
+  assert.notEqual(result.code, 0, result.output);
+  assert.match(result.output, /must unset DATABASE_URL for schema setup/);
 });
 
 function runValidator(workflowPath) {
