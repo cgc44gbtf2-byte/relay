@@ -3665,6 +3665,12 @@ describe("admin access controls", () => {
       assert.equal(suspension.status, 200, JSON.stringify(suspension));
       suspended = true;
 
+      const rejectedRead = await apiRequest(suspendedSession, "/me");
+      assert.equal(rejectedRead.status, 403, JSON.stringify(rejectedRead));
+      assert.deepEqual(rejectedRead.body, {
+        error: "This account is suspended.",
+      });
+
       const rejected = await apiRequest(suspendedSession, "/me", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
