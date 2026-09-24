@@ -179,6 +179,30 @@ function expectRejectedWebSocket(url: string): Promise<void> {
   });
 }
 
+function waitForWebSocketClose(
+  socket: WebSocket,
+): Promise<{ code: number; reason: Buffer }> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return Promise.resolve({ code: 1006, reason: Buffer.alloc(0) });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for the WebSocket to close."));
+    }, 5_000);
+    const onClose = (code: number, reason: Buffer): void => {
+      cleanup();
+      resolve({ code, reason });
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      socket.off("close", onClose);
+    };
+
+    socket.once("close", onClose);
+  });
+}
+
 async function openWebSocket(session: TestSession): Promise<WebSocket> {
   const ticketResponse = await apiRequest(session, "/ws-ticket");
   assert.equal(ticketResponse.status, 200, JSON.stringify(ticketResponse));
@@ -1042,6 +1066,52 @@ describe("admin access controls", () => {
       [revokedSession.userId],
     );
     assert.deepEqual(afterConnection.rows, [{ status: "offline" }]);
+  });
+
+  test("closes only the revoked session's live socket and preserves shared presence", async () => {
+    const revokedSession = await createTestSession("revoked_live_ws");
+    const activeSession = await createSessionForUser(revokedSession.userId);
+    const sockets: WebSocket[] = [];
+    try {
+      const profile = await apiRequest(revokedSession, "/me");
+      assert.equal(profile.status, 200, JSON.stringify(profile));
+      const activeProfile = await apiRequest(activeSession, "/me");
+      assert.equal(activeProfile.status, 200, JSON.stringify(activeProfile));
+      await pool.query(
+        "UPDATE irc_users SET status = 'offline' WHERE clerk_id = $1",
+        [revokedSession.userId],
+      );
+
+      const revokedSocket = await openWebSocket(revokedSession);
+      sockets.push(revokedSocket);
+      const activeSocket = await openWebSocket(activeSession);
+      sockets.push(activeSocket);
+
+      await revokeTestSession(revokedSession);
+      const revokedClose = waitForWebSocketClose(revokedSocket);
+      await wsHub.revalidateSession(revokedSession.sessionId);
+      const closeEvent = await revokedClose;
+
+      assert.equal(closeEvent.code, 1008);
+      assert.equal(activeSocket.readyState, WebSocket.OPEN);
+      const stillOnline = await pool.query<{ status: string }>(
+        "SELECT status FROM irc_users WHERE clerk_id = $1",
+        [revokedSession.userId],
+      );
+      assert.deepEqual(stillOnline.rows, [{ status: "online" }]);
+
+      const activeClose = waitForWebSocketClose(activeSocket);
+      closeWebSocket(activeSocket);
+      await activeClose;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const offline = await pool.query<{ status: string }>(
+        "SELECT status FROM irc_users WHERE clerk_id = $1",
+        [revokedSession.userId],
+      );
+      assert.deepEqual(offline.rows, [{ status: "offline" }]);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+    }
   });
 
   test("rejects self-service admin claims and honors platform-provisioned access", async () => {

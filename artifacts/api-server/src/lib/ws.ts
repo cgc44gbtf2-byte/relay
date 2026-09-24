@@ -9,6 +9,7 @@ import { canReadChannel, channelForRead } from "./channel-access";
 type Client = {
   socket: WebSocket;
   userId: string;
+  sessionId: string;
   channelIds: Set<number>;
   channelGenerations: Map<number, number>;
   typingWindowStartedAt: number;
@@ -127,6 +128,27 @@ export class Hub {
     }
   }
 
+  async revalidateSession(sessionId: string): Promise<void> {
+    const clients = [...this.clients].filter((client) => client.sessionId === sessionId);
+    if (clients.length === 0) return;
+
+    try {
+      const session = await clerkClient.sessions.getSession(sessionId);
+      for (const client of clients) {
+        if (
+          session.userId !== client.userId ||
+          session.status !== "active"
+        ) {
+          client.socket.close(1008, "Session is no longer active.");
+        }
+      }
+    } catch {
+      for (const client of clients) {
+        client.socket.close(1008, "Session could not be revalidated.");
+      }
+    }
+  }
+
   private hasConnectedUser(userId: string): boolean {
     for (const client of this.clients) {
       if (client.userId === userId) return true;
@@ -187,18 +209,16 @@ export class Hub {
       const client = {
         socket: ws,
         userId: ticket.userId,
+        sessionId: ticket.sessionId,
         channelIds: new Set(),
         channelGenerations: new Map(),
         typingWindowStartedAt: Date.now(),
         typingFrameCount: 0,
         lastTypingAt: 0,
-        sessionCheck: setInterval(() => {
-          void clerkClient.sessions.getSession(ticket.sessionId)
-            .then((session) => {
-              if (session.userId !== ticket.userId || session.status !== "active") ws.close(1008, "Session is no longer active.");
-            })
-            .catch(() => ws.close(1008, "Session could not be revalidated."));
-        }, 60_000),
+        sessionCheck: setInterval(
+          () => void this.revalidateSession(ticket.sessionId),
+          60_000,
+        ),
       } satisfies Client;
       this.clients.add(client);
       void db
