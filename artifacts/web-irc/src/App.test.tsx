@@ -1346,6 +1346,85 @@ describe("deleted room recovery", () => {
     expect(screen.queryByRole("button", { name: /Orion/ })).toBeNull();
   });
 
+  it("preserves members when a presence refresh temporarily fails", async () => {
+    let fail = false;
+    const channelMembers = vi.fn(() => fail
+      ? Promise.reject(new TypeError("Network unavailable"))
+      : jsonResponse(members()));
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
+      channelMembers,
+    });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => { await Promise.resolve(); });
+    const callsBefore = channelMembers.mock.calls.length;
+    fail = true;
+    await act(async () => {
+      latestWebSocket?.onmessage?.({
+        data: JSON.stringify({ type: "presence", channelId: 1, action: "leave", user: members()[1] }),
+      } as MessageEvent);
+    });
+    expect(channelMembers).toHaveBeenCalledTimes(callsBefore + 1);
+    expect(screen.getByRole("button", { name: "Message Orion" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+  });
+
+  it("keeps the newest members when two presence refreshes and reconnect resolve in reverse order", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    let delay = false;
+    const channelMembers = vi.fn(() => delay
+      ? new Promise<Response>((resolve) => { pending.push(resolve); })
+      : jsonResponse(members()));
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
+      channelMembers,
+    });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => { await Promise.resolve(); });
+    delay = true;
+    for (const action of ["join", "leave"]) {
+      await act(async () => {
+        latestWebSocket?.onmessage?.({
+          data: JSON.stringify({ type: "presence", channelId: 1, action, user: members()[1] }),
+        } as MessageEvent);
+      });
+    }
+    expect(pending).toHaveLength(2);
+    const firstSocket = latestWebSocket;
+    vi.useFakeTimers();
+    act(() => firstSocket?.onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(latestWebSocket).not.toBe(firstSocket);
+    await act(async () => { latestWebSocket?.onopen?.(); });
+    expect(pending).toHaveLength(3);
+    vi.useRealTimers();
+
+    const nova = { ...members()[1], id: "user-3", username: "nova", displayName: "Nova" };
+    await act(async () => { pending[2](await jsonResponse([members()[0], nova])); });
+    expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
+    for (const index of [1, 0]) {
+      await act(async () => { pending[index](await jsonResponse(index === 1 ? [members()[0]] : members())); });
+      expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /Orion/ })).toBeNull();
+    }
+
+    // A pending presence request must also stay scoped to its original room.
+    await act(async () => {
+      latestWebSocket?.onmessage?.({
+        data: JSON.stringify({ type: "presence", channelId: 1, action: "join", user: nova }),
+      } as MessageEvent);
+    });
+    expect(pending).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: /fallback-room/ }));
+    await screen.findByRole("heading", { name: "#fallback-room" });
+    await screen.findByRole("button", { name: /Orion/ });
+    await act(async () => { pending[3](await jsonResponse([nova])); });
+    expect(screen.getByRole("button", { name: /Orion/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Nova/ })).toBeNull();
+  });
+
   it("ignores a delayed reconnect member response after switching rooms", async () => {
     let resolveMembers!: (response: Response) => void;
     const delayedMembers = new Promise<Response>((resolve) => { resolveMembers = resolve; });

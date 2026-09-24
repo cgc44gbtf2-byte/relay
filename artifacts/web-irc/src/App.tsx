@@ -486,8 +486,10 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
       if (refreshId === memberRefreshRef.current && roomKeyRef.current === membersRoomKey) setMembers(data);
     } catch (error) {
       if (refreshId !== memberRefreshRef.current || roomKeyRef.current !== membersRoomKey) return;
-      setMembers([]);
-      if (isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
+      if (isRecoverableChannelError(error)) {
+        setMembers([]);
+        onUnavailableChannelRef.current?.(channelId);
+      }
     }
   }, [channelId, activeDm, roomKey]);
 
@@ -772,12 +774,7 @@ function ChatApp() {
               && data.channelId === socketChannelId
              && !activeDmIdRef.current
            ) {
-              const presenceChannelId = data.channelId;
-              pagedApi<Member>(`/channels/${presenceChannelId}/members`).then((members) => {
-                if (socketRoomIsCurrent() && currentChannelIdRef.current === presenceChannelId && !activeDmIdRef.current) {
-                  room.setMembers(members);
-                }
-              }).catch(() => undefined);
+              void room.refreshMembers();
              const presenceUser = data.user?.displayName ?? "Someone";
              const presenceId = data.eventId
                ?? `${data.channelId}-${data.user?.id ?? data.userId ?? "unknown"}-${data.action ?? "changed"}`;
