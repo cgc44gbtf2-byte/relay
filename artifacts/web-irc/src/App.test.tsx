@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
 
 describe("IRC collection pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -2187,5 +2187,166 @@ describe("admin activity availability polling", () => {
     expect(await screen.findByText("newly arrived event")).toBeTruthy();
     expect(screen.getByText("initial matching event")).toBeTruthy();
     expect(screen.queryByTestId("status-new-admin-activity")).toBeNull();
+  });
+});
+
+describe("manager invitation delivery", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const detail = (invitations: Array<{ id: number; email: string; role: string; status: string; expiresAt: string; createdAt: string; emailDeliveryStatus: string }> = []) => ({
+    community: { id: 17, name: "Operations" },
+    canManage: true,
+    canManageOrganization: false,
+    isOwner: false,
+    invitations,
+    employees: [], members: [], departments: [], locations: [], teams: [],
+    teamMemberships: [], assignments: [], channels: [], categories: [],
+    announcements: [], policies: [], documents: [], tasks: [],
+  }) as unknown as Parameters<typeof OrganizationPanel>[0]["detail"];
+
+  const pending = (emailDeliveryStatus: string) => ({
+    id: 42, email: "sam@example.com", role: "employee", status: "pending",
+    expiresAt: "2027-01-01T00:00:00Z", createdAt: "2026-01-01T00:00:00Z", emailDeliveryStatus,
+  });
+
+  it.each([
+    { status: "sent", message: "Email accepted by provider, delivery not yet confirmed.", failed: false },
+    { status: "failed", message: "Email failed to send; share the private link.", failed: true },
+  ] as const)("creates an invitation with $status delivery, exposing the fallback link and the correct feedback", async ({ status, message, failed }) => {
+    const fetch = vi.fn(() => jsonResponse({ invitationToken: "created-token", emailDelivery: { status, message } }));
+    vi.stubGlobal("fetch", fetch);
+    const setError = vi.fn();
+    const setNotice = vi.fn();
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    render(<OrganizationPanel detail={detail()} working={false} setWorking={vi.fn()} setError={setError} setNotice={setNotice} onRefresh={onRefresh} />);
+
+    fireEvent.change(screen.getByPlaceholderText("employee@company.com"), { target: { value: "sam@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "create invitation" }));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith("/api/communities/17/invitations", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ email: "sam@example.com", role: "member", departmentId: null, locationId: null, teamId: null }),
+    }));
+    expect((screen.getByRole("textbox", { name: "Private invitation link" }) as HTMLInputElement).value)
+      .toBe(`${window.location.origin}/accept-invitation?communityId=17&token=created-token`);
+    expect((screen.getByPlaceholderText("employee@company.com") as HTMLInputElement).value).toBe("");
+    expect(failed ? setError : setNotice).toHaveBeenCalledWith(message);
+    expect(failed ? setNotice : setError).not.toHaveBeenCalledWith(message);
+  });
+
+  it("uses the rotated resend URL even when email fails and retains it if a later resend request fails", async () => {
+    let attempts = 0;
+    const fetch = vi.fn(() => {
+      attempts++;
+      return attempts === 1
+        ? jsonResponse({ invitationToken: "rotated-token", emailDelivery: { status: "failed", message: "Delivery rejected; use the new private link." } })
+        : jsonResponse({ error: "Resend temporarily unavailable" }, 503);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const setError = vi.fn();
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<OrganizationPanel detail={detail([pending("sent")])} working={false} setWorking={vi.fn()} setError={setError} setNotice={vi.fn()} onRefresh={onRefresh} />);
+    expect(screen.getByText(/delivery not yet confirmed/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "resend" }));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith("/api/communities/17/invitations/42/resend", expect.objectContaining({ method: "POST", body: "{}" }));
+    const link = screen.getByRole("textbox", { name: "Private invitation link" }) as HTMLInputElement;
+    const rotatedUrl = `${window.location.origin}/accept-invitation?communityId=17&token=rotated-token`;
+    expect(link.value).toBe(rotatedUrl);
+    expect(setError).toHaveBeenCalledWith("Delivery rejected; use the new private link.");
+
+    rerender(<OrganizationPanel detail={detail([pending("failed")])} working={false} setWorking={vi.fn()} setError={setError} setNotice={vi.fn()} onRefresh={onRefresh} />);
+    expect(screen.getByText(/Email rejected or failed/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "resend" }));
+    await waitFor(() => expect(setError).toHaveBeenCalledWith("Resend temporarily unavailable"));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("textbox", { name: "Private invitation link" }) as HTMLInputElement).value).toBe(rotatedUrl);
+  });
+});
+
+describe("onboarding invitation batch delivery", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, "", "/");
+  });
+
+  it("shows each saved link and failed-delivery message while continuing to create remaining invitations", async () => {
+    const posts: string[] = [];
+    let progress = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/onboarding") return jsonResponse({
+        nextStep: "invite", ownerCommunity: { id: 17, name: "Operations", slug: "operations", onboardingStep: 2, joined: true, canManage: true },
+        communities: [],
+      });
+      if (url === "/api/community-upgrades/status") return jsonResponse({ subscriptionEndsAt: null, ownedCommunities: [], approvedSlots: 0, usedSlots: 0, pendingRequest: null });
+      if (url === "/api/communities/17/invitations" && init?.method === "POST") {
+        const { email } = JSON.parse(String(init.body)) as { email: string };
+        posts.push(email);
+        return jsonResponse({
+          invitationToken: `token-${posts.length}`,
+          emailDelivery: email === "first@example.com"
+            ? { status: "failed", message: "First email failed; share its private link." }
+            : { status: "sent", message: "Second email accepted by provider." },
+        });
+      }
+      if (url === "/api/onboarding/17/progress" && init?.method === "POST") {
+        progress++;
+        return jsonResponse({});
+      }
+      return jsonResponse({ error: `Unexpected request: ${url}` }, 500);
+    }));
+    window.history.pushState({}, "", "/onboarding");
+    render(<App />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "email addresses" }), { target: { value: "FIRST@example.com, second@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "create member invitations" }));
+
+    expect(await screen.findByRole("heading", { name: "Your Relay is ready." })).toBeTruthy();
+    expect(posts).toEqual(["first@example.com", "second@example.com"]);
+    expect(progress).toBe(1);
+    expect(screen.getByText("First email failed; share its private link.")).toBeTruthy();
+    expect(screen.getByText("Second email accepted by provider.")).toBeTruthy();
+    for (const token of ["token-1", "token-2"]) {
+      const url = `${window.location.origin}/accept-invitation?communityId=17&token=${token}`;
+      expect(screen.getByRole("link", { name: url }).getAttribute("href")).toBe(url);
+    }
+  });
+
+  it("keeps successfully created links and only unprocessed addresses when a later batch request fails", async () => {
+    let progress = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/onboarding") return jsonResponse({
+        nextStep: "invite", ownerCommunity: { id: 17, name: "Operations", slug: "operations", onboardingStep: 2, joined: true, canManage: true },
+        communities: [],
+      });
+      if (url === "/api/community-upgrades/status") return jsonResponse({ subscriptionEndsAt: null, ownedCommunities: [], approvedSlots: 0, usedSlots: 0, pendingRequest: null });
+      if (url === "/api/communities/17/invitations" && init?.method === "POST") {
+        const { email } = JSON.parse(String(init.body)) as { email: string };
+        return email === "second@example.com"
+          ? jsonResponse({ error: "Second invitation unavailable" }, 503)
+          : jsonResponse({ invitationToken: "first-token", emailDelivery: { status: "sent", message: "First email accepted." } });
+      }
+      if (url === "/api/onboarding/17/progress") progress++;
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/onboarding");
+    render(<App />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "email addresses" }), {
+      target: { value: "first@example.com\nsecond@example.com\nthird@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "create member invitations" }));
+
+    expect(await screen.findByText("Second invitation unavailable")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "email addresses" }) as HTMLTextAreaElement).value).toBe("second@example.com\nthird@example.com");
+    const url = `${window.location.origin}/accept-invitation?communityId=17&token=first-token`;
+    expect(screen.getByRole("link", { name: url }).getAttribute("href")).toBe(url);
+    expect(progress).toBe(0);
+    expect(screen.queryByRole("heading", { name: "Your Relay is ready." })).toBeNull();
   });
 });

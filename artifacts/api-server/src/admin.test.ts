@@ -3650,6 +3650,197 @@ describe("admin access controls", () => {
     }
   });
 
+  test("persists invitation fallback links across mail failures, rotation, unauthorized requests, and onboarding batches", async () => {
+    const deliveredRecipient = await createTestSession("invitation_mail_delivered", "verified");
+    const failedRecipient = await createTestSession("invitation_mail_failed", "verified");
+    const originalFetch = globalThis.fetch;
+    const originalEnv = process.env;
+    const sentMail: Array<{ to: string[]; text: string; tags: Array<{ name: string; value: string }> }> = [];
+    let failedRecipientAttempts = 0;
+    let communityId: number | undefined;
+    try {
+      await Promise.all([apiRequest(deliveredRecipient, "/me"), apiRequest(failedRecipient, "/me")]);
+      const deliveredUser = await clerkClient.users.getUser(deliveredRecipient.userId);
+      const failedUser = await clerkClient.users.getUser(failedRecipient.userId);
+      const verifiedEmail = (user: typeof deliveredUser): string => {
+        const email = user.emailAddresses.find((address) => address.verification?.status === "verified")?.emailAddress;
+        assert.ok(email);
+        return email.toLowerCase();
+      };
+      const deliveredEmail = verifiedEmail(deliveredUser);
+      const failedEmail = verifiedEmail(failedUser);
+      const batchEmails = [
+        `batch-sent-${randomUUID()}@example.com`,
+        `batch-failed-${randomUUID()}@example.com`,
+        `batch-recovered-${randomUUID()}@example.com`,
+      ];
+      const createdWorkspace = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private, onboarding_step)
+         VALUES ('Mail Regression Workspace', $1, $2, 'paid_workspace', true, 2) RETURNING id`,
+        [`mail-regression-${randomUUID()}`, adminSession.userId],
+      );
+      communityId = createdWorkspace.rows[0]?.id;
+      assert.ok(communityId);
+      const workspaceId = communityId;
+      const invitationPath = `/communities/${workspaceId}/invitations`;
+      const post = (session: TestSession, path: string, body: Record<string, unknown>) =>
+        apiRequest(session, path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const create = (email: string) => post(adminSession, invitationPath, { email, role: "employee" });
+      const accept = (session: TestSession, token: string) =>
+        post(session, `${invitationPath}/accept`, { token });
+      const stored = async (id: number) => {
+        const result = await pool.query<{
+          status: string; token_hash: string; email_attempt_id: string;
+          email_provider_id: string | null; email_delivery_status: string;
+        }>(
+          `SELECT status, token_hash, email_attempt_id, email_provider_id, email_delivery_status
+           FROM irc_workspace_invitations WHERE id = $1 AND community_id = $2`,
+          [id, workspaceId],
+        );
+        assert.equal(result.rowCount, 1);
+        return result.rows[0]!;
+      };
+      type InvitationResult = {
+        id: number;
+        invitationToken: string;
+        emailDeliveryStatus: string;
+        emailDelivery: { status: string; message: string };
+      };
+      const checkFallback = async (response: ApiResponse, status: "sent" | "failed") => {
+        assert.ok(response.status === 200 || response.status === 201, JSON.stringify(response));
+        const invitation = response.body as InvitationResult;
+        assert.ok(invitation.id);
+        assert.match(invitation.invitationToken, /^[0-9a-f-]{36}$/);
+        assert.equal(invitation.emailDelivery.status, status);
+        assert.equal(invitation.emailDeliveryStatus, status);
+        assert.ok(!JSON.stringify(invitation.emailDelivery).includes(invitation.invitationToken));
+        const record = await stored(invitation.id);
+        assert.equal(record.status, "pending");
+        assert.equal(record.email_delivery_status, status);
+        assert.equal(record.token_hash, createHash("sha256").update(invitation.invitationToken).digest("hex"));
+        assert.ok(record.email_attempt_id);
+        assert.equal(record.email_provider_id === null, status === "failed");
+        assert.ok(!JSON.stringify(response.body).includes("test-mail-key"));
+        return invitation;
+      };
+
+      // Replace only invitation configuration; Clerk and database settings still resolve
+      // against their original environment without reading any existing mail secrets.
+      process.env = new Proxy(originalEnv, {
+        get(target, key, receiver) {
+          if (key === "INVITATION_EMAIL_FROM") return "invites@example.com";
+          if (key === "INVITATION_APP_URL") return "https://example.com";
+          if (key === "RESEND_API_KEY") return "test-mail-key";
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      globalThis.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (!url.startsWith("https://api.resend.com/")) return originalFetch(input, init);
+        assert.equal(url, "https://api.resend.com/emails");
+        const mail = JSON.parse(String(init?.body)) as (typeof sentMail)[number];
+        sentMail.push(mail);
+        assert.equal(mail.tags.length, 1);
+        assert.equal(mail.tags[0]?.name, "invitation_attempt");
+        const link = mail.text.match(/https:\/\/example\.com\/accept-invitation\?[^\s]+/)?.[0];
+        assert.ok(link);
+        const params = new URL(link).searchParams;
+        assert.equal(params.get("communityId"), String(workspaceId));
+        assert.ok(params.get("token"));
+        if (mail.to[0] === failedEmail) failedRecipientAttempts += 1;
+        if ((mail.to[0] === failedEmail && failedRecipientAttempts !== 2) || mail.to[0] === batchEmails[1]) {
+          return new Response("provider detail must not escape", { status: 503 });
+        }
+        return new Response(JSON.stringify({ id: `provider-${sentMail.length}` }), { status: 200 });
+      };
+
+      const unauthorizedCreate = await post(secondSession, invitationPath, { email: deliveredEmail, role: "employee" });
+      const anonymousCreate = await unauthenticatedApiRequest(invitationPath, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: deliveredEmail, role: "employee" }),
+      });
+      assert.equal(unauthorizedCreate.status, 403);
+      assert.equal(anonymousCreate.status, 401);
+      assert.equal(sentMail.length, 0);
+      assert.equal((await pool.query(
+        "SELECT id FROM irc_workspace_invitations WHERE community_id = $1", [workspaceId],
+      )).rowCount, 0);
+
+      const delivered = await checkFallback(await create(deliveredEmail), "sent");
+      assert.equal(sentMail.length, 1);
+      assert.equal(sentMail[0]?.to[0], deliveredEmail);
+      assert.equal(new URL(sentMail[0]!.text.match(/https:\/\/example\.com\/accept-invitation\?[^\s]+/)![0]).searchParams.get("token"), delivered.invitationToken);
+      assert.equal((await stored(delivered.id)).email_provider_id, "provider-1");
+      assert.equal((await accept(deliveredRecipient, delivered.invitationToken)).status, 200);
+
+      const failed = await checkFallback(await create(failedEmail), "failed");
+      // A recipient can still use the returned fallback token even though
+      // the provider rejected delivery; declining keeps this row resendable.
+      const declinedFallback = await post(failedRecipient, `${invitationPath}/decline`, {
+        token: failed.invitationToken,
+      });
+      assert.equal(declinedFallback.status, 200, JSON.stringify(declinedFallback));
+      assert.equal((await stored(failed.id)).status, "declined");
+      const firstAttempt = (await stored(failed.id)).email_attempt_id;
+      const deniedResend = await post(secondSession, `${invitationPath}/${failed.id}/resend`, {});
+      const anonymousResend = await unauthenticatedApiRequest(`${invitationPath}/${failed.id}/resend`, { method: "POST" });
+      assert.equal(deniedResend.status, 403);
+      assert.equal(anonymousResend.status, 401);
+      assert.equal(sentMail.length, 2);
+      assert.equal((await stored(failed.id)).email_attempt_id, firstAttempt);
+
+      const sentResend = await checkFallback(await post(adminSession, `${invitationPath}/${failed.id}/resend`, {}), "sent");
+      assert.equal(sentResend.id, failed.id);
+      assert.notEqual(sentResend.invitationToken, failed.invitationToken);
+      assert.notEqual((await stored(failed.id)).email_attempt_id, firstAttempt);
+      assert.equal(sentMail.length, 3);
+      assert.equal(new URL(sentMail[2]!.text.match(/https:\/\/example\.com\/accept-invitation\?[^\s]+/)![0]).searchParams.get("token"), sentResend.invitationToken);
+      assert.equal((await stored(failed.id)).email_provider_id, "provider-3");
+      assert.equal((await accept(failedRecipient, failed.invitationToken)).status, 404);
+      const sentAttempt = (await stored(failed.id)).email_attempt_id;
+      const resent = await checkFallback(await post(adminSession, `${invitationPath}/${failed.id}/resend`, {}), "failed");
+      assert.equal(resent.id, failed.id);
+      assert.notEqual(resent.invitationToken, sentResend.invitationToken);
+      assert.notEqual((await stored(failed.id)).email_attempt_id, sentAttempt);
+      assert.equal(sentMail.length, 4);
+      assert.equal(new URL(sentMail[3]!.text.match(/https:\/\/example\.com\/accept-invitation\?[^\s]+/)![0]).searchParams.get("token"), resent.invitationToken);
+      assert.equal((await accept(failedRecipient, sentResend.invitationToken)).status, 404);
+      assert.equal((await accept(failedRecipient, resent.invitationToken)).status, 200);
+
+      // The onboarding UI sends its batch one address at a time. A delivery
+      // failure must not abort subsequent invitations or lose any fallback link.
+      const batch: InvitationResult[] = [];
+      for (const email of batchEmails) {
+        batch.push(await checkFallback(await create(email), email === batchEmails[1] ? "failed" : "sent"));
+      }
+      assert.equal(sentMail.length, 7);
+      assert.deepEqual(sentMail.slice(4).map((mail) => mail.to[0]), batchEmails);
+      const progress = await post(adminSession, `/onboarding/${workspaceId}/progress`, { step: 9 });
+      assert.equal(progress.status, 200, JSON.stringify(progress));
+      assert.equal((progress.body as { nextStep: string }).nextStep, "start");
+      assert.deepEqual(
+        (await pool.query<{ email: string; email_delivery_status: string }>(
+          "SELECT email, email_delivery_status FROM irc_workspace_invitations WHERE community_id = $1 AND email = ANY($2::text[]) ORDER BY email",
+          [workspaceId, batchEmails],
+        )).rows,
+        batchEmails.map((email, index) => ({
+          email, email_delivery_status: index === 1 ? "failed" : "sent",
+        })).sort((a, b) => a.email.localeCompare(b.email)),
+      );
+      assert.equal(new Set(batch.map((item) => item.invitationToken)).size, 3);
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.env = originalEnv;
+      if (communityId !== undefined) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("accepts, declines, and revokes workspace invitations with onboarding audit events", async () => {
     const recipient = await createTestSession("workspace_invitation_flow", "verified");
     const workspaceIds: number[] = [];
