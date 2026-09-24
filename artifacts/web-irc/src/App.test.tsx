@@ -232,7 +232,7 @@ function installApi({
       communities: [{ id: 1, name: "Test workspace", slug: "test-workspace", onboardingStep: 9, joined: true, canManage: owner }],
     });
     if (url === "/api/categories") return jsonResponse(categories);
-    if (url === "/api/notifications" && method === "GET") {
+    if ((url === "/api/notifications" || url.startsWith("/api/notifications?")) && method === "GET") {
       return notificationsFailure ? jsonResponse({ error: "notifications unavailable" }, 500) : jsonResponse(notifications);
     }
     if (url.match(/^\/api\/notifications\/\d+\/detail$/) && method === "GET") {
