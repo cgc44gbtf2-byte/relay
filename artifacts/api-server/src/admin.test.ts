@@ -8569,6 +8569,107 @@ describe("admin access controls", () => {
     }
   });
 
+  test("allocates distinct policy versions for concurrent managers with audits and notifications", async () => {
+    const owner = await createTestSession("policy_concurrent_owner");
+    const manager = await createTestSession("policy_concurrent_manager");
+    for (const session of [owner, manager]) {
+      assert.equal((await apiRequest(session, "/me")).status, 200);
+    }
+    const created = await apiRequest(owner, "/communities", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Concurrent policies", slug: `policy-${randomUUID()}` }),
+    });
+    assert.equal(created.status, 201, JSON.stringify(created));
+    const communityId = (created.body as { id: number }).id;
+    const trigger = `policy_gate_${randomUUID().replaceAll("-", "")}`;
+    const gate = await pool.connect();
+    let publications: Promise<ApiResponse[]> | undefined;
+    try {
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+        [communityId, manager.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [manager.userId, communityId, owner.userId],
+      );
+      // Hold the first INSERT after its version read. The second publisher must
+      // wait on the workspace lock rather than reading the same latest version.
+      await pool.query(
+        `CREATE FUNCTION "${trigger}"() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.community_id = ${communityId} THEN
+             PERFORM pg_advisory_xact_lock(213, ${communityId});
+           END IF;
+           RETURN NEW;
+         END; $$;
+         CREATE TRIGGER "${trigger}" BEFORE INSERT ON irc_workspace_policies
+         FOR EACH ROW EXECUTE FUNCTION "${trigger}"();`,
+      );
+      for (const startVersion of [1, 3]) {
+        await gate.query("SELECT pg_advisory_lock(213, $1)", [communityId]);
+        const titles = [`Policy ${startVersion}`, `Policy ${startVersion + 1}`];
+        publications = Promise.all([owner, manager].map((session, index) =>
+          apiRequest(session, `/communities/${communityId}/policies`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: titles[index], body: "Read and acknowledge." }),
+          }),
+        ));
+        const deadline = Date.now() + 15_000;
+        let waiting = 0;
+        while (Date.now() < deadline) {
+          const result = await gate.query(
+            `SELECT count(*)::int AS count FROM pg_stat_activity
+             WHERE datname = current_database() AND pid <> pg_backend_pid()
+               AND wait_event_type = 'Lock'
+               AND (query LIKE '%irc_workspace_policies%' OR query LIKE '%irc_communities%')`,
+          );
+          waiting = result.rows[0].count;
+          if (waiting >= 2) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await gate.query("SELECT pg_advisory_unlock(213, $1)", [communityId]);
+        const responses = await publications;
+        publications = undefined;
+        assert.equal(waiting, 2, "both publishers must overlap at the database barrier");
+        for (const response of responses) assert.equal(response.status, 201, JSON.stringify(response));
+        const policies = responses.map((response) => response.body as { id: number; version: number; title: string });
+        assert.deepEqual(policies.map((policy) => policy.version).sort((a, b) => a - b), [startVersion, startVersion + 1]);
+        for (const [index, policy] of policies.entries()) {
+          const saved = await pool.query("SELECT version FROM irc_workspace_policies WHERE id = $1", [policy.id]);
+          assert.equal(saved.rows[0].version, policy.version);
+          const audits = await pool.query(
+            `SELECT actor_id FROM irc_admin_audit_logs
+             WHERE community_id = $1 AND action = 'published_workspace_policy' AND details = $2`,
+            [communityId, titles[index]],
+          );
+          assert.deepEqual(audits.rows, [{ actor_id: [owner, manager][index].userId }]);
+          const notices = await pool.query(
+            `SELECT user_id FROM irc_notifications WHERE community_id = $1
+             AND entity_type = 'workspace_policy' AND entity_id = $2 AND type = 'document_acknowledgement'`,
+            [communityId, policy.id],
+          );
+          assert.deepEqual(notices.rows.map((row) => row.user_id).sort(), [owner.userId, manager.userId].sort());
+          const auditNotices = await pool.query(
+            `SELECT count(*)::int AS count FROM irc_notifications WHERE community_id = $1
+             AND type = 'administrative_action' AND body = $2`,
+            [communityId, `published workspace policy: ${titles[index]}`],
+          );
+          assert.ok(auditNotices.rows[0].count > 0, "publication must also persist its administrative notification");
+        }
+      }
+    } finally {
+      await gate.query("SELECT pg_advisory_unlock_all()");
+      await publications;
+      gate.release();
+      await pool.query(`DROP TRIGGER IF EXISTS "${trigger}" ON irc_workspace_policies; DROP FUNCTION IF EXISTS "${trigger}"();`);
+      await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+    }
+  });
+
   test("rolls back policy publication and notifications on database failures and retries cleanly", async () => {
     const owner = await createTestSession("policy_atomic");
     assert.equal((await apiRequest(owner, "/me")).status, 200);

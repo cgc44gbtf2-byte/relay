@@ -2421,6 +2421,10 @@ router.post("/communities/:communityId/policies", requireAuth, async (req: Authe
     return;
   }
   const { policy, notifications } = await db.transaction(async (tx) => {
+    // Lock the stable workspace row, including when no policy exists yet.
+    // The following statement then sees the preceding publisher's committed version.
+    await tx.select({ id: communitiesTable.id }).from(communitiesTable)
+      .where(eq(communitiesTable.id, communityId)).for("update");
     const [previous] = await tx.select({ version: workspacePoliciesTable.version }).from(workspacePoliciesTable)
       .where(eq(workspacePoliciesTable.communityId, communityId)).orderBy(desc(workspacePoliciesTable.version)).limit(1);
     const [policy] = await tx.insert(workspacePoliciesTable).values({
