@@ -89,6 +89,11 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
+    const detail = {
+      community: { id: 13 },
+      channels: [channel],
+      categories,
+    } as unknown as Parameters<typeof WorkspaceChannelOrganizer>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
     const select = await screen.findByTestId("select-public-space");
@@ -651,6 +656,37 @@ describe("deleted room recovery", () => {
     ]);
   });
 
+  it("hides room typing in a direct message and returns to the room without stale indicators", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    const roomSocket = latestWebSocket;
+    const typingFrame = { data: JSON.stringify({ type: "typing", channelId: 1, userId: "user-2", active: true }) } as MessageEvent;
+
+    act(() => roomSocket?.onmessage?.(typingFrame));
+    expect(screen.getByText("Orion typing…")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
+    expect(screen.queryByText(/typing…/)).toBeNull();
+
+    // A frame already in flight on the old room socket (or delivered to the DM socket)
+    // must not restore room typing while the DM is open.
+    act(() => {
+      roomSocket?.onmessage?.(typingFrame);
+      latestWebSocket?.onmessage?.(typingFrame);
+    });
+    expect(screen.queryByText(/typing…/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /deleted-room/i }));
+    expect(await screen.findByRole("heading", { name: "#deleted-room" })).toBeTruthy();
+    expect(screen.queryByText(/typing…/)).toBeNull();
+
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    act(() => latestWebSocket?.onmessage?.(typingFrame));
+    expect(screen.getByText("Orion typing…")).toBeTruthy();
+  });
+
   it("refreshes the active room after reconnecting and replaces stale messages", async () => {
     await renderChat({
       missingRequest: "event",
@@ -841,3 +877,9 @@ describe("frontend route and document error hardening", () => {
       community: { id: 7 },
       canManage: false,
     } as Parameters<typeof DocumentCenter>[0]["detail"];
+    const setError = vi.fn();
+    render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={setError} />);
+    expect(await screen.findByText("documents unavailable")).toBeTruthy();
+    expect(setError).toHaveBeenCalledWith("documents unavailable");
+  });
+});
