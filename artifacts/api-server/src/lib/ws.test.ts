@@ -230,6 +230,74 @@ describe("websocket ticket cleanup", () => {
 });
 
 describe("websocket multi-connection presence", () => {
+  test("recovers a queued presence write after a rejected write and persists the last disconnect", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    type Status = "online" | "offline";
+    let storedStatus: Status = "offline";
+    const writes: Array<{ status: Status; commit: () => void; reject: (error: Error) => void }> = [];
+
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: ({ status }: { status: Status }) => ({
+          where: () => new Promise<void>((resolve, reject) => {
+            writes.push({
+              status,
+              commit: () => {
+                storedStatus = status;
+                resolve();
+              },
+              reject,
+            });
+          }),
+        }),
+      };
+    });
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const first = client("same-user", socket());
+    const remaining = client("same-user", socket());
+    internals.registerClient(first);
+    internals.registerClient(remaining);
+    internals.updatePresence(first.userId);
+    await flush();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].status, "online");
+
+    internals.unregisterClient(first);
+    internals.updatePresence(first.userId);
+    const queuedWrite = internals.presenceWrites.get(first.userId);
+    await flush();
+    assert.equal(writes.length, 1, "the socket change must wait for the pending write");
+
+    writes[0].reject(new Error("temporary presence-save failure"));
+    await flush();
+    assert.equal(storedStatus, "offline", "a failed write must not persist its status");
+    assert.equal(writes.length, 2, "the queued write must execute despite the earlier rejection");
+    assert.equal(writes[1].status, "online", "the remaining socket must keep the user online");
+    assert.equal(internals.hasConnectedUser(first.userId), true);
+    assert.equal(internals.presenceWrites.get(first.userId), queuedWrite,
+      "failed-write cleanup must not remove the pending replacement write");
+
+    writes[1].commit();
+    await flush();
+    assert.equal(storedStatus, "online");
+    assert.equal(internals.presenceWrites.size, 0, "the recovered queue must clear after persistence");
+
+    internals.unregisterClient(remaining);
+    internals.updatePresence(remaining.userId);
+    await flush();
+    assert.equal(writes.length, 3);
+    assert.equal(writes[2].status, "offline");
+    writes[2].commit();
+    await flush();
+    assert.equal(storedStatus, "offline", "closing the last socket must persist offline status");
+    assert.equal(internals.hasConnectedUser(remaining.userId), false);
+    assert.equal(internals.presenceWrites.size, 0);
+  });
+
   test("serializes delayed presence writes across out-of-order tab closes and reconnects", async (t) => {
     const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
     const hub = new Hub();
