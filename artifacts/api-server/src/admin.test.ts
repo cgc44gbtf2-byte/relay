@@ -2579,6 +2579,114 @@ describe("admin access controls", () => {
     }
   });
 
+  test("does not let a revoked role win a concurrent promotion race", async () => {
+    const ownerSession = await createTestSession("role_race_owner");
+    const actorSession = await createTestSession("role_race_actor");
+    const targetSession = await createTestSession("role_race_target");
+    let communityId: number | null = null;
+    const revocation = await pool.connect();
+
+    try {
+      await Promise.all([
+        apiRequest(ownerSession, "/me"),
+        apiRequest(actorSession, "/me"),
+        apiRequest(targetSession, "/me"),
+      ]);
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Role race ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, actorSession.userId, targetSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles
+           (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [actorSession.userId, communityId, ownerSession.userId],
+      );
+
+      // Warm the session token before holding the database lock so the request
+      // reaches the role endpoint while revocation is still in progress.
+      await apiRequest(actorSession, "/me");
+      await revocation.query("BEGIN");
+      await revocation.query(
+        "SELECT clerk_id FROM irc_users WHERE clerk_id = $1 FOR UPDATE",
+        [actorSession.userId],
+      );
+
+      const promotion = apiRequest(
+        actorSession,
+        `/communities/${communityId}/members/${targetSession.userId}/role`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: "workspace_owner" }),
+        },
+      );
+      let requestBlockedOnAuthorization = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const waiting = await pool.query(
+          `SELECT pid
+           FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid()
+             AND state = 'active'
+             AND wait_event_type = 'Lock'
+             AND query ILIKE '%irc_users%'`,
+        );
+        if (waiting.rows.length > 0) {
+          requestBlockedOnAuthorization = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(
+        requestBlockedOnAuthorization,
+        true,
+        "the promotion should wait for the actor authorization lock",
+      );
+      await revocation.query(
+        `DELETE FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2 AND role = 'workspace_admin'`,
+        [actorSession.userId, communityId],
+      );
+      await revocation.query("COMMIT");
+
+      const rejected = await promotion;
+      assert.equal(rejected.status, 403, JSON.stringify(rejected));
+      assert.deepEqual(rejected.body, {
+        error: "You cannot manage members in this community.",
+      });
+
+      const targetRoles = await pool.query(
+        `SELECT role
+         FROM irc_user_roles
+         WHERE user_id = $1 AND community_id = $2`,
+        [targetSession.userId, communityId],
+      );
+      assert.deepEqual(targetRoles.rows, []);
+    } finally {
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [
+          communityId,
+        ]);
+      }
+    }
+  });
+
   test("creates only one chat identity during concurrent first-session requests", async () => {
     const session = await createTestSession("concurrent_profile");
     const responses = await Promise.all(
