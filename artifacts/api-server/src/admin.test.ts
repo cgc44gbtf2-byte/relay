@@ -7765,6 +7765,148 @@ describe("admin access controls", () => {
     }
   });
 
+  test("delivers combined task reassignment and tracked status edits only to the intended employees", async () => {
+    const owner = await createTestSession("combined_task_owner");
+    const previous = await createTestSession("combined_task_previous");
+    const next = await createTestSession("combined_task_next");
+    const unrelated = await createTestSession("combined_task_unrelated");
+    const sessions = [owner, previous, next, unrelated];
+    const sockets: WebSocket[] = [];
+    let communityId: number | null = null;
+    type Notice = {
+      id: number;
+      userId: string;
+      type: string;
+      body: string;
+      communityId: number;
+      entityType: string;
+      entityId: string;
+      actionUrl: string;
+    };
+    const noticeFields = (notice: Notice): Notice => ({
+      id: notice.id,
+      userId: notice.userId,
+      type: notice.type,
+      body: notice.body,
+      communityId: notice.communityId,
+      entityType: notice.entityType,
+      entityId: notice.entityId,
+      actionUrl: notice.actionUrl,
+    });
+    const byId = (a: Notice, b: Notice) => a.id - b.id;
+    try {
+      for (const session of sessions) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const community = await apiRequest(owner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Combined task edits ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      communityId = (community.body as { id: number }).id;
+      assert.equal(typeof communityId, "number");
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member'), ($1, $4, 'member')`,
+        [communityId, previous.userId, next.userId, unrelated.userId],
+      );
+      for (const session of sessions) sockets.push(await openWebSocket(session));
+      await Promise.all(sessions.map((session) => waitForProfileStatus(session.userId, "online")));
+
+      for (const [status, label] of [
+        ["waiting", "Waiting"],
+        ["completed", "Completed"],
+        ["cancelled", "Cancelled"],
+      ] as const) {
+        const title = `Combined ${status} ${randomUUID().slice(0, 8)}`;
+        const created = await apiRequest(owner, `/communities/${communityId}/tasks`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, assignedTo: previous.userId }),
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        const taskId = (created.body as { id: number }).id;
+        assert.equal(typeof taskId, "number");
+        const baseline: { rows: { id: number }[] } = await pool.query<{ id: number }>(
+          "SELECT id FROM irc_notifications WHERE community_id = $1",
+          [communityId],
+        );
+        const baselineIds: Set<number> = new Set(baseline.rows.map(({ id }) => id));
+        // Listen to all workspace notices, not just expected bodies: unexpected
+        // actor/audit notices and duplicate deliveries must also fail this test.
+        const live = sockets.map((socket) => collectWebSocketEvents(
+          socket,
+          (event) => event.type === "notification"
+            && (event.notification as Notice | undefined)?.communityId === communityId,
+          1_000,
+        ));
+        const changed = await apiRequest(owner, `/communities/${communityId}/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ assignedTo: next.userId, status }),
+        });
+        assert.equal(changed.status, 200, JSON.stringify(changed));
+        assert.equal((changed.body as { assignedTo: string }).assignedTo, next.userId);
+        assert.equal((changed.body as { status: string }).status, status);
+        const events = await Promise.all(live);
+        const persisted: { rows: Notice[] } = await pool.query<Notice>(
+          `SELECT id, user_id AS "userId", type, body, community_id AS "communityId",
+                  entity_type AS "entityType", entity_id AS "entityId", action_url AS "actionUrl"
+           FROM irc_notifications WHERE community_id = $1 ORDER BY id`,
+          [communityId],
+        );
+        const added: Notice[] = persisted.rows.filter(({ id }) => !baselineIds.has(id));
+        const expected = [
+          { userId: previous.userId, type: "task_updated", body: `You are no longer assigned the task “${title}”.` },
+          { userId: next.userId, type: "task_assigned", body: `You were assigned the task “${title}”.` },
+          { userId: next.userId, type: "task_updated", body: `Task “${title}” moved to ${label}.` },
+        ];
+        const sortNotice = (a: { body: string }, b: { body: string }) => a.body.localeCompare(b.body);
+        assert.deepEqual(
+          added.map(({ userId, type, body }) => ({ userId, type, body })).sort(sortNotice),
+          expected.sort(sortNotice),
+          `${label}: removal goes to the old assignee; assignment and status go to the new assignee`,
+        );
+        const liveIds: number[] = [];
+        for (const [index, session] of sessions.entries()) {
+          const delivered = events[index].map((event) => noticeFields(event.notification as Notice)).sort(byId);
+          const saved = added.filter(({ userId }) => userId === session.userId).sort(byId);
+          assert.deepEqual(delivered, saved, `${label}: live delivery must exactly match persistence for ${index}`);
+          liveIds.push(...delivered.map(({ id }) => id));
+          for (const notice of saved) {
+            assert.equal(notice.entityType, "workspace_task");
+            assert.equal(notice.entityId, String(taskId));
+            assert.equal(notice.actionUrl, `/communities/${communityId}?taskId=${taskId}`);
+          }
+          const inbox = await apiRequest(session, "/notifications");
+          assert.equal(inbox.status, 200, JSON.stringify(inbox));
+          assert.ok(Array.isArray(inbox.body));
+          const taskInbox = (inbox.body as Notice[])
+            .filter((notice) => notice.entityType === "workspace_task" && notice.entityId === String(taskId))
+            .map(noticeFields).sort(byId);
+          assert.deepEqual(
+            taskInbox,
+            persisted.rows.filter((notice) => notice.userId === session.userId
+              && notice.entityType === "workspace_task" && notice.entityId === String(taskId)).sort(byId),
+            `${label}: inbox must include every saved task notice, including the original assignment`,
+          );
+        }
+        assert.equal(liveIds.length, 3);
+        assert.equal(new Set(liveIds).size, liveIds.length, `${label}: live notification IDs must be unique`);
+      }
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("prevents tasks from using another workspace's department or location", async () => {
     const workspaceIds: number[] = [];
     try {
