@@ -2149,6 +2149,9 @@ describe("admin access controls", () => {
         "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
         [channel.id],
       );
+      const beforeAudit = await pool.query(
+        "SELECT * FROM irc_admin_audit_logs ORDER BY id",
+      );
 
       const [health, users, topicUpdate, clearMessages] = await Promise.all([
         apiRequest(memberSession, "/admin/health"),
@@ -2178,9 +2181,13 @@ describe("admin access controls", () => {
         "SELECT id, body FROM irc_messages WHERE channel_id = $1 ORDER BY created_at, id",
         [channel.id],
       );
+      const afterAudit = await pool.query(
+        "SELECT * FROM irc_admin_audit_logs ORDER BY id",
+      );
 
       assert.deepEqual(afterChannel.rows, beforeChannel.rows);
       assert.deepEqual(afterMessages.rows, beforeMessages.rows);
+      assert.deepEqual(afterAudit.rows, beforeAudit.rows);
     } finally {
       await pool.query("DELETE FROM irc_messages WHERE channel_id = $1", [channel.id]);
       await pool.query("DELETE FROM irc_channels WHERE id = $1", [channel.id]);
