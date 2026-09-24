@@ -1,35 +1,22 @@
 import { execFileSync } from "node:child_process";
-
-const allowedLicenses = new Set([
-  "0BSD",
-  "Apache-2.0",
-  "BlueOak-1.0.0",
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "CC0-1.0",
-  "CC-BY-4.0",
-  "ISC",
-  "MIT",
-  "MIT-0",
-  "MPL-2.0",
-  "Python-2.0",
-  "Unlicense",
-]);
-
-const reviewLicenses = new Set(["MPL-2.0", "CC-BY-4.0", "Unlicense"]);
-
-function isAllowed(expression) {
-  return expression
-    .split(/\s+(?:AND|OR)\s+/i)
-    .every((license) => allowedLicenses.has(license.trim()));
-}
+import { evaluateLicense } from "./dependency-license-policy.mjs";
 
 let report;
+let productionPackages;
 try {
   report = JSON.parse(execFileSync("pnpm", ["licenses", "list", "--json"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
+    maxBuffer: 32 * 1024 * 1024,
   }));
+  const production = JSON.parse(execFileSync("pnpm", ["licenses", "list", "--prod", "--json"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    maxBuffer: 32 * 1024 * 1024,
+  }));
+  productionPackages = new Set(Object.values(production).flatMap((packages) =>
+    packages.flatMap(({ name, versions }) => versions.map((version) => `${name}@${version}`)),
+  ));
 } catch (error) {
   console.error("Could not read the installed dependency license report.");
   process.exitCode = 1;
@@ -40,12 +27,10 @@ const unresolved = [];
 const review = [];
 
 for (const [license, packages] of Object.entries(report)) {
-  if (!isAllowed(license) || license === "Unknown") {
+  const policy = evaluateLicense(license);
+  if (policy.review) review.push({ license, packages });
+  if (!policy.allowed) {
     unresolved.push({ license, packages });
-    continue;
-  }
-  if (reviewLicenses.has(license)) {
-    review.push({ license, packages });
   }
 }
 
@@ -59,9 +44,17 @@ if (review.length > 0) {
 if (unresolved.length > 0) {
   console.error("Dependency licenses that are not cleared for acquisition:");
   for (const { license, packages } of unresolved) {
-    console.error(`- ${license}: ${packages.map(({ name }) => name).join(", ")}`);
+    for (const { name, versions } of packages) {
+      for (const version of versions) {
+        const key = `${name}@${version}`;
+        const scope = productionPackages.has(key) ? "runtime-reachable" : "development-only dependency graph";
+        console.error(`- ${license}: ${key} [${scope}]`);
+      }
+    }
   }
+  console.error("Scope is not license approval or proof of bundle contents. Development tools remain subject to review.");
+  console.error("Replit package evidence and required approvals: docs/REPLIT-PACKAGE-LICENSE-REVIEW.md");
   process.exitCode = 1;
 } else {
-  console.log("All installed dependency licenses are in the approved commercial-use set.");
+  console.log("All installed dependency licenses pass the technical allowlist; attribution and indicated legal reviews still apply.");
 }

@@ -1,19 +1,18 @@
-import { ReplitConnectors } from "@replit/connectors-sdk";
-
 export type InvitationEmailDelivery = {
   status: "sent" | "not_configured" | "failed";
   message: string;
 };
 
 type InvitationEmail = { email: string; communityId: number; token: string };
-type SendEmail = (body: Record<string, unknown>) => Promise<Response>;
+type SendEmail = (body: Record<string, unknown>, apiKey: string) => Promise<Response>;
 
-const sendThroughResend: SendEmail = async (body) => {
-  const connectors = new ReplitConnectors();
-  const proxyFetch = connectors.createProxyFetch("resend");
-  return proxyFetch("https://api.resend.com/emails", {
+const sendThroughResend: SendEmail = async (body, apiKey) => {
+  return fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -31,7 +30,10 @@ export async function sendInvitationEmail(
     return { status: "not_configured", message: "Email delivery is not configured. Share the private invitation link with the recipient." };
   }
   try {
-    if (!from || !publicUrl || /[\r\n]/.test(from)) throw new Error("Invalid configuration");
+    const apiKey = config.RESEND_API_KEY?.trim();
+    if (!from || !publicUrl || !apiKey || /[\r\n]/.test(from) || /[\r\n]/.test(apiKey)) {
+      throw new Error("Invalid configuration");
+    }
     // Trusted configuration only; never build emailed links from request headers.
     const url = new URL(publicUrl);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -47,7 +49,7 @@ export async function sendInvitationEmail(
       to: [invitation.email],
       subject: "Your Relay workspace invitation",
       text: `You have been invited to a Relay workspace.\n\nAccept your invitation:\n${url.toString()}\n\nSign in with ${invitation.email} to accept. This private link expires in 7 days. If you did not expect this invitation, you can ignore this email.`,
-    });
+    }, apiKey);
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error("Delivery failed");

@@ -1,25 +1,23 @@
 # License compliance and acquisition readiness
 
-**Snapshot date:** 2026-09-22  
-**Status:** **Not cleared for acquisition** until the blockers below are
-resolved or accepted by documented legal review.
+**Snapshot date:** 2026-09-24  
+**Status:** The dependency license gate passes for the current installed graph. This is **not an acquisition sign-off**; notices and legal review remain outstanding.
 
 This is a technical evidence report. It does not determine legal ownership,
 trademark rights, or the legal interpretation of any license beyond the
 license text and metadata identified below.
 
-## Critical blockers
+## Dependency license gate
 
-1. **4 installed package records are unverified.** The
-   current install includes: `@replit/connectors-sdk@0.4.3`, `@replit/vite-plugin-cartographer@0.5.21`, `@replit/vite-plugin-dev-banner@0.1.2`, `@replit/vite-plugin-runtime-error-modal@0.0.6`.
-   No license field or license file was found in the installed package evidence.
-   The graph also contains 2 optional package records
-   that are not installed on the current platform: `@tailwindcss/oxide-wasm32-wasi@4.3.3`, `fsevents@2.3.3`.
-2. **The license gate is not green.** `pnpm run audit:licenses` exits
-   non-zero while unknown licenses remain.
-3. **No distribution notice bundle is tracked.** Before distributing a
-   production bundle or transferring it, preserve the applicable license and
-   notice texts for the packages listed in the inventory.
+No installed package has an unknown license in this snapshot. `pnpm run audit:licenses` passes the technical allowlist; this does not approve distribution.
+
+The graph includes 2 platform-optional unknown records
+not installed here: `@tailwindcss/oxide-wasm32-wasi@4.3.3`, `fsevents@2.3.3`.
+Check their licenses before building on a platform that installs them.
+
+**Notice handling remains open:** before distributing a production bundle or
+transferring it, preserve applicable license and notice texts for included
+packages. See the separately tracked release notice work.
 
 ## Items requiring legal or license review
 
@@ -43,13 +41,9 @@ license text and metadata identified below.
 - **Unlicense:** `fast-sha256` and `wouter` report Unlicense; preserve the
   license evidence and have counsel review how the public-domain dedication
   and backup license are treated in each distribution jurisdiction.
-- **Replit packages:** the exact terms for the packages below could not be
-  verified from installed metadata or package/license files:
+- **Replit packages:** none remain installed. The unverified packages were removed, not approved. See [removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md).
 
-- `@replit/connectors-sdk@0.4.3` — Unknown; no license field or license file found in installed package; installed; used by workspace.
-- `@replit/vite-plugin-cartographer@0.5.21` — Unknown; no license field or license file found in installed package; installed; used by @workspace/mockup-sandbox, @workspace/web-irc.
-- `@replit/vite-plugin-dev-banner@0.1.2` — Unknown; no license field or license file found in installed package; installed; used by @workspace/web-irc.
-- `@replit/vite-plugin-runtime-error-modal@0.0.6` — Unknown; no license field or license file found in installed package; installed; used by @workspace/mockup-sandbox, @workspace/web-irc.
+
 
 ## Items requiring documentation
 
@@ -58,20 +52,15 @@ license text and metadata identified below.
   artifact.
 - Preserve the Lightning CSS MPL-2.0 LICENSE file and any source-availability
   information when shipping artifacts that include it.
-- Obtain written license evidence for the unresolved Replit packages.
-- Document whether development-only packages are excluded from customer
-  distribution; do not treat dev-only status as a license clearance.
+- Verify that release archives contain only the intended production dependencies and notices.
 
 ## Items requiring replacement or removal
 
-No dependency was removed or replaced by this audit. The unresolved packages
-must either receive authoritative license evidence or be evaluated for
-replacement before acquisition clearance. This report intentionally does not
-choose a replacement.
+The four previously unverified Replit packages were removed from the current dependency graph. Invitation delivery now uses Resend's HTTPS API directly; the Replit-only Vite development plugins were removed. See [removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md).
 
 ## Already compliant at the technical screening level
 
-- 555 third-party package records have a
+- 554 third-party package records have a
   recognized license expression in package metadata or an installed license
   file.
 - The workspace does not report GPL, AGPL, LGPL, SSPL, EPL, or CDDL packages

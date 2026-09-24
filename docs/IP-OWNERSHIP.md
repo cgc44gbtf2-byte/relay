@@ -1,6 +1,6 @@
 # Relay IP ownership and provenance
 
-**Snapshot date:** 2026-09-22
+**Snapshot date:** 2026-09-24
 
 This document distinguishes repository evidence from legal ownership. No
 domain, trademark, registrar, contributor assignment, account, or user-asset
@@ -48,16 +48,11 @@ unverified and are not classified.
 
 ## Replit-provided components
 
-The installed graph includes Replit-namespaced packages:
+No Replit-namespaced packages remain in the current installed graph.
 
-- `@replit/connectors-sdk@0.4.3` — Unknown; no license field or license file found in installed package; installed; used by workspace.
-- `@replit/vite-plugin-cartographer@0.5.21` — Unknown; no license field or license file found in installed package; installed; used by @workspace/mockup-sandbox, @workspace/web-irc.
-- `@replit/vite-plugin-dev-banner@0.1.2` — Unknown; no license field or license file found in installed package; installed; used by @workspace/web-irc.
-- `@replit/vite-plugin-runtime-error-modal@0.0.6` — Unknown; no license field or license file found in installed package; installed; used by @workspace/mockup-sandbox, @workspace/web-irc.
 
-Their installed package metadata does not contain a license field or license
-file in this snapshot. No ownership or license conclusion is made. Obtain
-authoritative terms before acquisition clearance.
+
+The prior unclassified package versions were removed rather than assigned an unsupported license. See the [investigation](./REPLIT-PACKAGE-LICENSE-REVIEW.md).
 
 ## User-provided assets
 

@@ -1,6 +1,6 @@
 # Third-party licenses
 
-**Snapshot date:** 2026-09-22  
+**Snapshot date:** 2026-09-24  
 **Source:** installed package metadata and package license files, cross-checked
 with `pnpm licenses list --json`.
 
@@ -18,12 +18,12 @@ or copyleft.
 - **CC-BY-4.0:** 1
 - **CC0-1.0:** 1
 - **ISC:** 33
-- **MIT:** 485
+- **MIT:** 484
 - **MIT AND ISC:** 1
 - **MIT-0:** 2
 - **MPL-2.0:** 2
 - **Python-2.0:** 1
-- **Unknown:** 6
+- **Unknown:** 2
 - **Unlicense:** 2
 
 ## Permissive licenses
@@ -42,10 +42,10 @@ attribution requirements still apply where the license text requires them.
 
 ## Unknown or unverified licenses
 
-- `@replit/connectors-sdk@0.4.3` — no license field or license file found in installed package; no license conclusion is made.
-- `@replit/vite-plugin-cartographer@0.5.21` — no license field or license file found in installed package; no license conclusion is made.
-- `@replit/vite-plugin-dev-banner@0.1.2` — no license field or license file found in installed package; no license conclusion is made.
-- `@replit/vite-plugin-runtime-error-modal@0.0.6` — no license field or license file found in installed package; no license conclusion is made.
+See [Replit package evidence and removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md)
+for the distinction between runtime and development-only packages. Scope does not grant a license.
+
+None among packages installed on the current platform.
 
 ### Graph-only optional packages
 
@@ -439,7 +439,6 @@ own contract review.
 - `mime-types@3.0.2` — MIT; preserve copyright and license notices
 - `minimatch@10.2.6` — BlueOak-1.0.0; preserve copyright and license notices
 - `minimist@1.2.8` — MIT; preserve copyright and license notices
-- `modern-screenshot@4.7.0` — MIT; preserve copyright and license notices
 - `motion-dom@12.43.0` — MIT; preserve copyright and license notices
 - `motion-utils@12.39.0` — MIT; preserve copyright and license notices
 - `ms@2.1.3` — MIT; preserve copyright and license notices

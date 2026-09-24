@@ -19,9 +19,6 @@
     "release:start": "pnpm run db:migrate:release && pnpm --filter @workspace/api-server run start",
     "release:validate": "pnpm run db:check:migrations && pnpm run typecheck:libs && pnpm --filter @workspace/api-server run typecheck && pnpm --filter @workspace/api-server run test:unit && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/web-irc run typecheck && pnpm --filter @workspace/web-irc run test && PORT=4173 BASE_PATH=/web-irc/ pnpm --filter @workspace/web-irc run build && pnpm run audit:licenses"
   },
-  "dependencies": {
-    "@replit/connectors-sdk": "^0.4.3"
-  },
   "devDependencies": {
     "prettier": "^3.9.6",
     "typescript": "~5.9.3"

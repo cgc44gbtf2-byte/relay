@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { dependencyScope } from "./dependency-license-policy.mjs";
 
 const rootDir = process.cwd();
 const packageJson = (filePath) => JSON.parse(readFileSync(filePath, "utf8"));
@@ -51,7 +52,7 @@ function packageLicenseFiles(packagePath) {
     if (depth > 2) return;
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const entryPath = path.join(directory, entry.name);
-      if (entry.isFile() && /^(license|copying|notice)(\\.|$)/i.test(entry.name)) {
+      if (entry.isFile() && /^(license|copying|notice)(\.|$)/i.test(entry.name)) {
         names.push(path.relative(packagePath, entryPath));
       } else if (entry.isDirectory() && depth < 2 && entry.name !== "node_modules") {
         visit(entryPath, depth + 1);
@@ -138,7 +139,8 @@ function recordDependency({
     records.set(key, record);
   }
   record.direct ||= direct;
-  record.scopes.add(group === "dependencies" ? "runtime" : group === "devDependencies" ? "development" : group);
+  const scope = dependencyScope(group, group);
+  record.scopes.add(scope);
   record.parents.add(parent);
   record.roots.add(rootName);
   if (node.path) record.paths.add(path.resolve(node.path));
@@ -151,7 +153,7 @@ function recordDependency({
         node: childNode,
         parent: name,
         rootName,
-        group: group === "development" ? "development" : childGroup === "devDependencies" ? "development" : "runtime",
+        group: dependencyScope(childGroup, scope),
         direct: false,
       });
     }
@@ -309,6 +311,9 @@ ${copyleft.length === 0 ? "No GPL, AGPL, LGPL, EPL, CDDL, SSPL, or other copylef
 
 ## Unknown or unverified licenses
 
+See [Replit package evidence and removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md)
+for the distinction between runtime and development-only packages. Scope does not grant a license.
+
 ${installedUnknown.length === 0 ? "None among packages installed on the current platform." : installedUnknown.map((row) => `- \`${row.name}@${row.version}\` — ${row.evidence}; no license conclusion is made.`).join("\n")}
 
 ### Graph-only optional packages
@@ -335,25 +340,27 @@ const replitSection = replitRows.length === 0
 const compliance = `# License compliance and acquisition readiness
 
 **Snapshot date:** ${snapshotDate}  
-**Status:** **Not cleared for acquisition** until the blockers below are
-resolved or accepted by documented legal review.
+**Status:** ${installedUnknown.length
+  ? "**Not cleared for acquisition** while unverified dependency licenses remain."
+  : "The dependency license gate passes for the current installed graph. This is **not an acquisition sign-off**; notices and legal review remain outstanding."}
 
 This is a technical evidence report. It does not determine legal ownership,
 trademark rights, or the legal interpretation of any license beyond the
 license text and metadata identified below.
 
-## Critical blockers
+## Dependency license gate
 
-1. **${installedUnknown.length} installed package records are unverified.** The
-   current install includes: ${installedUnknown.map((row) => `\`${row.name}@${row.version}\``).join(", ")}.
-   No license field or license file was found in the installed package evidence.
-   The graph also contains ${graphOnlyUnknown.length} optional package records
-   that are not installed on the current platform: ${graphOnlyUnknown.map((row) => `\`${row.name}@${row.version}\``).join(", ")}.
-2. **The license gate is not green.** \`pnpm run audit:licenses\` exits
-   non-zero while unknown licenses remain.
-3. **No distribution notice bundle is tracked.** Before distributing a
-   production bundle or transferring it, preserve the applicable license and
-   notice texts for the packages listed in the inventory.
+${installedUnknown.length
+  ? `**${installedUnknown.length} installed package records are unverified:** ${installedUnknown.map((row) => `\`${row.name}@${row.version}\``).join(", ")}. \`pnpm run audit:licenses\` fails while installed unknowns remain.`
+  : "No installed package has an unknown license in this snapshot. `pnpm run audit:licenses` passes the technical allowlist; this does not approve distribution."}
+
+The graph includes ${graphOnlyUnknown.length} platform-optional unknown records
+not installed here: ${graphOnlyUnknown.map((row) => `\`${row.name}@${row.version}\``).join(", ") || "none"}.
+Check their licenses before building on a platform that installs them.
+
+**Notice handling remains open:** before distributing a production bundle or
+transferring it, preserve applicable license and notice texts for included
+packages. See the separately tracked release notice work.
 
 ## Items requiring legal or license review
 
@@ -377,10 +384,11 @@ license text and metadata identified below.
 - **Unlicense:** \`fast-sha256\` and \`wouter\` report Unlicense; preserve the
   license evidence and have counsel review how the public-domain dedication
   and backup license are treated in each distribution jurisdiction.
-- **Replit packages:** the exact terms for the packages below could not be
-  verified from installed metadata or package/license files:
+- **Replit packages:** ${replitRows.length
+  ? "the exact terms for the packages below could not be verified from installed metadata or package/license files:"
+  : "none remain installed. The unverified packages were removed, not approved. See [removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md)."}
 
-${replitSection}
+${replitRows.length ? `\n${replitSection}\n` : ""}
 
 ## Items requiring documentation
 
@@ -389,16 +397,13 @@ ${replitSection}
   artifact.
 - Preserve the Lightning CSS MPL-2.0 LICENSE file and any source-availability
   information when shipping artifacts that include it.
-- Obtain written license evidence for the unresolved Replit packages.
-- Document whether development-only packages are excluded from customer
-  distribution; do not treat dev-only status as a license clearance.
+${replitRows.length ? "- Obtain written license evidence for the unresolved Replit packages.\n- Document whether development-only packages are excluded from customer distribution; do not treat dev-only status as a license clearance." : "- Verify that release archives contain only the intended production dependencies and notices."}
 
 ## Items requiring replacement or removal
 
-No dependency was removed or replaced by this audit. The unresolved packages
-must either receive authoritative license evidence or be evaluated for
-replacement before acquisition clearance. This report intentionally does not
-choose a replacement.
+${replitRows.length
+  ? "Unresolved installed packages must receive authoritative license evidence or be removed before clearance."
+  : "The four previously unverified Replit packages were removed from the current dependency graph. Invitation delivery now uses Resend's HTTPS API directly; the Replit-only Vite development plugins were removed. See [removal history](./REPLIT-PACKAGE-LICENSE-REVIEW.md)."}
 
 ## Already compliant at the technical screening level
 
@@ -472,13 +477,11 @@ unverified and are not classified.
 
 ## Replit-provided components
 
-The installed graph includes Replit-namespaced packages:
+${replitRows.length ? "The installed graph includes Replit-namespaced packages:" : "No Replit-namespaced packages remain in the current installed graph."}
 
-${replitSection}
+${replitRows.length ? `\n${replitSection}\n` : ""}
 
-Their installed package metadata does not contain a license field or license
-file in this snapshot. No ownership or license conclusion is made. Obtain
-authoritative terms before acquisition clearance.
+${replitRows.length ? "Their installed package metadata does not contain a license field or license file in this snapshot. No ownership or license conclusion is made. Obtain authoritative terms before acquisition clearance." : "The prior unclassified package versions were removed rather than assigned an unsupported license. See the [investigation](./REPLIT-PACKAGE-LICENSE-REVIEW.md)."}
 
 ## User-provided assets
 
@@ -507,7 +510,7 @@ for each asset. Asset provenance and assignment are therefore **not verified**.
 - Domain registrar, DNS, certificate, authentication, storage, email, and
   deployment account transfer records.
 - Production database export/restore evidence and provider contract review.
-- Resolved license evidence for every unknown package.
+${unknown.length ? "- Resolved license evidence for every unknown package." : "- Preserve current package license evidence and review any newly introduced unknown dependency before release."}
 `;
 
 writeFileSync(path.join(rootDir, "docs/DEPENDENCY-INVENTORY.md"), inventory);
