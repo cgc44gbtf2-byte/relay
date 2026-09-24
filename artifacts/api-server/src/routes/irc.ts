@@ -201,11 +201,6 @@ async function isChannelOwnerOrModerator(channelId: number, userId: string): Pro
   );
 }
 
-async function canReviewJoinRequests(channelId: number, userId: string): Promise<boolean> {
-  const member = await membership(channelId, userId);
-  return Boolean(member && ["owner", "moderator"].includes(member.role));
-}
-
 async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null, messageId: string): Promise<void> {
   const names = [...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase());
   if (names.length === 0) return;
@@ -730,24 +725,39 @@ router.get("/channels/:channelId/join-requests", requireAuth, async (req: Authen
     res.status(404).json(channelNotFoundError);
     return;
   }
-  if (!(await canReviewJoinRequests(channel.id, userId))) {
+  const page = listPage(req);
+  const review = await db.transaction(async (tx) => {
+    const [reviewer] = await tx
+      .select({ role: channelMembersTable.role })
+      .from(channelMembersTable)
+      .where(and(
+        eq(channelMembersTable.channelId, channel.id),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .for("update");
+    if (!reviewer || !["owner", "moderator"].includes(reviewer.role)) {
+      return { authorized: false as const, rows: [] };
+    }
+    const rows = await tx
+      .select({
+        id: channelJoinRequestsTable.id,
+        status: channelJoinRequestsTable.status,
+        createdAt: channelJoinRequestsTable.createdAt,
+        user: usersTable,
+      })
+      .from(channelJoinRequestsTable)
+      .innerJoin(usersTable, eq(usersTable.clerkId, channelJoinRequestsTable.userId))
+      .where(and(eq(channelJoinRequestsTable.channelId, channel.id), eq(channelJoinRequestsTable.status, "pending")))
+      .orderBy(asc(channelJoinRequestsTable.createdAt), asc(channelJoinRequestsTable.id))
+      .limit(page.limit + 1)
+      .offset(page.offset);
+    return { authorized: true as const, rows };
+  });
+  if (!review.authorized) {
     res.status(403).json({ error: "Only channel operators can review join requests." });
     return;
   }
-  const page = listPage(req);
-  const rows = await db
-    .select({
-      id: channelJoinRequestsTable.id,
-      status: channelJoinRequestsTable.status,
-      createdAt: channelJoinRequestsTable.createdAt,
-      user: usersTable,
-    })
-    .from(channelJoinRequestsTable)
-    .innerJoin(usersTable, eq(usersTable.clerkId, channelJoinRequestsTable.userId))
-    .where(and(eq(channelJoinRequestsTable.channelId, channel.id), eq(channelJoinRequestsTable.status, "pending")))
-    .orderBy(asc(channelJoinRequestsTable.createdAt), asc(channelJoinRequestsTable.id))
-    .limit(page.limit + 1)
-    .offset(page.offset);
+  const rows = review.rows;
   const hasMore = rows.length > page.limit;
   if (hasMore) rows.pop();
   setListPageHeaders(res, hasMore, page.offset + page.limit);

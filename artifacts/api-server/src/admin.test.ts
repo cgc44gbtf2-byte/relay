@@ -5667,6 +5667,46 @@ describe("admin access controls", () => {
       const requestId = (requests.body[0] as { id?: unknown })?.id;
       assert.equal(typeof requestId, "number");
 
+      const assertReviewDenied = async () => {
+        const deniedList = await apiRequest(
+          reviewerSession,
+          `/channels/${channelId}/join-requests`,
+        );
+        assert.equal(deniedList.status, 403, JSON.stringify(deniedList));
+        assert.deepEqual(deniedList.body, {
+          error: "Only channel operators can review join requests.",
+        });
+        for (const decision of ["approve", "reject"]) {
+          const deniedDecision = await apiRequest(
+            reviewerSession,
+            `/channels/${channelId}/join-requests/${requestId}`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ decision }),
+            },
+          );
+          assert.equal(deniedDecision.status, 403, JSON.stringify(deniedDecision));
+          assert.deepEqual(deniedDecision.body, {
+            error: "Only channel operators can review join requests.",
+          });
+        }
+      };
+
+      await pool.query(
+        `UPDATE irc_channel_members
+         SET role = 'member'
+         WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, reviewerSession.userId],
+      );
+      await assertReviewDenied();
+
+      await pool.query(
+        `UPDATE irc_channel_members
+         SET role = 'moderator'
+         WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, reviewerSession.userId],
+      );
       const kick = await apiRequest(
         ownerSession,
         `/channels/${channelId}/moderation`,
@@ -5681,27 +5721,7 @@ describe("admin access controls", () => {
       );
       assert.equal(kick.status, 200, JSON.stringify(kick));
 
-      const deniedList = await apiRequest(
-        reviewerSession,
-        `/channels/${channelId}/join-requests`,
-      );
-      assert.equal(deniedList.status, 403, JSON.stringify(deniedList));
-      assert.deepEqual(deniedList.body, {
-        error: "Only channel operators can review join requests.",
-      });
-      const deniedDecision = await apiRequest(
-        reviewerSession,
-        `/channels/${channelId}/join-requests/${requestId}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ decision: "approve" }),
-        },
-      );
-      assert.equal(deniedDecision.status, 403, JSON.stringify(deniedDecision));
-      assert.deepEqual(deniedDecision.body, {
-        error: "Only channel operators can review join requests.",
-      });
+      await assertReviewDenied();
 
       const stillPending = await pool.query<{ status: string }>(
         `SELECT status
@@ -5710,7 +5730,164 @@ describe("admin access controls", () => {
         [requestId],
       );
       assert.deepEqual(stillPending.rows, [{ status: "pending" }]);
+      const requesterMembership = await pool.query(
+        `SELECT 1 FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, requesterSession.userId],
+      );
+      assert.equal(requesterMembership.rowCount, 0);
     } finally {
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        reviewerSession.userId,
+        requesterSession.userId,
+      ]);
+    }
+  });
+
+  test("serializes private-room request review with moderator membership revocation", async () => {
+    const ownerSession = await createTestSession("moderator_race_owner");
+    const reviewerSession = await createTestSession("moderator_race_reviewer");
+    const requesterSession = await createTestSession("moderator_race_requester");
+    const channelIds: number[] = [];
+    const revocation = await pool.connect();
+
+    try {
+      const [reviewerProfile, requesterProfile] = await Promise.all([
+        apiRequest(reviewerSession, "/me"),
+        apiRequest(requesterSession, "/me"),
+      ]);
+      assert.equal(reviewerProfile.status, 200, JSON.stringify(reviewerProfile));
+      assert.equal(requesterProfile.status, 200, JSON.stringify(requesterProfile));
+
+      const created = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `review-race-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const channelId = (created.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [channelId, reviewerSession.userId],
+      );
+      const pending = await apiRequest(
+        requesterSession,
+        `/channels/${channelId}/join`,
+        { method: "POST" },
+      );
+      assert.equal(pending.status, 202, JSON.stringify(pending));
+      await apiRequest(reviewerSession, "/me");
+
+      const requests = await apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(requests.status, 200, JSON.stringify(requests));
+      assert.ok(Array.isArray(requests.body));
+      const requestId = (requests.body[0] as { id?: unknown })?.id;
+      assert.equal(typeof requestId, "number");
+
+      const waitForMembershipLock = async (): Promise<boolean> => {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const waiting = await pool.query(
+            `SELECT pid
+             FROM pg_stat_activity
+             WHERE pid <> pg_backend_pid()
+               AND state = 'active'
+               AND wait_event_type = 'Lock'
+               AND query ILIKE '%irc_channel_members%'`,
+          );
+          if (waiting.rows.length > 0) return true;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return false;
+      };
+
+      await revocation.query("BEGIN");
+      await revocation.query(
+        `SELECT user_id
+         FROM irc_channel_members
+         WHERE channel_id = $1 AND user_id = $2
+         FOR UPDATE`,
+        [channelId, reviewerSession.userId],
+      );
+      const listing = apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests`,
+      );
+      assert.equal(
+        await waitForMembershipLock(),
+        true,
+        "listing should wait for the moderator membership lock",
+      );
+      await revocation.query(
+        `DELETE FROM irc_channel_members
+         WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, reviewerSession.userId],
+      );
+      await revocation.query("COMMIT");
+      const deniedList = await listing;
+      assert.equal(deniedList.status, 403, JSON.stringify(deniedList));
+
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'moderator')`,
+        [channelId, reviewerSession.userId],
+      );
+      await revocation.query("BEGIN");
+      await revocation.query(
+        `SELECT user_id
+         FROM irc_channel_members
+         WHERE channel_id = $1 AND user_id = $2
+         FOR UPDATE`,
+        [channelId, reviewerSession.userId],
+      );
+      const approval = apiRequest(
+        reviewerSession,
+        `/channels/${channelId}/join-requests/${requestId}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "approve" }),
+        },
+      );
+      assert.equal(
+        await waitForMembershipLock(),
+        true,
+        "approval should wait for the moderator membership lock",
+      );
+      await revocation.query(
+        `DELETE FROM irc_channel_members
+         WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, reviewerSession.userId],
+      );
+      await revocation.query("COMMIT");
+      const deniedApproval = await approval;
+      assert.equal(deniedApproval.status, 403, JSON.stringify(deniedApproval));
+
+      const stillPending = await pool.query<{ status: string }>(
+        `SELECT status
+         FROM irc_channel_join_requests
+         WHERE id = $1`,
+        [requestId],
+      );
+      assert.deepEqual(stillPending.rows, [{ status: "pending" }]);
+      const requesterMembership = await pool.query(
+        `SELECT 1 FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2`,
+        [channelId, requesterSession.userId],
+      );
+      assert.equal(requesterMembership.rowCount, 0);
+    } finally {
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
       await removeTestChannels(channelIds, [
         ownerSession.userId,
         reviewerSession.userId,
