@@ -6655,6 +6655,245 @@ describe("admin access controls", () => {
     }
   });
 
+  test("delivers each persisted task notification once to online assignees without replaying it", async () => {
+    const ownerSession = await createTestSession("live_task_notification_owner");
+    const workerSession = await createTestSession("live_task_notification_worker");
+    const replacementSession = await createTestSession("live_task_notification_replacement");
+    const sockets: WebSocket[] = [];
+    let communityId: number | null = null;
+
+    type LiveNotification = {
+      id: number;
+      userId: string;
+      type: string;
+      body: string;
+      entityType: string;
+      entityId: string;
+    };
+    const notificationFromEvent = (event: Record<string, unknown>): LiveNotification | null => {
+      if (event.type !== "notification" || !event.notification || typeof event.notification !== "object") {
+        return null;
+      }
+      const notification = event.notification as Partial<LiveNotification>;
+      return typeof notification.id === "number"
+        && typeof notification.userId === "string"
+        && typeof notification.type === "string"
+        && typeof notification.body === "string"
+        && typeof notification.entityType === "string"
+        && typeof notification.entityId === "string"
+        ? notification as LiveNotification
+        : null;
+    };
+    const taskEvents = (
+      socket: WebSocket,
+      body: string,
+      durationMs = 500,
+    ): Promise<Record<string, unknown>[]> => collectWebSocketEvents(
+      socket,
+      (event) => notificationFromEvent(event)?.body === body,
+      durationMs,
+    );
+    const assertSingleLiveNotification = (
+      events: Record<string, unknown>[],
+      expected: Omit<LiveNotification, "id">,
+    ): LiveNotification => {
+      assert.equal(events.length, 1, `Expected exactly one live notification: ${expected.body}`);
+      const notification = notificationFromEvent(events[0]);
+      assert.ok(notification);
+      assert.deepEqual(
+        {
+          userId: notification.userId,
+          type: notification.type,
+          body: notification.body,
+          entityType: notification.entityType,
+          entityId: notification.entityId,
+        },
+        expected,
+      );
+      return notification;
+    };
+    const inboxTaskIds = async (session: TestSession, taskId: number): Promise<number[]> => {
+      const inbox = await apiRequest(session, "/notifications");
+      assert.equal(inbox.status, 200, JSON.stringify(inbox));
+      assert.ok(Array.isArray(inbox.body));
+      return (inbox.body as Array<{ id?: unknown; entityType?: unknown; entityId?: unknown }>)
+        .filter((notification) =>
+          notification.entityType === "workspace_task"
+          && notification.entityId === String(taskId)
+        )
+        .map(({ id }) => {
+          assert.equal(typeof id, "number");
+          return id as number;
+        });
+    };
+
+    try {
+      for (const session of [workerSession, replacementSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const community = await apiRequest(ownerSession, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Live task notifications ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      assert.ok(community.body && typeof community.body === "object");
+      communityId = (community.body as { id?: unknown }).id as number;
+      assert.equal(typeof communityId, "number");
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
+        [communityId, workerSession.userId, replacementSession.userId],
+      );
+
+      const workerSocket = await openWebSocket(workerSession);
+      const replacementSocket = await openWebSocket(replacementSession);
+      sockets.push(workerSocket, replacementSocket);
+      await Promise.all([
+        waitForProfileStatus(workerSession.userId, "online"),
+        waitForProfileStatus(replacementSession.userId, "online"),
+      ]);
+
+      const title = `Live task ${randomUUID().slice(0, 8)}`;
+      const assignedBody = `You were assigned the task “${title}”.`;
+      const initialLive = taskEvents(workerSocket, assignedBody);
+      const created = await apiRequest(ownerSession, `/communities/${communityId}/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, assignedTo: workerSession.userId }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      assert.ok(created.body && typeof created.body === "object");
+      const taskId = (created.body as { id?: unknown }).id as number;
+      assert.equal(typeof taskId, "number");
+      const workerNotificationIds: number[] = [];
+      const replacementNotificationIds: number[] = [];
+      workerNotificationIds.push(assertSingleLiveNotification(await initialLive, {
+        userId: workerSession.userId,
+        type: "task_assigned",
+        body: assignedBody,
+        entityType: "workspace_task",
+        entityId: String(taskId),
+      }).id);
+      assert.deepEqual(await inboxTaskIds(workerSession, taskId), workerNotificationIds);
+
+      const removedBody = `You are no longer assigned the task “${title}”.`;
+      const workerReassignmentLive = taskEvents(workerSocket, removedBody);
+      const replacementReassignmentLive = taskEvents(replacementSocket, assignedBody);
+      const reassigned = await apiRequest(
+        ownerSession,
+        `/communities/${communityId}/tasks/${taskId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ assignedTo: replacementSession.userId }),
+        },
+      );
+      assert.equal(reassigned.status, 200, JSON.stringify(reassigned));
+      workerNotificationIds.push(assertSingleLiveNotification(await workerReassignmentLive, {
+        userId: workerSession.userId,
+        type: "task_updated",
+        body: removedBody,
+        entityType: "workspace_task",
+        entityId: String(taskId),
+      }).id);
+      replacementNotificationIds.push(assertSingleLiveNotification(await replacementReassignmentLive, {
+        userId: replacementSession.userId,
+        type: "task_assigned",
+        body: assignedBody,
+        entityType: "workspace_task",
+        entityId: String(taskId),
+      }).id);
+
+      for (const [status, label] of [
+        ["waiting", "Waiting"],
+        ["completed", "Completed"],
+        ["cancelled", "Cancelled"],
+      ] as const) {
+        const body = `Task “${title}” moved to ${label}.`;
+        const statusLive = taskEvents(replacementSocket, body);
+        const changed = await apiRequest(
+          ownerSession,
+          `/communities/${communityId}/tasks/${taskId}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status }),
+          },
+        );
+        assert.equal(changed.status, 200, JSON.stringify(changed));
+        replacementNotificationIds.push(assertSingleLiveNotification(await statusLive, {
+          userId: replacementSession.userId,
+          type: "task_updated",
+          body,
+          entityType: "workspace_task",
+          entityId: String(taskId),
+        }).id);
+      }
+
+      assert.equal(new Set(workerNotificationIds).size, workerNotificationIds.length);
+      assert.equal(new Set(replacementNotificationIds).size, replacementNotificationIds.length);
+      assert.deepEqual(
+        [...await inboxTaskIds(workerSession, taskId)].sort((a, b) => a - b),
+        [...workerNotificationIds].sort((a, b) => a - b),
+      );
+      assert.deepEqual(
+        [...await inboxTaskIds(replacementSession, taskId)].sort((a, b) => a - b),
+        [...replacementNotificationIds].sort((a, b) => a - b),
+      );
+
+      closeWebSocket(workerSocket);
+      closeWebSocket(replacementSocket);
+      const reconnectedWorkerSocket = await openWebSocket(workerSession);
+      const reconnectedReplacementSocket = await openWebSocket(replacementSession);
+      sockets.push(reconnectedWorkerSocket, reconnectedReplacementSocket);
+      const knownIds = new Set([...workerNotificationIds, ...replacementNotificationIds]);
+      const isReplayedTaskNotification = (event: Record<string, unknown>): boolean => {
+        const notification = notificationFromEvent(event);
+        return notification !== null && knownIds.has(notification.id);
+      };
+      const replayedWorkerEvents = collectWebSocketEvents(
+        reconnectedWorkerSocket,
+        isReplayedTaskNotification,
+        750,
+      );
+      const replayedReplacementEvents = collectWebSocketEvents(
+        reconnectedReplacementSocket,
+        isReplayedTaskNotification,
+        750,
+      );
+      for (const id of workerNotificationIds) {
+        const read = await apiRequest(workerSession, `/notifications/${id}/read`, { method: "POST" });
+        assert.equal(read.status, 200, JSON.stringify(read));
+      }
+      for (const id of replacementNotificationIds) {
+        const read = await apiRequest(replacementSession, `/notifications/${id}/read`, { method: "POST" });
+        assert.equal(read.status, 200, JSON.stringify(read));
+      }
+      for (let reload = 0; reload < 2; reload += 1) {
+        assert.deepEqual(
+          [...await inboxTaskIds(workerSession, taskId)].sort((a, b) => a - b),
+          [...workerNotificationIds].sort((a, b) => a - b),
+        );
+        assert.deepEqual(
+          [...await inboxTaskIds(replacementSession, taskId)].sort((a, b) => a - b),
+          [...replacementNotificationIds].sort((a, b) => a - b),
+        );
+      }
+      assert.deepEqual(await replayedWorkerEvents, []);
+      assert.deepEqual(await replayedReplacementEvents, []);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("prevents tasks from using another workspace's department or location", async () => {
     const workspaceIds: number[] = [];
     try {

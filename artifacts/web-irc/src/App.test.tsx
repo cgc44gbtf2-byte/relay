@@ -193,7 +193,7 @@ function installApi({
   notifications?: Array<{
     id: number;
     type: string;
-    category: "general";
+    category: "general" | "task_assigned" | "task_updated";
     body: string;
     createdAt: string;
     readAt: string | null;
@@ -1042,6 +1042,83 @@ describe("deleted room recovery", () => {
     expect(latestWebSocket).toBe(newRoomSocket);
     act(() => newRoomSocket?.onopen?.());
     expect(webSocketFrames.map((frame) => JSON.parse(frame))).toContainEqual({ type: "subscribe", channelId: 2 });
+  });
+
+  it("shows live task lifecycle notifications once across replay, reconnect, and reload and opens the matching task", async () => {
+    const notifications: NonNullable<Parameters<typeof installApi>[0]["notifications"]> = [];
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(1, "#deleted-room")],
+      notifications,
+    });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    act(() => latestWebSocket?.onopen?.());
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    await screen.findByText("You are all caught up.");
+    const events = [
+      ["task_assigned", "You were assigned Prepare monthly report"],
+      ["task_assigned", "Prepare monthly report was reassigned to you"],
+      ["task_updated", "Prepare monthly report is Waiting"],
+      ["task_updated", "Prepare monthly report is Completed"],
+      ["task_updated", "Prepare monthly report is Cancelled"],
+    ].map(([type, body], index) => ({
+      id: 101 + index, type, category: type as "task_assigned" | "task_updated", body,
+      createdAt: "2026-09-21T12:00:00.000Z", readAt: null,
+      actionUrl: "/communities/1?taskId=42",
+    }));
+    const deliver = () => act(() => {
+      for (const notification of events) {
+        latestWebSocket?.onmessage?.({ data: JSON.stringify({ type: "notification", notification }) } as MessageEvent);
+      }
+    });
+    // The REST inbox remains empty: these rows must come from the live handler.
+    deliver();
+    deliver();
+    for (const notice of events) {
+      expect(screen.getAllByTestId(`button-notification-${notice.id}`)).toHaveLength(1);
+      expect(screen.getByTestId(`button-notification-${notice.id}`).textContent).toContain(notice.body);
+    }
+    notifications.push(...events);
+    const firstSocket = latestWebSocket;
+    act(() => firstSocket?.onclose?.());
+    await waitFor(() => expect(latestWebSocket).not.toBe(firstSocket));
+    act(() => latestWebSocket?.onopen?.());
+    deliver();
+    for (const notice of events) expect(screen.getAllByTestId(`button-notification-${notice.id}`)).toHaveLength(1);
+
+    cleanup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "#deleted-room" });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    act(() => latestWebSocket?.onopen?.());
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    await screen.findByTestId("button-notification-101");
+    deliver();
+    for (const notice of events) expect(screen.getAllByTestId(`button-notification-${notice.id}`)).toHaveLength(1);
+
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!;
+    const community = { id: 1, name: "Employee workspace", description: "", rules: "", services: "", serviceArea: "", businessHours: "", contactEmail: "", contactPhone: "", plan: "business", memberCount: 1, channelCount: 0 };
+    const task = { id: 42, title: "Prepare monthly report", description: "Matching task details", status: "cancelled", priority: "normal", assignedTo: profile.id, comments: [], attachments: [] };
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], roles: [] });
+      if (url === "/api/communities") return jsonResponse([community]);
+      if (url.startsWith("/api/communities/1?")) return jsonResponse({
+        community, canManage: false, isOwner: false, members: [profile], employees: [],
+        channels: [], categories: [], assignments: [], announcements: [], invitations: [],
+        departments: [], locations: [], teams: [], policies: [], documents: [], tasks: [task],
+      });
+      if (url === "/api/communities/1/tasks/42") return jsonResponse(task);
+      if (url.startsWith("/api/communities/1/documents")) return jsonResponse({ documents: [], folders: [] });
+      return originalFetch(input, init);
+    });
+    fireEvent.click(screen.getByTestId("button-notification-105"));
+    await waitFor(() => expect(screen.getByTestId("text-notification-full-content").textContent).toBe(events[4].body));
+    fireEvent.click(screen.getByTestId("button-open-notification-context"));
+    await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/communities/1?taskId=42"));
+    expect(await screen.findByRole("heading", { name: "Prepare monthly report" })).toBeTruthy();
+    expect(screen.getAllByText("Matching task details")).toHaveLength(2);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input) === "/api/communities/1/tasks/42")).toBe(true);
   });
 
   it("keeps notification navigation inside the signed-in workspace", async () => {
