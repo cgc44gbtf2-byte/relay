@@ -67,9 +67,22 @@ export type CleanupFailureNotification = {
   }>;
 };
 
+export type CleanupNotificationDelivery =
+  | { status: "not_attempted"; attempts: 0 }
+  | { status: "delivered"; attempts: number }
+  | {
+      status: "failed";
+      attempts: number;
+      failure: "network_error" | "http_error" | "delivery_error";
+      httpStatus?: number;
+    };
+
 export type CleanupFailureNotifier = (
   notification: CleanupFailureNotification,
-) => void | Promise<void>;
+) =>
+  | CleanupNotificationDelivery
+  | void
+  | Promise<CleanupNotificationDelivery | void>;
 
 const defaultDependencies: CleanupDependencies = {
   clerk: clerkClient as unknown as CleanupClerkClient,
@@ -345,7 +358,7 @@ function waitForWebhookRetry(): Promise<void> {
 
 async function notifyCleanupFailure(
   notification: CleanupFailureNotification,
-): Promise<void> {
+): Promise<CleanupNotificationDelivery> {
   const message = formatFailureNotification(notification);
   if (process.env.GITHUB_ACTIONS === "true") {
     console.error(
@@ -359,10 +372,13 @@ async function notifyCleanupFailure(
 
   const webhookUrl = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
   if (process.env.GITHUB_ACTIONS !== "true" || !webhookUrl) {
-    return;
+    return { status: "not_attempted", attempts: 0 };
   }
 
-  let lastFailure = "network error";
+  let lastFailure: {
+    failure: "network_error" | "http_error";
+    httpStatus?: number;
+  } = { failure: "network_error" };
   let attemptsMade = 0;
   for (let attempt = 1; attempt <= CLEANUP_WEBHOOK_MAX_ATTEMPTS; attempt += 1) {
     attemptsMade = attempt;
@@ -373,10 +389,11 @@ async function notifyCleanupFailure(
         body: JSON.stringify({ text: message }),
       });
       if (response.ok) {
-        return;
+        return { status: "delivered", attempts: attemptsMade };
       }
 
-      lastFailure = `HTTP ${response.status}`;
+      lastFailure = { failure: "http_error", httpStatus: response.status };
+      const failureSummary = `HTTP ${response.status}`;
       const shouldRetry =
         isTransientWebhookStatus(response.status) &&
         attempt < CLEANUP_WEBHOOK_MAX_ATTEMPTS;
@@ -385,13 +402,14 @@ async function notifyCleanupFailure(
       }
 
       console.error(
-        `Cleanup failure notification delivery failed (${lastFailure}); retrying attempt ${
+        `Cleanup failure notification delivery failed (${failureSummary}); retrying attempt ${
           attempt + 1
         }/${CLEANUP_WEBHOOK_MAX_ATTEMPTS} in ${
           CLEANUP_WEBHOOK_RETRY_DELAY_MS
         }ms.`,
       );
     } catch {
+      lastFailure = { failure: "network_error" };
       const shouldRetry = attempt < CLEANUP_WEBHOOK_MAX_ATTEMPTS;
       if (!shouldRetry) {
         break;
@@ -409,26 +427,36 @@ async function notifyCleanupFailure(
     await waitForWebhookRetry();
   }
 
-  if (lastFailure === "network error") {
+  if (lastFailure.failure === "network_error") {
     console.error(
       `Failed to deliver cleanup failure notification after ${attemptsMade} attempts.`,
     );
   } else {
     console.error(
-      `Failed to deliver cleanup failure notification after ${attemptsMade} attempts (${lastFailure}).`,
+      `Failed to deliver cleanup failure notification after ${attemptsMade} attempts (HTTP ${lastFailure.httpStatus}).`,
     );
   }
+  return {
+    status: "failed",
+    attempts: attemptsMade,
+    ...lastFailure,
+  };
 }
 
 function logCleanupEvent(
   status: "dry_run" | "started" | "succeeded" | "failed",
   users: CleanupUser[],
   error?: unknown,
+  notificationDelivery: CleanupNotificationDelivery = {
+    status: "not_attempted",
+    attempts: 0,
+  },
 ): void {
   console.log(
     JSON.stringify({
       event: CLEANUP_EVENT,
       status,
+      notificationDelivery,
       foundUsers: summarizeUsers(users),
       ...(error ? { error: formatError(error) } : {}),
     }),
@@ -438,13 +466,19 @@ function logCleanupEvent(
 async function notifyFailureWithoutMaskingCleanupError(
   notifier: CleanupFailureNotifier,
   notification: CleanupFailureNotification,
-): Promise<void> {
+): Promise<CleanupNotificationDelivery> {
   try {
-    await notifier(notification);
+    const delivery = await notifier(notification);
+    return delivery ?? { status: "delivered", attempts: 1 };
   } catch {
     console.error(
       "Failed to deliver cleanup failure notification; preserving the cleanup error.",
     );
+    return {
+      status: "failed",
+      attempts: 1,
+      failure: "delivery_error",
+    };
   }
 }
 
@@ -462,11 +496,11 @@ export async function main(
   } catch (error) {
     if (apply) {
       const notification = createFailureNotification(users);
-      await notifyFailureWithoutMaskingCleanupError(
+      const notificationDelivery = await notifyFailureWithoutMaskingCleanupError(
         dependencies.notifyFailure ?? notifyCleanupFailure,
         notification,
       );
-      logCleanupEvent("failed", users, error);
+      logCleanupEvent("failed", users, error, notificationDelivery);
     }
     throw error;
   }
@@ -494,11 +528,11 @@ export async function main(
     await cleanupUsers(users, dependencies);
   } catch (error) {
     const notification = createFailureNotification(users);
-    await notifyFailureWithoutMaskingCleanupError(
+    const notificationDelivery = await notifyFailureWithoutMaskingCleanupError(
       dependencies.notifyFailure ?? notifyCleanupFailure,
       notification,
     );
-    logCleanupEvent("failed", users, error);
+    logCleanupEvent("failed", users, error, notificationDelivery);
     throw error;
   }
   logCleanupEvent("succeeded", users);

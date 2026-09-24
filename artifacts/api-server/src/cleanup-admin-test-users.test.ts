@@ -60,6 +60,17 @@ function createClerk(
   };
 }
 
+function cleanupEventsFrom(logs: string[]): Array<Record<string, unknown>> {
+  return logs.flatMap((line) => {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      return event.event === "admin_test_user_cleanup" ? [event] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 async function withSafeCleanupEnvironment<T>(
   callback: () => T | Promise<T>,
 ): Promise<T> {
@@ -249,14 +260,27 @@ describe("admin test-user cleanup safeguards", () => {
         databaseCalls += 1;
       }),
     };
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
 
-    await withSafeCleanupEnvironment(() =>
-      main(["--dry-run"], dependencies),
-    );
+    try {
+      await withSafeCleanupEnvironment(() =>
+        main(["--dry-run"], dependencies),
+      );
+    } finally {
+      console.log = originalConsoleLog;
+    }
 
     assert.equal(deleteCalls, 0);
     assert.equal(revokeCalls, 0);
     assert.equal(databaseCalls, 0);
+    assert.deepEqual(cleanupEventsFrom(logs)[0]?.notificationDelivery, {
+      status: "not_attempted",
+      attempts: 0,
+    });
   });
 
   test("returns a non-zero result when cleanup fails", async () => {
@@ -343,10 +367,20 @@ describe("admin test-user cleanup safeguards", () => {
         notification = value;
       },
     };
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
 
-    const result = await withSafeCleanupEnvironment(() =>
-      runCleanup(["--apply"], dependencies),
-    );
+    let result: number;
+    try {
+      result = await withSafeCleanupEnvironment(() =>
+        runCleanup(["--apply"], dependencies),
+      );
+    } finally {
+      console.log = originalConsoleLog;
+    }
 
     assert.equal(result, 1);
     assert.deepEqual(notification, {
@@ -354,6 +388,12 @@ describe("admin test-user cleanup safeguards", () => {
       affectedUsers: [{ id: "alert-user", username }],
     });
     assert.doesNotMatch(JSON.stringify(notification), /sk_test_alert_secret/);
+    const event = cleanupEventsFrom(logs).at(-1);
+    assert.equal(event?.status, "failed");
+    assert.deepEqual(event?.notificationDelivery, {
+      status: "delivered",
+      attempts: 1,
+    });
   });
 
   test("redacts every Clerk key format from failure output", async () => {
@@ -617,14 +657,19 @@ describe("admin test-user cleanup safeguards", () => {
     const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
     const originalFetch = globalThis.fetch;
     const originalConsoleError = console.error;
+    const originalConsoleLog = console.log;
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const errors: string[] = [];
+    const logs: string[] = [];
 
     process.env.GITHUB_ACTIONS = "true";
     process.env.TEAM_NOTIFICATION_WEBHOOK_URL =
       "https://notifications.example.invalid/permanent";
     console.error = (...args: unknown[]) => {
       errors.push(args.map(String).join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
     };
     globalThis.fetch = async (url, init) => {
       requests.push({ url: String(url), init });
@@ -659,9 +704,19 @@ describe("admin test-user cleanup safeguards", () => {
       assert.match(output, /delete failed/);
       assert.doesNotMatch(output, /notifications\.example\.invalid/);
       assert.doesNotMatch(output, /sk_test_permanent_webhook_secret/);
+      const event = cleanupEventsFrom(logs).at(-1);
+      assert.equal(event?.status, "failed");
+      assert.deepEqual(event?.notificationDelivery, {
+        status: "failed",
+        attempts: 1,
+        failure: "http_error",
+        httpStatus: 400,
+      });
+      assert.doesNotMatch(JSON.stringify(event), /notifications\.example\.invalid/);
     } finally {
       globalThis.fetch = originalFetch;
       console.error = originalConsoleError;
+      console.log = originalConsoleLog;
       if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
       else process.env.GITHUB_ACTIONS = previousActions;
       if (previousWebhook === undefined) {
@@ -679,7 +734,9 @@ describe("admin test-user cleanup safeguards", () => {
     const previousWebhook = process.env.TEAM_NOTIFICATION_WEBHOOK_URL;
     const originalFetch = globalThis.fetch;
     const originalConsoleError = console.error;
+    const originalConsoleLog = console.log;
     const errors: string[] = [];
+    const logs: string[] = [];
     const webhookUrl = "https://notifications.example.invalid/rejected";
     let requests = 0;
 
@@ -687,6 +744,9 @@ describe("admin test-user cleanup safeguards", () => {
     process.env.TEAM_NOTIFICATION_WEBHOOK_URL = webhookUrl;
     console.error = (...args: unknown[]) => {
       errors.push(args.map(String).join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
     };
     globalThis.fetch = async () => {
       requests += 1;
@@ -721,9 +781,18 @@ describe("admin test-user cleanup safeguards", () => {
       assert.match(output, /delete failed/);
       assert.doesNotMatch(output, /notifications\.example\.invalid/);
       assert.doesNotMatch(output, /sk_test_rejected_webhook_secret/);
+      const event = cleanupEventsFrom(logs).at(-1);
+      assert.equal(event?.status, "failed");
+      assert.deepEqual(event?.notificationDelivery, {
+        status: "failed",
+        attempts: 3,
+        failure: "network_error",
+      });
+      assert.doesNotMatch(JSON.stringify(event), /notifications\.example\.invalid/);
     } finally {
       globalThis.fetch = originalFetch;
       console.error = originalConsoleError;
+      console.log = originalConsoleLog;
       if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
       else process.env.GITHUB_ACTIONS = previousActions;
       if (previousWebhook === undefined) {
