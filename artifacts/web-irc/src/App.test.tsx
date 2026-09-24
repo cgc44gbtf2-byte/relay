@@ -1941,3 +1941,108 @@ describe("admin activity date filters", () => {
     expect((screen.getByTestId("input-activity-end-date") as HTMLInputElement).value).toBe("");
   });
 });
+
+describe("admin activity availability polling", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, "", "/");
+  });
+
+  it("shows matching activity without changing the list until the administrator loads it", async () => {
+    const activityItem = (id: string, details: string) => ({
+      id,
+      actorId: "user-1",
+      actor: "Manager",
+      action: "changed_role",
+      targetId: `target-${id}`,
+      targetLabel: `Account ${id}`,
+      details,
+      createdAt: "2026-09-21T12:00:00.000Z",
+    });
+    const overview = (activity: ReturnType<typeof activityItem>[], newestCursor: string | null) => ({
+      stats: { users: 1, channels: 1, messages: 0, online: 1, admins: 1 },
+      users: [],
+      channels: [],
+      categories: [],
+      collectionPagination: {
+        channels: { limit: 50, offset: 0, hasMore: false },
+        categories: { limit: 50, offset: 0, hasMore: false },
+      },
+      recentMessages: [],
+      activity,
+      activityPagination: {
+        limit: 20,
+        offset: 0,
+        hasMore: false,
+        nextOffset: null,
+        nextCursor: null,
+        newestCursor,
+        newerHasMore: false,
+      },
+    });
+    const overviewRequests: URL[] = [];
+    const checks: URL[] = [];
+    let hasNewActivity = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/notifications") return jsonResponse([]);
+      if (url.pathname === "/api/admin/status") {
+        return jsonResponse({ isAdmin: true, profile: { ...profile, role: "admin" } });
+      }
+      if (url.pathname === "/api/admin/overview") {
+        overviewRequests.push(url);
+        if (url.searchParams.has("activityAfterCursor")) {
+          return jsonResponse(overview([activityItem("new", "newly arrived event")], "advanced-head"));
+        }
+        return jsonResponse(overview([activityItem("initial", "initial matching event")], "head"));
+      }
+      if (url.pathname === "/api/admin/activity/check") {
+        checks.push(url);
+        return jsonResponse({ hasNewActivity });
+      }
+      if (url.pathname === "/api/admin/health") {
+        return jsonResponse({ api: "operational", database: "operational", checkedAt: "2026-09-21T12:00:00.000Z" });
+      }
+      return jsonResponse({ error: "Unexpected request" }, 404);
+    }));
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+    fireEvent.click(await screen.findByTestId("button-admin-nav-activity"));
+    expect(await screen.findByText("initial matching event")).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("input-activity-actor"), { target: { value: "Manager" } });
+    fireEvent.change(screen.getByTestId("input-activity-action"), { target: { value: "changed" } });
+    fireEvent.change(screen.getByTestId("input-activity-start-date"), { target: { value: "2026-09-01" } });
+    fireEvent.change(screen.getByTestId("input-activity-end-date"), { target: { value: "2026-09-30" } });
+    await waitFor(() => expect(overviewRequests.some((url) =>
+      url.searchParams.get("activityActor") === "Manager"
+      && url.searchParams.get("activityAction") === "changed"
+      && url.searchParams.get("activityStartDate") === "2026-09-01"
+      && url.searchParams.get("activityEndDate") === "2026-09-30",
+    )).toBe(true));
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTestId("button-admin-nav-overview"));
+    fireEvent.click(screen.getByTestId("button-admin-nav-activity"));
+    hasNewActivity = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+    expect(checks.length).toBeGreaterThan(0);
+    expect(checks.at(-1)?.searchParams.get("activityAfterCursor")).toBe("head");
+    expect(checks.at(-1)?.searchParams.get("activityActor")).toBe("Manager");
+    expect(checks.at(-1)?.searchParams.get("activityAction")).toBe("changed");
+    expect(checks.at(-1)?.searchParams.get("activityStartDate")).toBe("2026-09-01");
+    expect(checks.at(-1)?.searchParams.get("activityEndDate")).toBe("2026-09-30");
+    expect(screen.getByTestId("status-new-admin-activity").textContent).toContain("New matching activity");
+    expect(screen.queryByText("newly arrived event")).toBeNull();
+    expect(screen.getByText("initial matching event")).toBeTruthy();
+
+    vi.useRealTimers();
+    fireEvent.click(screen.getByTestId("button-load-newer-activity"));
+    expect(await screen.findByText("newly arrived event")).toBeTruthy();
+    expect(screen.getByText("initial matching event")).toBeTruthy();
+    expect(screen.queryByTestId("status-new-admin-activity")).toBeNull();
+  });
+});

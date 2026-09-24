@@ -778,6 +778,33 @@ export const GetAdminOverviewResponse = zod.object({
 
 
 /**
+ * Returns whether any activity newer than the optional cursor matches the supplied filters without loading the admin overview.
+ * @summary Check for matching administrative activity
+ */
+export const checkAdminActivityQueryActivityAfterCursorMax = 256;
+
+export const checkAdminActivityQueryActivityActorMax = 200;
+
+export const checkAdminActivityQueryActivityActionMax = 200;
+
+export const checkAdminActivityQueryActivityStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const checkAdminActivityQueryActivityEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
+export const CheckAdminActivityQueryParams = zod.object({
+  "activityAfterCursor": zod.coerce.string().max(checkAdminActivityQueryActivityAfterCursorMax).optional().describe('Return true only for events newer than this activity cursor.'),
+  "activityActor": zod.coerce.string().max(checkAdminActivityQueryActivityActorMax).optional(),
+  "activityAction": zod.coerce.string().max(checkAdminActivityQueryActivityActionMax).optional(),
+  "activityStartDate": zod.coerce.string().regex(checkAdminActivityQueryActivityStartDateRegExp).optional().describe('Inclusive UTC calendar date for the earliest activity to match; must be YYYY-MM-DD.'),
+  "activityEndDate": zod.coerce.string().regex(checkAdminActivityQueryActivityEndDateRegExp).optional().describe('Inclusive UTC calendar date for the latest activity to match; must be YYYY-MM-DD.')
+})
+
+export const CheckAdminActivityResponse = zod.object({
+  "hasNewActivity": zod.boolean()
+})
+
+
+/**
  * @summary List admin-visible users
  */
 export const listAdminUsersQueryLimitDefault = 50;

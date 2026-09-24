@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './adminActivityCheckResponse';
 export * from './adminActivityPagination';
 export * from './adminOverview';
 export * from './adminOverviewActivityItem';
@@ -16,6 +17,7 @@ export * from './adminOverviewRecentMessagesItem';
 export * from './adminOverviewStats';
 export * from './adminOverviewUsersItem';
 export * from './auditEntry';
+export * from './checkAdminActivityParams';
 export * from './collectionLimitParameter';
 export * from './collectionOffsetParameter';
 export * from './communityActivityResponse';

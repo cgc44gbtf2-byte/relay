@@ -155,6 +155,10 @@ export interface AdminOverview {
   activityPagination: AdminActivityPagination;
 }
 
+export interface AdminActivityCheckResponse {
+  hasNewActivity: boolean;
+}
+
 export interface AuditEntry {
   id: number;
   actorId?: string | null;
@@ -706,6 +710,32 @@ activityAction?: string;
 activityStartDate?: string;
 /**
  * Inclusive UTC calendar date for the latest activity to return; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityEndDate?: string;
+};
+
+export type CheckAdminActivityParams = {
+/**
+ * Return true only for events newer than this activity cursor.
+ * @maxLength 256
+ */
+activityAfterCursor?: string;
+/**
+ * @maxLength 200
+ */
+activityActor?: string;
+/**
+ * @maxLength 200
+ */
+activityAction?: string;
+/**
+ * Inclusive UTC calendar date for the earliest activity to match; must be YYYY-MM-DD.
+ * @pattern ^\d{4}-\d{2}-\d{2}$
+ */
+activityStartDate?: string;
+/**
+ * Inclusive UTC calendar date for the latest activity to match; must be YYYY-MM-DD.
  * @pattern ^\d{4}-\d{2}-\d{2}$
  */
 activityEndDate?: string;

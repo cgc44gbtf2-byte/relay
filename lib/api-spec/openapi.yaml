@@ -553,6 +553,37 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AdminOverview" }
+  /admin/activity/check:
+    get:
+      operationId: checkAdminActivity
+      tags: [admin]
+      summary: Check for matching administrative activity
+      description: Returns whether any activity newer than the optional cursor matches the supplied filters without loading the admin overview.
+      parameters:
+        - name: activityAfterCursor
+          in: query
+          description: Return true only for events newer than this activity cursor.
+          schema: { type: string, maxLength: 256 }
+        - name: activityActor
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: activityAction
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: activityStartDate
+          in: query
+          description: Inclusive UTC calendar date for the earliest activity to match; must be YYYY-MM-DD.
+          schema: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        - name: activityEndDate
+          in: query
+          description: Inclusive UTC calendar date for the latest activity to match; must be YYYY-MM-DD.
+          schema: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+      responses:
+        "200":
+          description: Whether matching activity is available
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminActivityCheckResponse" }
   /admin/users:
     get:
       operationId: listAdminUsers
@@ -927,6 +958,11 @@ components:
         nextCursor: { type: ["string", "null"] }
         newestCursor: { type: ["string", "null"], description: Cursor for the newest returned event. }
         newerHasMore: { type: boolean, description: Whether more newer events remain after an activityAfterCursor request. }
+    AdminActivityCheckResponse:
+      type: object
+      required: [hasNewActivity]
+      properties:
+        hasNewActivity: { type: boolean }
     AuditEntry:
       type: object
       required: [id, action, createdAt]

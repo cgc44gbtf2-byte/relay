@@ -2855,6 +2855,20 @@ describe("admin access controls", () => {
       assert.ok(firstPage.activityPagination.nextCursor);
       assert.ok(firstPage.activityPagination.newestCursor);
 
+      const activityCheck = await apiRequest(
+        adminSession,
+        `/admin/activity/check?${filters}&activityAfterCursor=${encodeURIComponent(firstPage.activityPagination.newestCursor)}`,
+      );
+      assert.equal(activityCheck.status, 200, JSON.stringify(activityCheck));
+      assert.deepEqual(activityCheck.body, { hasNewActivity: true });
+
+      const nonMatchingActivityCheck = await apiRequest(
+        adminSession,
+        `/admin/activity/check?activityActor=${encodeURIComponent(`${marker} Missing`)}&activityAction=${encodeURIComponent(action)}&activityAfterCursor=${encodeURIComponent(firstPage.activityPagination.newestCursor)}`,
+      );
+      assert.equal(nonMatchingActivityCheck.status, 200, JSON.stringify(nonMatchingActivityCheck));
+      assert.deepEqual(nonMatchingActivityCheck.body, { hasNewActivity: false });
+
       const olderResponse = await apiRequest(
         adminSession,
         `/admin/overview?activityLimit=3&${filters}&activityCursor=${encodeURIComponent(firstPage.activityPagination.nextCursor)}`,

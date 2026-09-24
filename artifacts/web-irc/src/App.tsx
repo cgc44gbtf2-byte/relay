@@ -2027,6 +2027,7 @@ function AdminConsole() {
   const [loading, setLoading] = useState(true);
   const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
   const [loadingNewerActivity, setLoadingNewerActivity] = useState(false);
+  const [newActivityAvailable, setNewActivityAvailable] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -2082,6 +2083,7 @@ function AdminConsole() {
       const [nextOverview, nextHealth] = await Promise.all([loadAdminOverview<ConsoleOverview>(overviewPath), api<ConsoleHealth>("/admin/health")]);
       if (requestId !== overviewLoadRef.current) return;
       setLoadedActivityFilters(requestedActivityFilters);
+      if (!activityCursor && !activityAfterCursor) setNewActivityAvailable(false);
       const existingIds = new Set(overview?.activity.map((item) => item.id) ?? []);
       const addedActivityCount = nextOverview.activity.filter((item) => !existingIds.has(item.id)).length;
       if (!appendActivity) {
@@ -2122,7 +2124,10 @@ function AdminConsole() {
         });
       }
       setHealth(nextHealth);
-      return activityAfterCursor ? addedActivityCount : undefined;
+      return {
+        addedActivityCount,
+        hasNewerActivity: nextOverview.activityPagination.newerHasMore,
+      };
     } catch (reason) {
       if (requestId === overviewLoadRef.current) {
         setError(reason instanceof Error ? reason.message : "Could not load the operations console");
@@ -2282,14 +2287,15 @@ function AdminConsole() {
   };
   const loadNewerActivity = async () => {
     const newestCursor = overview?.activityPagination.newestCursor;
-    if (!newestCursor || loadingNewerActivity || loadingOlderActivity || !activityFiltersCurrent) return;
+    if ((!newestCursor && (overview?.activity.length ?? 0) > 0) || loadingNewerActivity || loadingOlderActivity || !activityFiltersCurrent) return;
     setLoadingNewerActivity(true);
     try {
-      const added = await load(null, false, newestCursor);
-      if (typeof added === "number") {
-        setNotice(added === 0
+      const result = await load(null, false, newestCursor ?? null);
+      if (result) {
+        setNewActivityAvailable(result.hasNewerActivity);
+        setNotice(result.addedActivityCount === 0
           ? "No newer activity was found."
-          : `Added ${added} newer ${added === 1 ? "event" : "events"}.`);
+          : `Added ${result.addedActivityCount} newer ${result.addedActivityCount === 1 ? "event" : "events"}.`);
       }
     } finally {
       setLoadingNewerActivity(false);
@@ -2303,6 +2309,52 @@ function AdminConsole() {
     && loadedActivityFilters.action === activityActionFilter.trim()
     && loadedActivityFilters.startDate === activityStartDateFilter
     && loadedActivityFilters.endDate === activityEndDateFilter;
+  useEffect(() => {
+    if (
+      !status?.isAdmin
+      || section !== "activity"
+      || !overview
+      || !activityFiltersCurrent
+      || loadingNewerActivity
+      || loadingOlderActivity
+    ) return;
+
+    const params = new URLSearchParams();
+    const newestCursor = overview.activityPagination.newestCursor;
+    if (newestCursor) params.set("activityAfterCursor", newestCursor);
+    if (activityActorFilter.trim()) params.set("activityActor", activityActorFilter.trim());
+    if (activityActionFilter.trim()) params.set("activityAction", activityActionFilter.trim());
+    if (activityStartDateFilter) params.set("activityStartDate", activityStartDateFilter);
+    if (activityEndDateFilter) params.set("activityEndDate", activityEndDateFilter);
+    const query = params.toString();
+    let active = true;
+    const checkForActivity = async () => {
+      try {
+        const result = await api<{ hasNewActivity: boolean }>(
+          `/admin/activity/check${query ? `?${query}` : ""}`,
+        );
+        if (active) setNewActivityAvailable(result.hasNewActivity);
+      } catch {
+        // Background checks are quiet; a later interval retries without interrupting the activity view.
+      }
+    };
+    const interval = window.setInterval(() => { void checkForActivity(); }, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    status?.isAdmin,
+    section,
+    overview?.activityPagination.newestCursor,
+    activityFiltersCurrent,
+    activityActorFilter,
+    activityActionFilter,
+    activityStartDateFilter,
+    activityEndDateFilter,
+    loadingNewerActivity,
+    loadingOlderActivity,
+  ]);
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-background font-mono text-sm text-muted-foreground">loading admin console…</div>;
   if (error && !status) return <div className="flex min-h-[100dvh] items-center justify-center bg-background px-6 font-mono text-sm text-destructive">{error}</div>;
   if (!status?.isAdmin) return <div className="min-h-[100dvh] bg-background px-5 py-8 text-foreground sm:px-10"><div className="mx-auto max-w-2xl"><a href={`${basePath}/chat`} className="font-mono text-xs text-muted-foreground hover:text-primary">← return to relay</a><div className="mt-16 rounded-2xl border border-border bg-card p-8"><Shield className="h-8 w-8 text-primary" /><p className="mt-6 font-mono text-[10px] uppercase tracking-[.18em] text-primary">platform access</p><h1 className="mt-2 font-mono text-3xl font-bold">Admin access is managed by the platform</h1><p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground">Your account is a member. A platform operator must explicitly provision administrative access before you can enter this control room.</p></div></div></div>;
@@ -2341,14 +2393,15 @@ function AdminConsole() {
                       <p className="mt-1 font-mono text-[10px] text-muted-foreground">{overview.activity.length} recorded events</p>
                     </div>
                      <div className="flex items-center gap-2">
-                       {activityFiltersCurrent && overview.activityPagination.newestCursor && <button
+                       {activityFiltersCurrent && newActivityAvailable && <span role="status" aria-live="polite" className="font-mono text-[9px] text-chart-4" data-testid="status-new-admin-activity">New matching activity available</span>}
+                       {activityFiltersCurrent && <button
                          type="button"
                          disabled={loadingNewerActivity || loadingOlderActivity}
                          onClick={() => void loadNewerActivity()}
                          className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50"
                          data-testid="button-load-newer-activity"
                        >
-                         {loadingNewerActivity ? "checking activity…" : overview.activityPagination.newerHasMore ? "load more new activity" : "check for new activity"}
+                         {loadingNewerActivity ? "checking activity…" : newActivityAvailable ? overview.activityPagination.newerHasMore ? "load more new activity" : "load new activity" : overview.activityPagination.newerHasMore ? "load more new activity" : "check for new activity"}
                        </button>}
                        <Activity className="h-4 w-4 text-primary" />
                      </div>

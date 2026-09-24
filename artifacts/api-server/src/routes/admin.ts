@@ -24,6 +24,7 @@ import { CUSTOM_ROLE_PERMISSIONS, ensurePermissionCatalog, PERMISSION_DESCRIPTIO
 import { isPositiveSafeInteger, isValidQuery } from "../lib/validation";
 import { wsHub } from "../lib/ws";
 import {
+  CheckAdminActivityResponse,
   CreateAdminCustomRoleBody,
   CreateAdminCustomRoleResponse,
   ListAdminCustomRolesResponse,
@@ -412,6 +413,59 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       newerHasMore: Boolean(activityAfterCursor && hasMoreActivity),
     },
   });
+});
+
+router.get("/admin/activity/check", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
+  if (!(await adminProfile(req))) {
+    res.status(403).json({ error: "Admin access required." });
+    return;
+  }
+
+  const activityAfterCursor = parseActivityCursor(req.query.activityAfterCursor);
+  const activityActor = parseActivityFilter(req.query.activityActor);
+  const activityAction = parseActivityFilter(req.query.activityAction);
+  const activityStartDate = parseActivityDate(req.query.activityStartDate);
+  const activityEndDate = parseActivityDate(req.query.activityEndDate);
+  if (activityAfterCursor === false) {
+    res.status(400).json({ error: "Invalid activity cursor." });
+    return;
+  }
+  if (activityActor === null || activityAction === null) {
+    res.status(400).json({ error: "Activity filters must be 200 characters or fewer." });
+    return;
+  }
+  if (activityStartDate === null || activityEndDate === null) {
+    res.status(400).json({ error: "Activity dates must be valid YYYY-MM-DD calendar dates." });
+    return;
+  }
+  if (activityStartDate && activityEndDate && activityStartDate > activityEndDate) {
+    res.status(400).json({ error: "Activity start date must be on or before the end date." });
+    return;
+  }
+
+  const [match] = await db
+    .select({ id: adminAuditLogsTable.id })
+    .from(adminAuditLogsTable)
+    .where(and(
+      activityActor
+        ? ilike(adminAuditLogsTable.actorDisplayName, `%${escapeLikePattern(activityActor)}%`)
+        : undefined,
+      activityAction
+        ? ilike(adminAuditLogsTable.action, `%${escapeLikePattern(activityAction)}%`)
+        : undefined,
+      activityStartDate
+        ? sql`${adminAuditLogsTable.createdAt} >= (${activityStartDate}::date::timestamp AT TIME ZONE 'UTC')`
+        : undefined,
+      activityEndDate
+        ? sql`${adminAuditLogsTable.createdAt} < ((${activityEndDate}::date + 1)::timestamp AT TIME ZONE 'UTC')`
+        : undefined,
+      activityAfterCursor
+        ? sql`(${adminAuditLogsTable.createdAt}, ${adminAuditLogsTable.id}) > (${activityAfterCursor.createdAt}::timestamptz, ${activityAfterCursor.id})`
+        : undefined,
+    ))
+    .limit(1);
+
+  res.json(CheckAdminActivityResponse.parse({ hasNewActivity: Boolean(match) }));
 });
 
 router.post("/admin/announcements", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
