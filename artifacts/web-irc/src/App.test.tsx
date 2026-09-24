@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, cleanup, within } from "@testing-library/react";
-import type { ComponentProps, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@clerk/react/internal", () => ({
@@ -22,7 +22,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, WorkspaceChannelOrganizer, ownerConfirmationPhrase } from "./App";
 
 type Channel = {
   id: number;
@@ -90,8 +90,9 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
-    const select = await screen.findByTestId("select-public-space");
+    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
+    const select = screen.getByTestId("select-organize-category") as HTMLSelectElement;
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
     expect(select.querySelector('option[value="32"]')).toBeNull();
     fireEvent.change(select, { target: { value: "31" } });
@@ -108,8 +109,21 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
+      channels: [{ id: 7, name: "#team", categoryId: null }],
+      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
+    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "31" } });
+    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith(7, 31));
+    rerender(<WorkspaceChannelOrganizer detail={{ ...detail, channels: [{ ...detail.channels[0], categoryId: 31 }] }} working={false} onMove={onMove} />);
+    fireEvent.change(screen.getByTestId("select-workspace-category"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("button-move-workspace-channel"));
+    await waitFor(() => expect(onMove).toHaveBeenLastCalledWith(7, null));
+  });
+});
+
 const message = (channelId: number, body: string, id = `message-${channelId}`) => ({
   id,
   channelId,
@@ -357,6 +371,33 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   render(<App />);
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
+
+describe("deleted room recovery", () => {
+  beforeEach(() => {
+    vi.stubGlobal("alert", vi.fn());
+    vi.stubGlobal("prompt", vi.fn(() => "new topic"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+    latestWebSocket = null;
+    webSocketFrames = [];
+    vi.unstubAllGlobals();
+  });
+
+  it("moves an owned channel into a same-workspace category and back without hiding history", async () => {
+    await renderChat({
+      missingRequest: "event",
+      owner: true,
+      fallbackChannels: [room(1, "#deleted-room", "user-1"), room(2, "#fallback-room")],
+      categories: [
+        { id: 31, name: "project room", description: "", ownerId: "user-1", communityId: null },
+        { id: 32, name: "foreign workspace", description: "", ownerId: "user-1", communityId: 2 },
+      ],
+    });
+    await screen.findByText("stale history");
+    fireEvent.click(await screen.findByTestId("button-organize-current-channel"));
     const category = screen.getByLabelText("category") as HTMLSelectElement;
     expect(category.querySelector('option[value="31"]')).not.toBeNull();
     expect(category.querySelector('option[value="32"]')).toBeNull();
@@ -447,8 +488,6 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     const newerResponse = new Promise<Response>((resolve) => { resolveNewer = resolve; });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-    const secondSocket = latestWebSocket;
       if (url === "/api/users/search?q=al") return olderResponse;
       if (url === "/api/users/search?q=alex") return newerResponse;
       return baseFetch(input, init);
@@ -586,12 +625,12 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
       fallbackChannels: [room(2, "#fallback-room")],
     });
     if (missingRequest === "send") {
-    const editor = screen.getByPlaceholderText("message #deleted-room");
+      const editor = screen.getByPlaceholderText("message #deleted-room");
       fireEvent.change(editor, { target: { value: "hello" } });
       fireEvent.submit(editor.closest("form")!);
     }
     await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    expect(screen.queryByText("stale history")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("stale history")).toBeNull());
   });
 
   it("removes a room immediately when another session deletes it", async () => {
@@ -744,22 +783,27 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
     const reconnectedSocket = latestWebSocket;
     expect(reconnectedSocket).toBeTruthy();
     expect(reconnectedSocket).not.toBe(firstSocket);
-    expect(reconnectedSocket?.url).not.toBe(firstSocket?.url);
-    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket")).toHaveLength(initialTickets + 1);
-    webSocketFrames = [];
-    act(() => reconnectedSocket?.onopen?.());
-    expect(webSocketFrames.map((frame) => JSON.parse(frame))).toEqual(expect.arrayContaining([
-      { type: "subscribe", channelId: 1 },
-    ]));
+    await act(async () => { reconnectedSocket?.onopen?.(); });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
+      expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+    });
+    expect(screen.queryByText("reaction before reconnect")).toBeNull();
+    expect(screen.queryByText("message before deletion")).toBeNull();
+    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("bounds repeated failures and cancels retries when chat unmounts", async () => {
+  it("requests a fresh socket and resubscribes after a connection drops", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
-    vi.useFakeTimers();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const firstSocket = latestWebSocket;
     expect(firstSocket).toBeTruthy();
     act(() => firstSocket?.onopen?.());
     const initialTickets = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/ws-ticket").length;
+
     vi.useFakeTimers();
     act(() => firstSocket?.onclose?.());
     expect(latestWebSocket).toBe(firstSocket);
@@ -922,33 +966,9 @@ describe("frontend route and document error hardening", () => {
 
     const setError = vi.fn();
 
-    const storedRelease = {
-      id: 41,
-      version: "v2.4.0",
-      title: "Stored release",
-      notes: "Existing release notes",
-      status: "draft" as const,
-      announcementId: null,
-      createdAt: "2026-09-24T12:00:00.000Z",
-    };
     render(<DocumentCenter detail={detail} working={false} setWorking={vi.fn()} setNotice={vi.fn()} setError={setError} />);
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "documents unavailable");
     expect(setError).toHaveBeenCalledWith("documents unavailable");
     expect(screen.queryByText("No documents match this search.")).toBeNull();
   });
 });
-
-
-    const releaseFromAnotherSession = {
-      id: 42,
-      version: "v2.5.0",
-      title: "New release",
-      notes: "Added by another session",
-      status: "draft" as const,
-      announcementId: null,
-      createdAt: "2026-09-24T12:30:00.000Z",
-    };
-
-    let releaseRequests = 0;
-
-    let releases: typeof storedRelease[] = [];
