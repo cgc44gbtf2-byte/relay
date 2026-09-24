@@ -52,3 +52,43 @@ export function readTestAccountReturnContext(
 export function clearTestAccountReturnContext(storage: Storage = window.localStorage): void {
   storage.removeItem(TEST_ACCOUNT_RETURN_CONTEXT_KEY);
 }
+
+export function verifyTestAccountReturnOwner(context: TestAccountReturnContext, ownerUserId: string): void {
+  if (ownerUserId !== context.ownerUserId) {
+    throw new Error("The owner return identity did not match the original owner.");
+  }
+}
+
+type OwnerSession = { id: string; status: string; user?: { id: string } | null };
+
+export async function returnToTestAccountOwner(options: {
+  testSessionId: string | undefined;
+  ownerSessions: OwnerSession[];
+  requestReturnTicket: (workspaceId: number) => Promise<{ ticket: string; ownerUserId: string }>;
+  signOutTestSession: (sessionId: string) => Promise<unknown>;
+  signInOwnerWithTicket: (ticket: string) => Promise<string>;
+  activateSession: (sessionId: string) => Promise<unknown>;
+  navigateToWorkspace: (workspaceId: number) => void;
+  storage?: Storage;
+  now?: number;
+}): Promise<void> {
+  const storage = options.storage ?? window.localStorage;
+  const context = readTestAccountReturnContext(storage, options.now);
+  if (!context) throw new Error("Your owner return context is unavailable. Sign out and sign in again to return to the owner account.");
+  if (!options.testSessionId) throw new Error("Your test-account session is unavailable.");
+
+  // Always check the current test identity against its workspace on the server,
+  // even when Clerk still has the previous owner session on this device.
+  const result = await options.requestReturnTicket(context.workspaceId);
+  verifyTestAccountReturnOwner(context, result.ownerUserId);
+  const ownerSession = options.ownerSessions.find((item) => item.id === context.ownerSessionId);
+  if (ownerSession?.status === "active" && ownerSession.user?.id === context.ownerUserId) {
+    await options.activateSession(context.ownerSessionId);
+  } else {
+    await options.signOutTestSession(options.testSessionId);
+    const newOwnerSessionId = await options.signInOwnerWithTicket(result.ticket);
+    await options.activateSession(newOwnerSessionId);
+  }
+  clearTestAccountReturnContext(storage);
+  options.navigateToWorkspace(context.workspaceId);
+}

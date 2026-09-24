@@ -48,7 +48,7 @@ import { mergeRefreshedMessages, upsertBoundedMessage, upsertBoundedMessageGroup
 import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { ErrorBoundary } from "@/components/error-boundary";
-import { clearTestAccountReturnContext, readTestAccountReturnContext, writeTestAccountReturnContext } from "./test-account-switch";
+import { clearTestAccountReturnContext, returnToTestAccountOwner, writeTestAccountReturnContext } from "./test-account-switch";
 import { NotificationCenter, type Notification, type LinkedNotificationMessage } from "./components/notification-center";
 import { WorkspaceIndicator } from "./components/workspace-indicator";
 
@@ -1228,25 +1228,22 @@ function ChatApp() {
     setReturningToOwner(true);
     setReturnOwnerError("");
     try {
-      const context = readTestAccountReturnContext();
-      const ownerSession = context && client?.sessions?.find((item) => item.id === context.ownerSessionId);
-      if (!context) throw new Error("Your owner return context is unavailable. Sign out and sign in again to return to the owner account.");
-      if (!setActive) throw new Error("Clerk session switching is unavailable.");
-      if (ownerSession?.status === "active" && ownerSession.user?.id === context.ownerUserId) {
-        await setActive({ session: context.ownerSessionId });
-      } else {
-        if (!session?.id || !client) throw new Error("Your test-account session is unavailable.");
-        const result = await api<{ ticket: string; ownerUserId: string }>(`/communities/${context.workspaceId}/test-accounts/return`, { method: "POST", body: "{}" });
-        if (result.ownerUserId !== context.ownerUserId) throw new Error("The owner return identity did not match the original owner.");
-        await signOut({ sessionId: session.id });
-        const ownerSignIn = await client.signIn.create({ strategy: "ticket", ticket: result.ticket });
-        if (ownerSignIn.status !== "complete" || !ownerSignIn.createdSessionId) {
-          throw new Error(`Owner return sign-in did not complete (${ownerSignIn.status}).`);
-        }
-        await setActive({ session: ownerSignIn.createdSessionId });
-      }
-      clearTestAccountReturnContext();
-      window.location.assign(`${basePath}/chat`);
+      if (!setActive || !client) throw new Error("Clerk session switching is unavailable.");
+      await returnToTestAccountOwner({
+        testSessionId: session?.id,
+        ownerSessions: client.sessions ?? [],
+        requestReturnTicket: (workspaceId) => api<{ ticket: string; ownerUserId: string }>(`/communities/${workspaceId}/test-accounts/return`, { method: "POST", body: "{}" }),
+        signOutTestSession: (sessionId) => signOut({ sessionId }),
+        signInOwnerWithTicket: async (ticket) => {
+          const ownerSignIn = await client.signIn.create({ strategy: "ticket", ticket });
+          if (ownerSignIn.status !== "complete" || !ownerSignIn.createdSessionId) {
+            throw new Error(`Owner return sign-in did not complete (${ownerSignIn.status}).`);
+          }
+          return ownerSignIn.createdSessionId;
+        },
+        activateSession: (sessionId) => setActive({ session: sessionId }),
+        navigateToWorkspace: (workspaceId) => window.location.assign(`${basePath}/communities/${workspaceId}`),
+      });
     } catch (reason) {
       setReturnOwnerError(reason instanceof Error ? reason.message : "Could not return to the owner account.");
       setReturningToOwner(false);
