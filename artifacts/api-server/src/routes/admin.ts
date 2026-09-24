@@ -541,7 +541,8 @@ router.post("/admin/custom-roles", requireAuth, async (req: AuthenticatedRequest
     await writeAudit(actor.clerkId, actor.displayName, "created_custom_role", key, label, permissions.join(", "));
     res.status(201).json({ ...role, permissions });
   } catch (error) {
-    res.status(isUniqueViolation(error) ? 409 : 500).json({ error: isUniqueViolation(error) ? "A custom role with that name already exists." : "Could not create custom role." });
+    if (!isUniqueViolation(error)) throw error;
+    res.status(409).json({ error: "A custom role with that name already exists." });
   }
 });
 

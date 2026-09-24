@@ -1782,7 +1782,10 @@ describe("admin access controls", () => {
           body: JSON.stringify({ role: "member" }),
         },
       );
-      assert.equal(response.status, 500);
+      assert.equal(response.status, 500, JSON.stringify(response));
+      assert.deepEqual(response.body, {
+        error: "An unexpected error occurred while processing the admin request.",
+      });
 
       const afterUsers = await pool.query(
         "SELECT clerk_id, role FROM irc_users WHERE clerk_id = $1",

@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type ErrorRequestHandler, type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import { clerkMiddleware } from "@clerk/express";
@@ -47,5 +47,34 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+
+const adminApiErrorHandler: ErrorRequestHandler = (error, req, res, next) => {
+  const path = req.originalUrl.split("?")[0] ?? req.path;
+  if (path !== "/api/admin" && !path.startsWith("/api/admin/")) {
+    next(error);
+    return;
+  }
+
+  logger.error(
+    {
+      err: error,
+      requestId: req.id,
+      method: req.method,
+      path,
+    },
+    "Unexpected admin API failure",
+  );
+
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+
+  res.status(500).json({
+    error: "An unexpected error occurred while processing the admin request.",
+  });
+};
+
+app.use(adminApiErrorHandler);
 
 export default app;
