@@ -314,6 +314,103 @@ describe("message notification delivery PostgreSQL integration", () => {
     assert.deepEqual(recipients.rows.map(({ user_id }) => user_id), [users.first, users.second].sort());
   });
 
+  test("does not send delayed mentions to a member removed before retry", async () => {
+    const messageId = await insertPendingMessage({
+      body: `Delayed mention for ${suffix}`,
+      channelId,
+      notificationRecipientIds: [users.first, users.second],
+    });
+    const trigger = `fail_removed_member_notification_${suffix}`;
+    await pool.query(
+      `CREATE FUNCTION "${trigger}"() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF NEW.entity_id = '${messageId}' THEN
+           RAISE EXCEPTION 'forced delayed mention failure';
+         END IF;
+         RETURN NEW;
+       END; $$;
+       CREATE TRIGGER "${trigger}" BEFORE INSERT ON irc_notifications
+       FOR EACH ROW EXECUTE FUNCTION "${trigger}"();`,
+    );
+    try {
+      assert.deepEqual(
+        await processMessageNotificationDeliveries({ batchSize: 1 }),
+        { processed: 1, delivered: 0, skipped: 0, failed: 1 },
+      );
+      assert.equal((await pool.query(
+        "SELECT id FROM irc_notifications WHERE entity_type = 'message' AND entity_id = $1",
+        [messageId],
+      )).rowCount, 0);
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS "${trigger}" ON irc_notifications;
+         DROP FUNCTION IF EXISTS "${trigger}"();`,
+      );
+    }
+
+    await pool.query(
+      "DELETE FROM irc_channel_members WHERE channel_id = $1 AND user_id = $2",
+      [channelId, users.second],
+    );
+    try {
+      await pool.query(
+        "UPDATE irc_messages SET notification_next_attempt_at = now() WHERE id = $1",
+        [messageId],
+      );
+      assert.deepEqual(
+        await processMessageNotificationDeliveries({ batchSize: 1 }),
+        { processed: 1, delivered: 1, skipped: 0, failed: 0 },
+      );
+      const notices = await pool.query<{ user_id: string }>(
+        `SELECT user_id FROM irc_notifications
+         WHERE entity_type = 'message' AND entity_id = $1`,
+        [messageId],
+      );
+      assert.deepEqual(notices.rows.map(({ user_id }) => user_id), [users.first]);
+      const state = await pool.query<{
+        notification_status: string;
+        notification_attempts: number;
+        notification_recipient_ids: string[];
+      }>(
+        `SELECT notification_status, notification_attempts, notification_recipient_ids
+         FROM irc_messages WHERE id = $1`,
+        [messageId],
+      );
+      assert.equal(state.rows[0].notification_status, "delivered");
+      assert.equal(state.rows[0].notification_attempts, 1);
+      assert.deepEqual(
+        state.rows[0].notification_recipient_ids.sort(),
+        [users.first, users.second].sort(),
+        "the retry must retain the send-time recipient snapshot without notifying the removed member",
+      );
+
+      const removedOnlyMessageId = await insertPendingMessage({
+        body: `Only removed member ${suffix}`,
+        channelId,
+        notificationRecipientIds: [users.second],
+      });
+      assert.deepEqual(
+        await processMessageNotificationDeliveries({ batchSize: 1 }),
+        { processed: 1, delivered: 0, skipped: 1, failed: 0 },
+      );
+      const skipped = await pool.query<{ notification_status: string }>(
+        "SELECT notification_status FROM irc_messages WHERE id = $1",
+        [removedOnlyMessageId],
+      );
+      assert.equal(skipped.rows[0].notification_status, "skipped");
+      assert.equal((await pool.query(
+        "SELECT id FROM irc_notifications WHERE entity_type = 'message' AND entity_id = $1",
+        [removedOnlyMessageId],
+      )).rowCount, 0);
+    } finally {
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [channelId, users.second],
+      );
+    }
+  });
+
   test("releases claimed messages and preserves recipient intent after a worker process crash", async () => {
     const messageId = await insertPendingMessage({
       body: `Crash during delivery ${suffix}`,

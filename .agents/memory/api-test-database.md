@@ -13,6 +13,12 @@ On a fresh local cluster, schema push can try to create composite foreign keys b
 
 Fresh current-schema setup also requires the `pg_trgm` extension for document search indexes. Start local PostgreSQL with an explicit socket directory because `/run/postgresql` may not exist in the container.
 
+Do not trust the exit status of `drizzle-kit push` alone when bootstrapping a disposable test database: it may print a PostgreSQL error and still exit successfully.
+
+**Why:** A missing `gin_trgm_ops` produced an incomplete schema while a focused integration test still passed against the tables that had been created.
+
+**How to apply:** Enable required extensions before schema push, check its output for database errors, and only then treat integration-test results as verified against a clean bootstrap.
+
 When the push encounters multiple composite-FK ordering failures in succession, another safe option is to clone only the development database's schema (no data) into a fresh disposable test database. The dump must be read-only on development. Preserve the target's default `public` schema unless the dump explicitly creates it.
 
 **Why:** Schema-only dumps can omit `CREATE SCHEMA public`; unconditionally dropping the target schema makes an otherwise valid restore fail. A schema clone verifies route behavior against the current development shape, but does not prove Drizzle can bootstrap a fresh schema.
