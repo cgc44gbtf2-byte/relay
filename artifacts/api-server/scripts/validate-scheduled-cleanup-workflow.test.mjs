@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { test } from "node:test";
@@ -46,6 +47,69 @@ test("rejects schema setup that does not unset DATABASE_URL", async () => {
 
   assert.notEqual(result.code, 0, result.output);
   assert.match(result.output, /must unset DATABASE_URL for schema setup/);
+});
+
+const unrelatedStepFixturePath = fileURLToPath(
+  new URL("./fixtures/scheduled-cleanup-unrelated-step.yml", import.meta.url),
+);
+const ciWorkflowPath = fileURLToPath(
+  new URL("../../../.github/workflows/ci.yml", import.meta.url),
+);
+
+test("accepts the existing scheduled cleanup workflow", async () => {
+  const result = await runValidator(ciWorkflowPath);
+  assert.equal(result.code, 0, result.output);
+});
+
+test("rejects an unrelated step inheriting cleanup credentials", async () => {
+  const result = await runValidator(unrelatedStepFixturePath);
+  assert.notEqual(result.code, 0, result.output);
+  assert.match(
+    result.output,
+    /unapproved credential-bearing step: - name: Unrelated diagnostics/,
+  );
+});
+
+test("rejects unrelated commands disguised with an approved step name", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cleanup-workflow-"));
+  try {
+    const source = await readFile(unrelatedStepFixturePath, "utf8");
+    const workflowPath = path.join(directory, "ci.yml");
+    await writeFile(
+      workflowPath,
+      source.replace("name: Unrelated diagnostics", "name: Install dependencies"),
+    );
+    const result = await runValidator(workflowPath);
+    assert.notEqual(result.code, 0, result.output);
+    assert.match(
+      result.output,
+      /unapproved credential-bearing step: - name: Install dependencies/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects blank lines that split the folded cleanup command", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cleanup-workflow-"));
+  try {
+    const source = await readFile(ciWorkflowPath, "utf8");
+    const workflowPath = path.join(directory, "ci.yml");
+    const mutated = source.replace(
+      "          env -u DATABASE_URL\n          pnpm --filter @workspace/api-server run cleanup:test-users:scheduled",
+      "          env -u DATABASE_URL\n\n          pnpm --filter @workspace/api-server run cleanup:test-users:scheduled",
+    );
+    assert.notEqual(mutated, source, "fixture must split the cleanup command");
+    await writeFile(workflowPath, mutated);
+    const result = await runValidator(workflowPath);
+    assert.notEqual(result.code, 0, result.output);
+    assert.match(
+      result.output,
+      /unapproved credential-bearing step: - name: Remove abandoned test users/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 function runValidator(workflowPath) {

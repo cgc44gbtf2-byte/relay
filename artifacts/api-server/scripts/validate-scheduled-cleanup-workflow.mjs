@@ -75,7 +75,66 @@ assert.doesNotMatch(
   "scheduled cleanup must not contain live Clerk key values",
 );
 
+validateCleanupSteps(job);
+
 console.log(`Validated scheduled cleanup environment in ${workflowPath}`);
+
+function validateCleanupSteps(job) {
+  // Job-scoped credentials reach every step. Fail closed on additions or
+  // changes to executable content, not just on unfamiliar display names.
+  const approvedSteps = [
+    `- name: Check out repository
+  uses: actions/checkout@v4`,
+    `- name: Set up pnpm
+  uses: pnpm/action-setup@v4
+  with:
+    version: 10.26.1`,
+    `- name: Set up Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: 24
+    cache: pnpm`,
+    `- name: Install dependencies
+  run: pnpm install --frozen-lockfile`,
+    `- name: Create disposable test schema
+  run: env -u DATABASE_URL pnpm --filter @workspace/db run push:test`,
+    `- name: Remove abandoned test users
+  run: >-
+    env -u DATABASE_URL
+    pnpm --filter @workspace/api-server run cleanup:test-users:scheduled`,
+  ];
+  const lines = job.split("\n");
+  const start = lines.indexOf("    steps:");
+  assert.notEqual(start, -1, "scheduled cleanup is missing its steps block");
+  const steps = [];
+  for (const line of lines.slice(start + 1)) {
+    // Blank lines inside folded YAML commands change spaces into newlines.
+    // Preserve them; only spacing between complete steps may be discarded.
+    if (!line.trim()) {
+      if (steps.length) steps.at(-1).push("");
+      continue;
+    }
+    if (/^    \S/.test(line)) break;
+    if (/^      - /.test(line)) steps.push([]);
+    assert.ok(
+      steps.length && /^ {6,}\S/.test(line),
+      `scheduled cleanup contains an unsupported step definition: ${line}`,
+    );
+    steps.at(-1).push(line.slice(6).trimEnd());
+  }
+  const definitions = steps.map((lines) => lines.join("\n").trimEnd());
+  for (const definition of definitions) {
+    assert.ok(
+      approvedSteps.includes(definition),
+      `scheduled cleanup contains an unapproved credential-bearing step: ${definition.split("\n")[0]}; only the approved setup and cleanup step definitions are allowed`,
+    );
+  }
+  assert.deepEqual(
+    definitions,
+    approvedSteps,
+    "scheduled cleanup must contain exactly the approved setup and cleanup steps in order",
+  );
+}
 
 function extractJob(source, jobName) {
   const lines = source.split(/\r?\n/);
