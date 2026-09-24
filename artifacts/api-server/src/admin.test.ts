@@ -9474,6 +9474,86 @@ describe("admin access controls", () => {
     }
   });
 
+  test("allocates distinct sequential document versions for simultaneous uploads", async () => {
+    assert.ok(
+      process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL,
+      "Concurrent upload tests require only a dedicated TEST_DATABASE_URL, not the development database.",
+    );
+    const owner = await createTestSession("concurrent_document_owner");
+    let communityId: number | undefined;
+    try {
+      assert.equal((await apiRequest(owner, "/me")).status, 200);
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+        ["Concurrent document versions", `concurrent-versions-${randomUUID()}`, owner.userId],
+      );
+      communityId = community.rows[0].id;
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'owner')",
+        [communityId, owner.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_owner', 'community', $2, $1)`,
+        [owner.userId, communityId],
+      );
+
+      const file = (name: string) => ({
+        objectPath: `/objects/uploads/${randomUUID()}`,
+        fileName: name,
+        contentType: "text/plain",
+        fileSize: 1,
+      });
+      const upload = (path: string, body: object) => apiRequest(owner, path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const created = await upload(`/communities/${communityId}/documents`, {
+        ...file("initial.txt"), title: "Concurrent upload fixture",
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      const documentId = (created.body as { id: number }).id;
+      const path = `/communities/${communityId}/documents/${documentId}/versions`;
+      const responses = await Promise.all([
+        upload(path, file("second.txt")),
+        upload(path, file("third.txt")),
+      ]);
+      for (const response of responses) {
+        assert.equal(response.status, 201, JSON.stringify(response));
+      }
+      const uploaded = responses.map(({ body }) => body as {
+        id: number; documentId: number; version: number; fileName: string;
+      });
+      assert.ok(uploaded.every((version) => version.documentId === documentId));
+      assert.deepEqual(uploaded.map(({ version }) => version).sort((a, b) => a - b), [2, 3]);
+      assert.deepEqual(uploaded.map(({ fileName }) => fileName).sort(), ["second.txt", "third.txt"]);
+
+      const stored = await pool.query<{ id: number; version: number; file_name: string }>(
+        `SELECT id, version, file_name FROM irc_document_versions
+         WHERE document_id = $1 ORDER BY version`,
+        [documentId],
+      );
+      assert.deepEqual(stored.rows.map(({ version }) => version), [1, 2, 3]);
+      assert.deepEqual(
+        stored.rows.slice(1).map(({ id }) => id).sort((a, b) => a - b),
+        uploaded.map(({ id }) => id).sort((a, b) => a - b),
+      );
+      assert.deepEqual(stored.rows.slice(1).map(({ file_name }) => file_name).sort(), ["second.txt", "third.txt"]);
+      const duplicates = await pool.query(
+        `SELECT document_id, version FROM irc_document_versions
+         WHERE document_id = $1 GROUP BY document_id, version HAVING count(*) > 1`,
+        [documentId],
+      );
+      assert.deepEqual(duplicates.rows, []);
+    } finally {
+      if (communityId !== undefined) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("filters business documents before applying the capped page size", async () => {
     const owner = await createTestSession("document_pagination_owner");
     assert.equal((await apiRequest(owner, "/me")).status, 200);
