@@ -240,24 +240,6 @@ async function isChannelOwnerOrModerator(channelId: number, userId: string): Pro
   );
 }
 
-async function notifyMentionedUsers(body: string, senderId: string, channelId: number | null, messageId: string): Promise<void> {
-  const names = [...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase());
-  if (names.length === 0) return;
-  const mentioned = await db
-    .select({ clerkId: usersTable.clerkId })
-    .from(usersTable)
-    .where(inArray(usersTable.username, [...new Set(names)]));
-  const recipients = mentioned.filter((user) => user.clerkId !== senderId);
-  if (recipients.length === 0) return;
-  await createNotifications(recipients.map((user) => user.clerkId), {
-    type: "mention",
-    category: "mention",
-    body: channelId ? "You were mentioned in a channel." : "You were mentioned.",
-    entityType: "message",
-    entityId: messageId,
-  });
-}
-
 async function publicUser(userId: string) {
   const user = await db.query.usersTable.findFirst({ where: eq(usersTable.clerkId, userId) });
   return user
@@ -1226,12 +1208,19 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
       return;
     }
   }
-  const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, replyToId, body }).returning();
+  const mentionedNames = [...new Set([...body.matchAll(/@([a-z0-9_]{3,24})/gi)].map((match) => match[1].toLowerCase()))];
+  const notificationRecipientIds = mentionedNames.length
+    ? sql<string[]>`ARRAY(
+        SELECT ${usersTable.clerkId} FROM ${usersTable}
+        INNER JOIN ${channelMembersTable} ON ${channelMembersTable.userId} = ${usersTable.clerkId}
+        WHERE ${channelMembersTable.channelId} = ${channel.id}
+          AND ${usersTable.clerkId} <> ${userId}
+          AND ${inArray(usersTable.username, mentionedNames)}
+      )`
+    : [];
+  const [message] = await db.insert(messagesTable).values({ channelId: channel.id, senderId: userId, replyToId, body, notificationStatus: "pending", notificationRecipientIds }).returning();
   const view = await messageView(message);
   res.status(201).json(view);
-  void notifyMentionedUsers(body, userId, channel.id, message.id).catch((error) => {
-    logger.warn({ err: error, messageId: message.id }, "Message mention notifications failed.");
-  });
   wsHub.broadcastChannel(channel.id, { type: "message", message: view });
 });
 
@@ -2030,19 +2019,9 @@ router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedReques
       return;
     }
   }
-  const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), replyToId, body }).returning();
+  const [message] = await db.insert(messagesTable).values({ senderId, recipientId, threadKey: threadKey(senderId, recipientId), replyToId, body, notificationStatus: "pending", notificationRecipientIds: [recipientId] }).returning();
   const view = await messageView(message);
   res.status(201).json(view);
-  void createNotification({
-    userId: recipientId,
-    type: "direct_message",
-    category: "direct_message",
-    body: "You have a new direct message.",
-    entityType: "message",
-    entityId: message.id,
-  }).catch((error) => {
-    logger.warn({ err: error, messageId: message.id }, "Direct-message notification failed.");
-  });
   wsHub.broadcastUser(senderId, { type: "dm", message: view });
   wsHub.broadcastUser(recipientId, { type: "dm", message: view });
 });

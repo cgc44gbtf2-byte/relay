@@ -539,12 +539,20 @@ export const messagesTable = pgTable("irc_messages", {
   kind: text("kind").notNull().default("message"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   deletedBy: text("deleted_by").references(() => usersTable.clerkId),
+  notificationStatus: text("notification_status").notNull().default("skipped"),
+  notificationRecipientIds: text("notification_recipient_ids").array().default(sql`ARRAY[]::text[]`),
+  notificationAttempts: integer("notification_attempts").notNull().default(0),
+  notificationNextAttemptAt: timestamp("notification_next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  notificationLastError: text("notification_last_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt, table.id),
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
   index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
   index("irc_messages_thread_created_idx").on(table.threadKey, table.createdAt, table.id),
+  index("irc_messages_notification_due_idx")
+    .on(table.notificationNextAttemptAt, table.id)
+    .where(sql`${table.notificationStatus} = 'pending'`),
   foreignKey({
     columns: [table.replyToId],
     foreignColumns: [table.id],

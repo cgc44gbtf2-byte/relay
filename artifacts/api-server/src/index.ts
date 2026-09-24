@@ -4,6 +4,7 @@ import { logger } from "./lib/logger";
 import { wsHub } from "./lib/ws";
 import { startObjectDeletionWorker } from "./lib/object-cleanup";
 import { startAccountDeletionWorker } from "./lib/account-deletion";
+import { startMessageNotificationWorker } from "./lib/message-notification-delivery";
 
 const rawPort = process.env["PORT"];
 
@@ -28,5 +29,6 @@ server.on("error", (err) => {
 server.listen(port, () => {
   startObjectDeletionWorker();
   startAccountDeletionWorker();
+  startMessageNotificationWorker();
   logger.info({ port }, "Server listening");
 });

@@ -8,7 +8,7 @@ import { pool } from "@workspace/db";
 import app from "./app";
 import { TEST_EMAIL_DOMAIN, TEST_USERNAME_PREFIX } from "./admin-test-identity";
 import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
-import { logger } from "./lib/logger";
+import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
 import { hasPermission } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
@@ -10295,10 +10295,7 @@ describe("admin access controls", () => {
     let communityId: number | null = null;
     const triggerName = `fail_message_notification_${randomUUID().replaceAll("-", "")}`;
     const functionName = `${triggerName}_fn`;
-    const warningCalls: Array<{ context: unknown; message: unknown }> = [];
-    const warningMock = mock.method(logger, "warn", ((context: unknown, message?: unknown) => {
-      warningCalls.push({ context, message });
-    }) as typeof logger.warn);
+    let failureTriggerInstalled = false;
 
     try {
       const [senderProfile, recipientProfile] = await Promise.all([
@@ -10361,6 +10358,7 @@ describe("admin access controls", () => {
          BEFORE INSERT ON irc_notifications
          FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
       );
+      failureTriggerInstalled = true;
 
       const channelBody = `Channel delivery survives @${recipientUsername}`;
       const directBody = "Direct delivery survives notification failure";
@@ -10392,40 +10390,89 @@ describe("admin access controls", () => {
         "notification failure details must not be returned to the sender",
       );
 
-      const hasLoggedFailure = (expectedMessage: string, expectedId: string): boolean => (
-        warningCalls.some(({ context, message }) => (
-          message === expectedMessage
-          && typeof context === "object"
-          && context !== null
-          && "messageId" in context
-          && context.messageId === expectedId
-          && "err" in context
-          && context.err !== undefined
-        ))
+      const deliveryState = async () => pool.query<{
+        id: string;
+        notification_status: string;
+        notification_attempts: number;
+        notification_last_error: string | null;
+        notification_recipient_ids: string[];
+      }>(
+        `SELECT id, notification_status, notification_attempts, notification_last_error,
+                notification_recipient_ids
+         FROM irc_messages
+         WHERE id = ANY($1::uuid[])
+         ORDER BY id`,
+        [messageIds],
       );
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(interval);
-          reject(new Error("Timed out waiting for notification failures to be logged."));
-        }, 5_000);
-        const interval = setInterval(() => {
-          if (
-            !hasLoggedFailure("Message mention notifications failed.", (channelMessage.body as { id: string }).id)
-            || !hasLoggedFailure("Direct-message notification failed.", (directMessage.body as { id: string }).id)
-          ) return;
-          clearTimeout(timeout);
-          clearInterval(interval);
-          resolve();
-        }, 10);
-      });
-      assert.equal(
-        hasLoggedFailure("Message mention notifications failed.", (channelMessage.body as { id: string }).id),
-        true,
+      const notifications = async () => pool.query<{ entity_id: string; count: number }>(
+        `SELECT entity_id, count(*)::int AS count
+         FROM irc_notifications
+         WHERE type IN ('mention', 'direct_message')
+           AND entity_type = 'message'
+           AND entity_id = ANY($1::text[])
+         GROUP BY entity_id
+         ORDER BY entity_id`,
+        [messageIds],
       );
-      assert.equal(
-        hasLoggedFailure("Direct-message notification failed.", (directMessage.body as { id: string }).id),
-        true,
+
+      const pending = await deliveryState();
+      assert.equal(pending.rowCount, 2);
+      assert.ok(pending.rows.every((row) => (
+        row.notification_status === "pending"
+        && row.notification_attempts === 0
+        && row.notification_last_error === null
+        && row.notification_recipient_ids.length === 1
+        && row.notification_recipient_ids[0] === recipientSession.userId
+      )));
+      assert.equal((await notifications()).rowCount, 0);
+
+      const failedPass = await processMessageNotificationDeliveries({ batchSize: 2 });
+      assert.deepEqual(failedPass, { processed: 2, delivered: 0, skipped: 0, failed: 2 });
+      const afterFailure = await deliveryState();
+      assert.ok(afterFailure.rows.every((row) => (
+        row.notification_status === "pending"
+        && row.notification_attempts === 1
+        && row.notification_last_error === "sqlstate:P0001"
+      )));
+      assert.equal((await notifications()).rowCount, 0, "a failed fanout must leave no partial notifications");
+
+      await pool.query(`DROP TRIGGER "${triggerName}" ON irc_notifications`);
+      failureTriggerInstalled = false;
+      await pool.query(
+        `UPDATE irc_messages
+         SET notification_next_attempt_at = now()
+         WHERE id = ANY($1::uuid[])`,
+        [messageIds],
       );
+
+      const concurrentPasses = await Promise.all([
+        processMessageNotificationDeliveries({ batchSize: 1 }),
+        processMessageNotificationDeliveries({ batchSize: 1 }),
+      ]);
+      assert.deepEqual(
+        concurrentPasses.map(({ processed, delivered, skipped, failed }) => ({ processed, delivered, skipped, failed })),
+        [
+          { processed: 1, delivered: 1, skipped: 0, failed: 0 },
+          { processed: 1, delivered: 1, skipped: 0, failed: 0 },
+        ],
+      );
+      const delivered = await deliveryState();
+      assert.ok(delivered.rows.every((row) => (
+        row.notification_status === "delivered"
+        && row.notification_attempts === 1
+        && row.notification_last_error === null
+      )));
+      const deliveredNotifications = await notifications();
+      assert.deepEqual(
+        deliveredNotifications.rows,
+        [...messageIds].sort().map((entity_id) => ({ entity_id, count: 1 })),
+      );
+
+      assert.deepEqual(
+        await processMessageNotificationDeliveries({ batchSize: 2 }),
+        { processed: 0, delivered: 0, skipped: 0, failed: 0 },
+      );
+      assert.deepEqual((await notifications()).rows, deliveredNotifications.rows);
 
       const [channelHistory, directHistory] = await Promise.all([
         apiRequest(senderSession, `/channels/${channelId}/messages`),
@@ -10444,8 +10491,9 @@ describe("admin access controls", () => {
           .some(({ id, body }) => id === (directMessage.body as { id: string }).id && body === directBody),
       );
     } finally {
-      warningMock.mock.restore();
-      await pool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON irc_notifications`);
+      if (failureTriggerInstalled) {
+        await pool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON irc_notifications`);
+      }
       await pool.query(`DROP FUNCTION IF EXISTS "${functionName}"()`);
       if (messageIds.length) {
         await pool.query("DELETE FROM irc_messages WHERE id = ANY($1::uuid[])", [messageIds]);
