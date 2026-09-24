@@ -5770,6 +5770,93 @@ describe("admin access controls", () => {
     }
   });
 
+  test("keeps public channel history and live access after leaving", async () => {
+    const ownerSession = await createTestSession("leave_public_owner");
+    const memberSession = await createTestSession("leave_public_member");
+    const channelIds: number[] = [];
+    const sockets: WebSocket[] = [];
+
+    try {
+      const createChannel = await apiRequest(ownerSession, "/channels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `leave-public-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Public access after leaving",
+        }),
+      });
+      assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
+      assert.ok(createChannel.body && typeof createChannel.body === "object");
+      const channelId = (createChannel.body as { id?: unknown }).id;
+      assert.equal(typeof channelId, "number");
+      channelIds.push(channelId as number);
+
+      const join = await apiRequest(memberSession, `/channels/${channelId}/join`, {
+        method: "POST",
+      });
+      assert.equal(join.status, 200, JSON.stringify(join));
+      assert.deepEqual(join.body, { ok: true, status: "member" });
+
+      const initialMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Public history remains available." }),
+        },
+      );
+      assert.equal(initialMessage.status, 201, JSON.stringify(initialMessage));
+
+      const existingSocket = await openWebSocket(memberSession);
+      sockets.push(existingSocket);
+      existingSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const leave = await apiRequest(memberSession, `/channels/${channelId}/leave`, {
+        method: "POST",
+      });
+      assert.equal(leave.status, 200, JSON.stringify(leave));
+      assert.deepEqual(leave.body, { ok: true });
+
+      const history = await apiRequest(memberSession, `/channels/${channelId}/messages`);
+      assert.equal(history.status, 200, JSON.stringify(history));
+      assert.ok(history.body && typeof history.body === "object");
+      const messages = (history.body as { messages?: unknown }).messages;
+      assert.ok(Array.isArray(messages));
+      assert.deepEqual(
+        messages.map((message) => (message as { body?: unknown }).body),
+        ["Public history remains available."],
+      );
+
+      const postLeaveSocket = await openWebSocket(memberSession);
+      sockets.push(postLeaveSocket);
+      postLeaveSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const liveEvent = (event: Record<string, unknown>): boolean =>
+        event.type === "message" &&
+        Boolean(event.message) &&
+        (event.message as { channelId?: unknown }).channelId === channelId;
+      const existingSubscriptionEvent = waitForWebSocketEvent(existingSocket, liveEvent);
+      const newSubscriptionEvent = waitForWebSocketEvent(postLeaveSocket, liveEvent);
+      const liveMessage = await apiRequest(
+        ownerSession,
+        `/channels/${channelId}/messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Public live events remain available." }),
+        },
+      );
+      assert.equal(liveMessage.status, 201, JSON.stringify(liveMessage));
+      await Promise.all([existingSubscriptionEvent, newSubscriptionEvent]);
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      await removeTestChannels(channelIds, [ownerSession.userId, memberSession.userId]);
+    }
+  });
+
   test("revokes private-room access after leaving and requires approval again to rejoin", async () => {
     const ownerSession = await createTestSession("leave_owner");
     const memberSession = await createTestSession("leave_member");

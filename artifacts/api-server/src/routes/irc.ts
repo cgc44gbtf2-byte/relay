@@ -904,7 +904,7 @@ router.post("/channels/:channelId/leave", requireAuth, async (req: Authenticated
       eq(channelJoinRequestsTable.userId, userId),
     ));
   });
-  wsHub.revokeChannelAccess(channel.id, userId);
+  if (channel.isPrivate) wsHub.revokeChannelAccess(channel.id, userId);
   wsHub.broadcastChannel(channel.id, {
     type: "presence",
     eventId: randomUUID(),
