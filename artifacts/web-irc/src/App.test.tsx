@@ -91,7 +91,7 @@ describe("channel category organization", () => {
       { id: 31, name: "Project room", description: "", communityId: 13, communityName: "Workspace 13", communityOwnerId: "owner-1" },
       { id: 32, name: "Another workspace", description: "", communityId: 14, communityName: "Workspace 14", communityOwnerId: "owner-2" },
     ];
-    const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
+    const { rerender } = render(<AdminChannelRoomOrganizer channels={[channel]} categories={categories} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-organize-channel"), { target: { value: "7" } });
     const select = await screen.findByTestId("select-public-space");
     expect(select.querySelector('option[value="31"]')).not.toBeNull();
@@ -110,6 +110,8 @@ describe("channel category organization", () => {
     const detail = {
       community: { id: 7 },
       canManage: false,
+      channels: [{ id: 7, name: "#team", categoryId: null }],
+      categories: [{ id: 31, name: "Project room" }],
     } as Parameters<typeof DocumentCenter>[0]["detail"];
     const { rerender } = render(<WorkspaceChannelOrganizer detail={detail} working={false} onMove={onMove} />);
     fireEvent.change(screen.getByTestId("select-workspace-channel"), { target: { value: "7" } });
@@ -430,62 +432,6 @@ describe("deleted room recovery", () => {
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ communityId: 41 }) }));
     expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Current workspace: Mira's community");
     expect(screen.getByText("stale history")).toBeTruthy();
-  });
-
-  it("shows the current workspace as rooms change and distinguishes direct messages", async () => {
-    await renderChat({
-      missingRequest: "send",
-      fallbackChannels: [
-        { ...room(2, "#fallback-room"), communityId: 12, communityName: "Northwind" },
-        { ...room(3, "#support"), communityId: 13, communityName: "Bluebird" },
-      ],
-    });
-    expect(screen.getByTestId("workspace-indicator").getAttribute("aria-label")).toBe("Public network, outside a workspace");
-
-    const editor = screen.getByPlaceholderText("message #deleted-room");
-      fireEvent.change(editor, { target: { value: "hello" } });
-      fireEvent.submit(editor.closest("form")!);
-    } else if (missingRequest === "topic") {
-      await waitFor(() => expect(screen.getByRole("button", { name: "Edit channel topic" })).toBeTruthy());
-      fireEvent.click(screen.getByRole("button", { name: "Edit channel topic" }));
-    }
-
-    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    await waitFor(() => expect(screen.queryByText("stale history")).toBeNull());
-    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
-    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
-  });
-
-  it("loads chat when notifications are temporarily unavailable", async () => {
-    await renderChat({
-      missingRequest: "event",
-      fallbackChannels: [room(2, "#fallback-room")],
-      notificationsFailure: true,
-    });
-
-    expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy();
-    expect(await screen.findByText("stale history")).toBeTruthy();
-  });
-
-  it("keeps a sent message visible when notifications are unavailable", async () => {
-    await renderChat({
-      missingRequest: "event",
-      fallbackChannels: [room(2, "#fallback-room")],
-      notificationsFailure: true,
-    });
-
-    const editor = screen.getByPlaceholderText("message #deleted-room");
-      fireEvent.change(editor, { target: { value: "hello" } });
-      fireEvent.submit(editor.closest("form")!);
-    } else if (missingRequest === "topic") {
-      await waitFor(() => expect(screen.getByRole("button", { name: "Edit channel topic" })).toBeTruthy());
-      fireEvent.click(screen.getByRole("button", { name: "Edit channel topic" }));
-    }
-
-    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
-    await waitFor(() => expect(screen.queryByText("stale history")).toBeNull());
-    await waitFor(() => expect(screen.getByText("the room is quiet")).toBeTruthy());
-    expect(screen.getByRole("button", { name: /fallback-room/i }).classList.contains("bg-sidebar-accent")).toBe(true);
   });
 
   it("loads chat when notifications are temporarily unavailable", async () => {
