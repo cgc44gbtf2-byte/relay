@@ -5062,6 +5062,122 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back custom-role edits and retirement when audit logging fails", async () => {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const triggerName = `fail_custom_role_change_audit_${suffix}`;
+    const functionName = `fail_custom_role_change_audit_fn_${suffix}`;
+    const roleKeys: string[] = [];
+    const genericAdminError = {
+      error: "An unexpected error occurred while processing the admin request.",
+    };
+    const request = (path: string, method: string, body?: object) => apiRequest(adminSession, path, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    try {
+      const originalRole = {
+        label: `Original Role ${suffix}`,
+        description: "Original role description",
+        scopeType: "community",
+        permissions: ["view_business"],
+      };
+      const editCreated = await request("/admin/custom-roles", "POST", originalRole);
+      assert.equal(editCreated.status, 201, JSON.stringify(editCreated));
+      const editKey = (editCreated.body as { key: string }).key;
+      roleKeys.push(editKey);
+
+      const retireCreated = await request("/admin/custom-roles", "POST", {
+        ...originalRole,
+        label: `Retirement Role ${suffix}`,
+      });
+      assert.equal(retireCreated.status, 201, JSON.stringify(retireCreated));
+      const retireKey = (retireCreated.body as { key: string }).key;
+      roleKeys.push(retireKey);
+
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF (NEW.action = 'updated_custom_role' AND NEW.target_id = '${editKey}')
+              OR (NEW.action = 'retired_custom_role' AND NEW.target_id = '${retireKey}') THEN
+             RAISE EXCEPTION 'forced custom-role change audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;
+         CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+
+      const editResponse = await request(`/admin/custom-roles/${editKey}`, "PATCH", {
+        label: `Changed Role ${suffix}`,
+        description: "Changed description",
+        scopeType: "channel",
+        permissions: ["create_channel"],
+      });
+      assert.equal(editResponse.status, 500, JSON.stringify(editResponse));
+      assert.deepEqual(editResponse.body, genericAdminError);
+
+      const [roleState, permissions, editAudits] = await Promise.all([
+        pool.query<{ label: string; description: string; scope_type: string; is_active: boolean }>(
+          `SELECT label, description, scope_type, is_active
+           FROM irc_custom_roles WHERE key = $1`,
+          [editKey],
+        ),
+        pool.query<{ key: string }>(
+          `SELECT definitions.key
+           FROM irc_role_permissions AS links
+           JOIN irc_permission_definitions AS definitions ON definitions.id = links.permission_id
+           WHERE links.role = $1
+           ORDER BY definitions.key`,
+          [editKey],
+        ),
+        pool.query(
+          "SELECT id FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'updated_custom_role'",
+          [editKey],
+        ),
+      ]);
+      assert.deepEqual(roleState.rows, [{
+        label: originalRole.label,
+        description: originalRole.description,
+        scope_type: originalRole.scopeType,
+        is_active: true,
+      }]);
+      assert.deepEqual(permissions.rows.map(({ key }) => key), originalRole.permissions);
+      assert.equal(editAudits.rowCount, 0);
+
+      const retireResponse = await request(`/admin/custom-roles/${retireKey}`, "DELETE");
+      assert.equal(retireResponse.status, 500, JSON.stringify(retireResponse));
+      assert.deepEqual(retireResponse.body, genericAdminError);
+
+      const [retireState, retireAudits] = await Promise.all([
+        pool.query<{ is_active: boolean }>(
+          "SELECT is_active FROM irc_custom_roles WHERE key = $1",
+          [retireKey],
+        ),
+        pool.query(
+          "SELECT id FROM irc_admin_audit_logs WHERE target_id = $1 AND action = 'retired_custom_role'",
+          [retireKey],
+        ),
+      ]);
+      assert.deepEqual(retireState.rows, [{ is_active: true }]);
+      assert.equal(retireAudits.rowCount, 0);
+    } finally {
+      await pool.query(
+        `DROP TRIGGER IF EXISTS "${triggerName}" ON irc_admin_audit_logs;
+         DROP FUNCTION IF EXISTS "${functionName}"();`,
+      );
+      if (roleKeys.length) {
+        await pool.query("DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])", [roleKeys]);
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE target_id = ANY($1::text[])", [roleKeys]);
+        await pool.query("DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])", [roleKeys]);
+      }
+    }
+  });
+
   test("creates, edits, assigns, and retires custom roles with scoped authority and audit history", async () => {
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const communityIds: number[] = [];
