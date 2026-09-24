@@ -47,9 +47,9 @@ pnpm run db:migrate:release:baseline
 ```
 
 Baselining records history only; it applies no SQL. Never use it to skip an
-unverified migration. After baselining, run
-`pnpm run db:migrate:release:check` and use `pnpm run release:start` for future
-deployments.
+unverified migration. After baselining, run the read-only
+`pnpm run db:migrate:release:check` command and use `pnpm run release:start` for
+future deployments.
 
 CI can validate the reviewed migration set without a database:
 
