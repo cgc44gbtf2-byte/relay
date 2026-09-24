@@ -11,7 +11,12 @@ import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
 import { sendCommunitySubscriptionReminders } from "./lib/community-subscription-reminders";
 import { finishInvitationSend } from "./lib/invitation-delivery";
-import { ensurePermissionCatalog, hasPermission } from "./lib/permissions";
+import {
+  ensurePermissionCatalog,
+  evaluateCommunityPermissions,
+  hasPermission,
+  type CommunityPermissionOperation,
+} from "./lib/permissions";
 import { wsHub } from "./lib/ws";
 
 type TestSession = {
@@ -5515,6 +5520,130 @@ describe("admin access controls", () => {
       await pool.query("DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])", [customRoles]);
       await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
     }
+  });
+
+  test("keeps permission evaluation work bounded as custom roles span many communities", () => {
+    const communityIds = Array.from(
+      { length: 120 },
+      (_, index) => 20_000 + index,
+    );
+    const assignments: Array<{
+      role: string;
+      scopeType: string;
+      communityId: number | null;
+    }> = [
+      {
+        role: "custom_global_permission",
+        scopeType: "platform",
+        communityId: null,
+      },
+      {
+        role: "community_admin",
+        scopeType: "community",
+        communityId: communityIds[0],
+      },
+    ];
+    const customPermissionRows: Array<{
+      role: string;
+      scopeType: string;
+      key: string;
+    }> = [
+      {
+        role: "custom_global_permission",
+        scopeType: "platform",
+        key: "manage_channel",
+      },
+    ];
+
+    for (const [index, communityId] of communityIds.entries()) {
+      const role = `custom_community_permission_${index}`;
+      const permission =
+        index % 2 === 0 ? "view_business" : "manage_community";
+      assignments.push({ role, scopeType: "community", communityId });
+      customPermissionRows.push({ role, scopeType: "community", key: permission });
+    }
+    for (let index = 0; index < communityIds.length; index += 1) {
+      const role = `custom_unrelated_permission_${index}`;
+      assignments.push({
+        role,
+        scopeType: "community",
+        communityId: 30_000 + index,
+      });
+      customPermissionRows.push({
+        role,
+        scopeType: "community",
+        key: "view_business",
+      });
+    }
+    for (const scopeType of ["category", "department", "channel"]) {
+      const role = `custom_${scopeType}_permission`;
+      assignments.push({
+        role,
+        scopeType,
+        communityId: communityIds[0],
+      });
+      customPermissionRows.push({
+        role,
+        scopeType,
+        key: "delete_message",
+      });
+    }
+
+    const operations: Record<CommunityPermissionOperation, number> = {
+      "assignment-index": 0,
+      "custom-permission-index": 0,
+      "assignment-candidate": 0,
+      "custom-permission-lookup": 0,
+    };
+    const result = evaluateCommunityPermissions(
+      "community_admin",
+      communityIds,
+      assignments,
+      customPermissionRows,
+      [
+        "create_channel",
+        "delete_message",
+        "manage_channel",
+        "view_business",
+        "manage_community",
+      ],
+      (operation) => {
+        operations[operation] += 1;
+      },
+    );
+
+    assert.equal(result.size, communityIds.length);
+    for (const [index, communityId] of communityIds.entries()) {
+      const permissions = result.get(communityId);
+      assert.ok(permissions);
+      assert.equal(
+        permissions.has("manage_channel"),
+        true,
+        "platform grants apply to every community",
+      );
+      assert.equal(
+        permissions.has("create_channel"),
+        index === 0,
+        "the primary community role stays scoped",
+      );
+      assert.equal(
+        permissions.has("delete_message"),
+        false,
+        "category, department, and channel grants do not become community grants",
+      );
+      assert.equal(permissions.has("view_business"), index % 2 === 0);
+      assert.equal(
+        permissions.has("manage_community"),
+        index === 0 || index % 2 === 1,
+        "community role permissions do not leak to neighboring scopes",
+      );
+    }
+    assert.deepEqual(operations, {
+      "assignment-index": 245,
+      "custom-permission-index": 244,
+      "assignment-candidate": 122,
+      "custom-permission-lookup": 122,
+    });
   });
 
   test("rolls back custom-role creation when audit logging fails", async () => {

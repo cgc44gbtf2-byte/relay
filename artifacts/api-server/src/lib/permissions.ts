@@ -315,6 +315,149 @@ function assignmentMatches(assignment: Assignment, scope: PermissionScope): bool
   return false;
 }
 
+export type CommunityPermissionAssignment = Pick<
+  Assignment,
+  "role" | "scopeType" | "communityId"
+>;
+export type CommunityPermissionRow = {
+  role: string;
+  scopeType: string;
+  key: string;
+};
+export type CommunityPermissionOperation =
+  | "assignment-index"
+  | "custom-permission-index"
+  | "assignment-candidate"
+  | "custom-permission-lookup";
+
+export function evaluateCommunityPermissions(
+  profileRole: string,
+  communityIds: readonly number[],
+  assignments: readonly CommunityPermissionAssignment[],
+  customPermissionRows: readonly CommunityPermissionRow[],
+  requestedPermissions: readonly PermissionKey[],
+  observeOperation?: (operation: CommunityPermissionOperation) => void,
+): Map<number, Set<PermissionKey>> {
+  const result = new Map<number, Set<PermissionKey>>(
+    communityIds.map((communityId) => [communityId, new Set<PermissionKey>()]),
+  );
+  const requested = new Set(requestedPermissions);
+  if (!communityIds.length || !requested.size) return result;
+
+  if (profileRole === "admin") {
+    for (const permissions of result.values()) {
+      for (const permission of requested) permissions.add(permission);
+    }
+    return result;
+  }
+
+  const addRolePermissions = (
+    permissions: Set<PermissionKey>,
+    role: string,
+  ): void => {
+    if (role in ROLE_PERMISSIONS) {
+      for (const permission of ROLE_PERMISSIONS[role as AuthorizationRole]) {
+        if (requested.has(permission)) permissions.add(permission);
+      }
+    }
+  };
+  const customPermissionsByRoleScope = new Map<
+    string,
+    Map<string, Set<PermissionKey>>
+  >();
+  for (const row of customPermissionRows) {
+    observeOperation?.("custom-permission-index");
+    if (!requested.has(row.key as PermissionKey)) continue;
+    let permissionsByScope = customPermissionsByRoleScope.get(row.role);
+    if (!permissionsByScope) {
+      permissionsByScope = new Map();
+      customPermissionsByRoleScope.set(row.role, permissionsByScope);
+    }
+    let permissions = permissionsByScope.get(row.scopeType);
+    if (!permissions) {
+      permissions = new Set();
+      permissionsByScope.set(row.scopeType, permissions);
+    }
+    permissions.add(row.key as PermissionKey);
+  }
+
+  const requestedCommunityIds = new Set(communityIds);
+  const platformAssignments: CommunityPermissionAssignment[] = [];
+  const assignmentsByCommunity = new Map<
+    number,
+    CommunityPermissionAssignment[]
+  >();
+  let primaryAssignment: CommunityPermissionAssignment | undefined;
+  for (const assignment of assignments) {
+    observeOperation?.("assignment-index");
+    if (primaryAssignment === undefined && assignment.role === profileRole) {
+      primaryAssignment = assignment;
+    }
+    if (assignment.scopeType === "platform") {
+      platformAssignments.push(assignment);
+    } else if (
+      assignment.scopeType === "community"
+      && assignment.communityId !== null
+      && requestedCommunityIds.has(assignment.communityId)
+    ) {
+      const scopedAssignments =
+        assignmentsByCommunity.get(assignment.communityId) ?? [];
+      scopedAssignments.push(assignment);
+      assignmentsByCommunity.set(assignment.communityId, scopedAssignments);
+    }
+  }
+
+  const addAssignmentPermissions = (
+    permissions: Set<PermissionKey>,
+    assignment: CommunityPermissionAssignment,
+  ): void => {
+    observeOperation?.("custom-permission-lookup");
+    addRolePermissions(permissions, assignment.role);
+    const customPermissions = customPermissionsByRoleScope
+      .get(assignment.role)
+      ?.get(assignment.scopeType);
+    if (customPermissions) {
+      for (const permission of customPermissions) permissions.add(permission);
+    }
+  };
+
+  const globalPermissions = new Set<PermissionKey>();
+  if (profileRole === "platform_moderator" || profileRole === "moderator") {
+    addRolePermissions(globalPermissions, profileRole);
+  }
+  if (
+    PRIMARY_ROLES.includes(profileRole as PrimaryRole) &&
+    profileRole !== "community_admin"
+  ) {
+    addRolePermissions(globalPermissions, profileRole);
+  }
+  for (const assignment of platformAssignments) {
+    observeOperation?.("assignment-candidate");
+    addAssignmentPermissions(globalPermissions, assignment);
+  }
+
+  for (const communityId of communityIds) {
+    const permissions = new Set(globalPermissions);
+    if (
+      profileRole === "community_admin" &&
+      primaryAssignment &&
+      (primaryAssignment.scopeType === "platform" ||
+        (primaryAssignment.scopeType === "community" &&
+          primaryAssignment.communityId === communityId))
+    ) {
+      addRolePermissions(permissions, profileRole);
+    }
+
+    for (const assignment of assignmentsByCommunity.get(communityId) ?? []) {
+      observeOperation?.("assignment-candidate");
+      addAssignmentPermissions(permissions, assignment);
+    }
+    result.set(communityId, permissions);
+  }
+
+  return result;
+}
+
 function roleAllows(role: string, permission: PermissionKey): boolean {
   return role in ROLE_PERMISSIONS && ROLE_PERMISSIONS[role as AuthorizationRole].includes(permission);
 }
@@ -427,9 +570,13 @@ export async function permissionsForCommunities(
     return result;
   }
 
-  const customRoleNames = assignments
-    .map((assignment) => assignment.role)
-    .filter((role) => !(role in ROLE_PERMISSIONS));
+  const customRoleNames = [
+    ...new Set(
+      assignments
+        .map((assignment) => assignment.role)
+        .filter((role) => !(role in ROLE_PERMISSIONS)),
+    ),
+  ];
   const customPermissionRows = customRoleNames.length
     ? await db.select({
       role: rolePermissionsTable.role,
@@ -440,39 +587,13 @@ export async function permissionsForCommunities(
       .innerJoin(customRolesTable, and(eq(customRolesTable.key, rolePermissionsTable.role), eq(customRolesTable.isActive, true)))
       .where(inArray(rolePermissionsTable.role, customRoleNames))
     : [];
-  const customPermissionsByRole = new Map<string, Set<PermissionKey>>();
-  for (const row of customPermissionRows) {
-    if (!requested.has(row.key as PermissionKey)) continue;
-    const permissions = customPermissionsByRole.get(row.role) ?? new Set<PermissionKey>();
-    permissions.add(row.key as PermissionKey);
-    customPermissionsByRole.set(row.role, permissions);
-  }
-
-  for (const communityId of communityIds) {
-    const permissions = result.get(communityId);
-    if (!permissions) continue;
-
-    if (["platform_moderator", "moderator"].includes(profile.role)) {
-      addRolePermissions(permissions, profile.role);
-    }
-
-    if (PRIMARY_ROLES.includes(profile.role as PrimaryRole)) {
-      const primaryAssignment = assignments.find((assignment) => assignment.role === profile.role);
-      if (profile.role !== "community_admin" || (primaryAssignment && assignmentMatches(primaryAssignment, { communityId }))) {
-        addRolePermissions(permissions, profile.role);
-      }
-    }
-
-    for (const assignment of assignments) {
-      if (!assignmentMatches(assignment, { communityId })) continue;
-      addRolePermissions(permissions, assignment.role);
-      if (customPermissionRows.some((row) => row.role === assignment.role && row.scopeType === assignment.scopeType)) {
-        for (const permission of customPermissionsByRole.get(assignment.role) ?? []) permissions.add(permission);
-      }
-    }
-  }
-
-  return result;
+  return evaluateCommunityPermissions(
+    profile.role,
+    communityIds,
+    assignments,
+    customPermissionRows,
+    requestedPermissions,
+  );
 }
 
 export async function permissionsForUser(userId: string): Promise<{
