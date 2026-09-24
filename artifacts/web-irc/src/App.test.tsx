@@ -308,7 +308,8 @@ function installApi({
   denyHistoryAfterFirst = false,
   dmPaginationFailureOnce = false,
   joinFailureOnce = false,
-  autoJoinDeniedOnce = false,
+  deniedJoinAttempts = 0,
+  fallbackChannelsAfterDeniedJoin,
   denyFallbackHistoryUntilJoined = false,
   createChannelFailureOnce = false,
   fallbackJoined = true,
@@ -340,7 +341,8 @@ function installApi({
   denyHistoryAfterFirst?: boolean;
   dmPaginationFailureOnce?: boolean;
   joinFailureOnce?: boolean;
-  autoJoinDeniedOnce?: boolean;
+  deniedJoinAttempts?: number;
+  fallbackChannelsAfterDeniedJoin?: Channel[];
   denyFallbackHistoryUntilJoined?: boolean;
   createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
@@ -431,7 +433,10 @@ function installApi({
       if (recoveryChannelFailureOnce && channelListCalls === 2) return jsonResponse({ error: "Channel list is temporarily unavailable." }, 503);
       if (recoveryChannelsResponse && channelListCalls === 2) return recoveryChannelsResponse;
       const initialCall = channelFailureOnce ? 2 : 1;
-      return jsonResponse(channelListCalls === initialCall ? [deleted, fallback] : fallbackChannels);
+      const availableChannels = joinCalls >= 2 && fallbackChannelsAfterDeniedJoin
+        ? fallbackChannelsAfterDeniedJoin
+        : fallbackChannels;
+      return jsonResponse(channelListCalls === initialCall ? [deleted, fallback] : availableChannels);
     }
     if (url === "/api/channels" && method === "POST") {
       createChannelCalls += 1;
@@ -494,8 +499,11 @@ function installApi({
     }
     if (url === "/api/channels/2/join" && method === "POST") {
       joinCalls += 1;
-      if (autoJoinDeniedOnce && joinCalls === 1) {
-        return jsonResponse({ error: "You are not allowed to join this room." }, 403);
+      if (joinCalls <= deniedJoinAttempts) {
+        return jsonResponse({
+          error: "You are not allowed to join this room.",
+          code: "CHANNEL_ACCESS_REQUIRED",
+        }, 403);
       }
       if (joinFailureOnce && joinCalls === 1) return jsonResponse({ error: "join temporarily unavailable" }, 500);
       fallbackAccessGranted = true;
@@ -1098,7 +1106,7 @@ describe("deleted room recovery", () => {
       missingRequest: "history",
       fallbackChannels: [{ ...room(2, "#fallback-room"), joined: false, accessStatus: "available" }],
       fallbackJoined: false,
-      autoJoinDeniedOnce: true,
+      deniedJoinAttempts: 1,
       denyFallbackHistoryUntilJoined: true,
     });
 
@@ -1114,6 +1122,40 @@ describe("deleted room recovery", () => {
 
     fireEvent.click(within(screen.getByTestId("recovery-room-picker")).getByRole("button", { name: /fallback-room/i }));
     expect(await screen.findByRole("heading", { name: "#fallback-room" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps room choices available after both automatic recovery and a manual join are denied", async () => {
+    await renderChat({
+      missingRequest: "history",
+      fallbackChannels: [{ ...room(2, "#fallback-room"), joined: false, accessStatus: "available" }],
+      fallbackJoined: false,
+      deniedJoinAttempts: 2,
+      denyFallbackHistoryUntilJoined: true,
+      fallbackChannelsAfterDeniedJoin: [
+        { ...room(2, "#fallback-room"), joined: false, accessStatus: "available" },
+        room(3, "#other-room"),
+      ],
+    });
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Could not restore #fallback-room: You are not allowed to join this room. Choose another room, or select #fallback-room in the channel list to try joining again.",
+    );
+    const roomPicker = screen.getByTestId("recovery-room-picker");
+    fireEvent.click(within(roomPicker).getByRole("button", { name: /fallback-room/i }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Could not join #fallback-room: You are not allowed to join this room. Choose another room, or try again.",
+    );
+    expect(within(screen.getByTestId("recovery-room-picker")).getByRole("button", { name: /other-room/i })).toBeTruthy();
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) =>
+      String(url) === "/api/channels/2/join" && init?.method === "POST",
+    )).toHaveLength(2);
+
+    fireEvent.click(within(screen.getByTestId("recovery-room-picker")).getByRole("button", { name: /other-room/i }));
+    expect(await screen.findByRole("heading", { name: "#other-room" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
