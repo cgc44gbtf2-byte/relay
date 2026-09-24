@@ -1524,7 +1524,193 @@ describe("admin access controls", () => {
     }
   });
 
-  test("repairs a published release whose announcement was deleted", async () => {
+  test("keeps release announcements hidden until approved and notifies each account once", async () => {
+    const version = `test-${randomUUID().slice(0, 8)}`;
+    const title = `Approval-gated release ${randomUUID().slice(0, 8)}`;
+    const notes = `Approved release notes ${randomUUID()}`;
+    let releaseId: number | null = null;
+    let announcementId: number | null = null;
+    const jsonHeaders = { "content-type": "application/json" };
+    const setReleaseStatus = (status: string) => apiRequest(
+      adminSession,
+      `/developer/releases/${releaseId}/status`,
+      { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ status }) },
+    );
+    const publishAnnouncement = () => apiRequest(
+      adminSession,
+      `/developer/releases/${releaseId}/announcement`,
+      { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ status: "published" }) },
+    );
+
+    try {
+      const created = await apiRequest(adminSession, "/developer/releases", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ version, title, notes }),
+      });
+      assert.equal(created.status, 201, JSON.stringify(created));
+      releaseId = (created.body as { id: number }).id;
+
+      const invalidReleaseTransition = await setReleaseStatus("published");
+      assert.equal(invalidReleaseTransition.status, 400);
+      assert.deepEqual(invalidReleaseTransition.body, {
+        error: "A draft release cannot move to published.",
+      });
+      const prematureAnnouncement = await publishAnnouncement();
+      assert.equal(prematureAnnouncement.status, 400);
+      assert.deepEqual(prematureAnnouncement.body, {
+        error: "Publish the release before publishing its announcement.",
+      });
+
+      const review = await setReleaseStatus("review");
+      assert.equal(review.status, 200, JSON.stringify(review));
+      const publishedRelease = await setReleaseStatus("published");
+      assert.equal(publishedRelease.status, 200, JSON.stringify(publishedRelease));
+      announcementId = (publishedRelease.body as { announcementId: number }).announcementId;
+      assert.equal(typeof announcementId, "number");
+
+      const linkedRows = await pool.query<{
+        status: string;
+        announcement_id: number;
+        announcement_status: string;
+        community_id: number | null;
+      }>(
+        `SELECT r.status, r.announcement_id, a.status AS announcement_status, a.community_id
+         FROM irc_developer_releases r
+         JOIN irc_server_announcements a ON a.id = r.announcement_id
+         WHERE r.id = $1`,
+        [releaseId],
+      );
+      assert.deepEqual(linkedRows.rows, [{
+        status: "published",
+        announcement_id: announcementId,
+        announcement_status: "draft",
+        community_id: null,
+      }]);
+      const matchingDrafts = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM irc_server_announcements
+         WHERE id = $1 AND status = 'draft' AND community_id IS NULL`,
+        [announcementId],
+      );
+      assert.deepEqual(matchingDrafts.rows, [{ count: 1 }]);
+
+      const feedBeforeApproval = await apiRequest(memberSession, "/announcements");
+      assert.equal(feedBeforeApproval.status, 200, JSON.stringify(feedBeforeApproval));
+      assert.ok(Array.isArray(feedBeforeApproval.body));
+      assert.equal(
+        (feedBeforeApproval.body as Array<{ id?: unknown }>).some((item) => item.id === announcementId),
+        false,
+      );
+
+      const approved = await publishAnnouncement();
+      assert.equal(approved.status, 200, JSON.stringify(approved));
+      assert.equal(
+        (approved.body as { announcement?: { id?: unknown; status?: unknown } }).announcement?.status,
+        "published",
+      );
+
+      const feedAfterApproval = await apiRequest(memberSession, "/announcements");
+      assert.equal(feedAfterApproval.status, 200, JSON.stringify(feedAfterApproval));
+      assert.ok(Array.isArray(feedAfterApproval.body));
+      assert.ok(
+        (feedAfterApproval.body as Array<{ body?: unknown }>).some((item) => item.body === notes),
+        "published global release announcement should appear in a regular user's feed",
+      );
+
+      const accountRows = await pool.query<{ clerk_id: string }>(
+        "SELECT clerk_id FROM irc_users ORDER BY clerk_id",
+      );
+      const notificationRows = await pool.query<{ user_id: string; count: number }>(
+        `SELECT user_id, count(*)::int AS count
+         FROM irc_notifications
+         WHERE type = 'server_announcement'
+           AND entity_type = 'server_announcement'
+           AND entity_id = $1
+         GROUP BY user_id
+         ORDER BY user_id`,
+        [String(announcementId)],
+      );
+      assert.deepEqual(
+        notificationRows.rows.map(({ user_id }) => user_id),
+        accountRows.rows.map(({ clerk_id }) => clerk_id),
+      );
+      assert.ok(notificationRows.rows.every(({ count }) => count === 1));
+
+      const auditRows = await pool.query<{
+        actor_id: string;
+        action: string;
+        target_id: string;
+        target_label: string;
+        details: string;
+      }>(
+        `SELECT actor_id, action, target_id, target_label, details
+         FROM irc_admin_audit_logs
+         WHERE action = 'published_release_announcement' AND target_id = $1`,
+        [String(announcementId)],
+      );
+      assert.deepEqual(auditRows.rows, [{
+        actor_id: adminSession.userId,
+        action: "published_release_announcement",
+        target_id: String(announcementId),
+        target_label: "release announcement",
+        details: `${version} · ${title}`,
+      }]);
+
+      const duplicateAnnouncementPublish = await publishAnnouncement();
+      assert.equal(duplicateAnnouncementPublish.status, 409);
+      assert.deepEqual(duplicateAnnouncementPublish.body, {
+        error: "A published release announcement cannot be published.",
+      });
+      const duplicateReleasePublish = await setReleaseStatus("published");
+      assert.equal(duplicateReleasePublish.status, 400);
+      assert.deepEqual(duplicateReleasePublish.body, {
+        error: "A published release cannot move to published.",
+      });
+
+      const finalAnnouncementCount = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM irc_server_announcements WHERE id = $1",
+        [announcementId],
+      );
+      assert.deepEqual(finalAnnouncementCount.rows, [{ count: 1 }]);
+      const finalNotificationCount = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM irc_notifications
+         WHERE type = 'server_announcement' AND entity_id = $1`,
+        [String(announcementId)],
+      );
+      assert.deepEqual(finalNotificationCount.rows, [{ count: accountRows.rows.length }]);
+      assert.equal(
+        (await pool.query(
+          `SELECT count(*)::int AS count FROM irc_admin_audit_logs
+           WHERE action = 'published_release_announcement' AND target_id = $1`,
+          [String(announcementId)],
+        )).rows[0]?.count,
+        1,
+      );
+    } finally {
+      if (announcementId !== null) {
+        await pool.query(
+          "DELETE FROM irc_notifications WHERE entity_type = 'server_announcement' AND entity_id = $1",
+          [String(announcementId)],
+        );
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE target_id = $1",
+          [String(announcementId)],
+        );
+      }
+      if (releaseId !== null) {
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE target_id = $1",
+          [String(releaseId)],
+        );
+        await pool.query("DELETE FROM irc_developer_releases WHERE id = $1", [releaseId]);
+      }
+      if (announcementId !== null) {
+        await pool.query("DELETE FROM irc_server_announcements WHERE id = $1", [announcementId]);
+      }
+    }
+  });
+
+  test("repairs a published release whose announcement was deleted without bypassing approval", async () => {
     const version = `test-${randomUUID().slice(0, 8)}`;
     const title = `Missing announcement recovery ${randomUUID().slice(0, 8)}`;
     const notes = `Recovery notes ${randomUUID()}`;
@@ -1592,6 +1778,33 @@ describe("admin access controls", () => {
         announcementId: null,
       });
 
+      const repairedDraft = await apiRequest(
+        adminSession,
+        `/developer/releases/${releaseId}/announcement`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "published" }),
+        },
+      );
+      assert.equal(repairedDraft.status, 409, JSON.stringify(repairedDraft));
+      assert.ok(repairedDraft.body && typeof repairedDraft.body === "object");
+      assert.equal(
+        (repairedDraft.body as { error?: unknown }).error,
+        "The linked announcement draft was missing. A replacement draft was created and must be published separately.",
+      );
+      const restoredBody = repairedDraft.body as {
+        release?: { id?: unknown; status?: unknown; announcementId?: unknown };
+        announcement?: { id?: unknown; status?: unknown; title?: unknown; body?: unknown };
+      };
+      assert.equal(restoredBody.release?.id, releaseId);
+      assert.equal(restoredBody.release?.status, "published");
+      replacementAnnouncementId = restoredBody.announcement?.id as number;
+      assert.equal(typeof replacementAnnouncementId, "number");
+      assert.notEqual(replacementAnnouncementId, draftAnnouncementId);
+      assert.equal(restoredBody.announcement?.status, "draft");
+      assert.equal(restoredBody.release?.announcementId, replacementAnnouncementId);
+
       const repaired = await apiRequest(
         adminSession,
         `/developer/releases/${releaseId}/announcement`,
@@ -1602,16 +1815,10 @@ describe("admin access controls", () => {
         },
       );
       assert.equal(repaired.status, 200, JSON.stringify(repaired));
-      assert.ok(repaired.body && typeof repaired.body === "object");
       const repairedBody = repaired.body as {
         release?: { id?: unknown; status?: unknown; announcementId?: unknown };
         announcement?: { id?: unknown; status?: unknown; title?: unknown; body?: unknown };
       };
-      assert.equal(repairedBody.release?.id, releaseId);
-      assert.equal(repairedBody.release?.status, "published");
-      replacementAnnouncementId = repairedBody.announcement?.id as number;
-      assert.equal(typeof replacementAnnouncementId, "number");
-      assert.notEqual(replacementAnnouncementId, draftAnnouncementId);
       assert.equal(repairedBody.announcement?.status, "published");
       assert.equal(
         repairedBody.announcement?.title,

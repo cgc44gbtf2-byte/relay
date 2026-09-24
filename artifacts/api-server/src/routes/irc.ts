@@ -1901,7 +1901,10 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
   const visibility = isPlatformAdmin
     ? undefined
     : memberships.length > 0
-      ? inArray(serverAnnouncementsTable.communityId, memberships.map((item) => item.communityId))
+      ? or(
+        isNull(serverAnnouncementsTable.communityId),
+        inArray(serverAnnouncementsTable.communityId, memberships.map((item) => item.communityId)),
+      )
       : isNull(serverAnnouncementsTable.communityId);
   const announcements = await db
     .select({
