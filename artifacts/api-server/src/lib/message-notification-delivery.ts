@@ -66,7 +66,11 @@ async function currentChannelRecipients(
 }
 
 export async function processMessageNotificationDeliveries(
-  options: { batchSize?: number } = {},
+  options: {
+    batchSize?: number;
+    /** Lets crash-recovery tests stop after commit and before socket broadcast. */
+    afterCommitBeforeBroadcast?: () => void | Promise<void>;
+  } = {},
 ): Promise<MessageNotificationDeliveryResult> {
   const requestedBatchSize = Number.isFinite(options.batchSize)
     ? Math.floor(options.batchSize as number)
@@ -184,6 +188,8 @@ export async function processMessageNotificationDeliveries(
 
     return summary;
   });
+
+  await options.afterCommitBeforeBroadcast?.();
 
   for (const delivery of broadcasts) {
     try {

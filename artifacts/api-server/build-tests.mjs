@@ -26,6 +26,7 @@ await esbuild({
     path.resolve(artifactDir, "src/lib/destructive-policy.test.ts"),
     path.resolve(artifactDir, "src/lib/destructive-lifecycle.integration.test.ts"),
     path.resolve(artifactDir, "src/lib/message-notification-delivery.integration.test.ts"),
+    path.resolve(artifactDir, "src/lib/message-notification-delivery.crash-worker.ts"),
   ],
   platform: "node",
   bundle: true,

@@ -28,3 +28,9 @@ Cached Clerk test-session JWTs must be refreshed before their expiration.
 **Why:** Longer authenticated suites can outlive short-lived tokens; indefinite caching produced late-suite 401 failures unrelated to the endpoint being tested.
 
 **How to apply:** Check the cached token's expiry with a small safety margin before ordinary authenticated test requests. Keep explicit expired-token and revocation tests separate; never relax production verification.
+
+For process-crash tests that pause PostgreSQL inside `pg_sleep`, use a short bounded sleep. A terminated client may not be noticed by the backend until the sleep returns, so row locks can remain held for the rest of a long sleep even though the worker process is gone.
+
+**Why:** A long trigger sleep made a valid process-kill regression look like a lock leak because PostgreSQL did not process the client disconnect until its sleep completed.
+
+**How to apply:** Wait until the test worker is visibly inside the trigger, kill it, then allow a short sleep to expire before asserting the lock can be acquired and the transaction rolled back.
