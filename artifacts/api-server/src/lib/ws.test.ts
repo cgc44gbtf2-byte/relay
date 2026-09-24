@@ -333,6 +333,40 @@ describe("websocket multi-connection presence", () => {
 });
 
 describe("websocket session revalidation", () => {
+  test("closes only sockets from a session whose Clerk lookup fails", async () => {
+    const requests: string[] = [];
+    const hub = new Hub(undefined, undefined, async (sessionId) => {
+      requests.push(sessionId);
+      if (sessionId === "session-one") throw new Error("Clerk lookup failed");
+      return { userId: "same-user", status: "active" };
+    });
+    const internals = hub as any;
+    const firstSessionSocket = socket();
+    const secondSessionSocket = socket();
+    const otherSessionSocket = socket();
+    const firstSessionClient = client("same-user", firstSessionSocket, "session-one");
+    const secondSessionClient = client("same-user", secondSessionSocket, "session-one");
+    const otherSessionClient = client("same-user", otherSessionSocket, "session-two");
+
+    internals.registerClient(firstSessionClient);
+    internals.registerClient(secondSessionClient);
+    internals.registerClient(otherSessionClient);
+
+    await hub.revalidateSession("session-one");
+    await hub.revalidateSession("session-two");
+
+    assert.deepEqual(requests, ["session-one", "session-two"]);
+    assert.deepEqual(firstSessionSocket.closeCalls, [
+      { code: 1008, reason: "Session could not be revalidated." },
+    ]);
+    assert.deepEqual(secondSessionSocket.closeCalls, [
+      { code: 1008, reason: "Session could not be revalidated." },
+    ]);
+    assert.deepEqual(otherSessionSocket.closeCalls, []);
+    assert.equal(internals.clients.has(otherSessionClient), true);
+    hub.dispose();
+  });
+
   test("shares checks by session and closes only sockets for an inactive session", async () => {
     const requests: string[] = [];
     let releaseLookup!: () => void;
