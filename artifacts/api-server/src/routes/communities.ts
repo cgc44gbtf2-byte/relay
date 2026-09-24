@@ -3199,14 +3199,22 @@ router.post("/communities/:communityId/documents", requireAuth, async (req: Auth
       return;
     }
   }
-  const [document] = await db.insert(businessDocumentsTable).values({
-    communityId, folderId, title, description, category, visibility, targetUserId, requiresAcknowledgement, expiresAt, ownerId: userId,
-  }).returning();
-  const [version] = await db.insert(documentVersionsTable).values({
-    documentId: document.id, version: 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId,
-  }).returning();
-  await writeCommunityAudit(userId, "created_business_document", communityId, title);
-  res.status(201).json({ ...document, versions: [version] });
+  const result = await db.transaction(async (tx) => {
+    const [document] = await tx.insert(businessDocumentsTable).values({
+      communityId, folderId, title, description, category, visibility, targetUserId, requiresAcknowledgement, expiresAt, ownerId: userId,
+    }).returning();
+    const [version] = await tx.insert(documentVersionsTable).values({
+      documentId: document.id, version: 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId,
+    }).returning();
+    const audit = { details: title };
+    await insertCommunityAudit(tx, userId, "created_business_document", communityId, audit);
+    const notifications = await insertCommunityAuditNotifications(
+      tx, userId, "created_business_document", communityId, audit,
+    );
+    return { document, version, notifications };
+  });
+  broadcastNotifications(result.notifications);
+  res.status(201).json({ ...result.document, versions: [result.version] });
 });
 
 router.post("/communities/:communityId/documents/:documentId/versions", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {

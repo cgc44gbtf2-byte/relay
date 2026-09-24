@@ -12617,6 +12617,115 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rolls back document creation and its first version when auditing fails", async () => {
+    assert.ok(
+      process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL,
+      "Audit rollback tests require only a dedicated TEST_DATABASE_URL, not the development database.",
+    );
+    const owner = await createTestSession("document_creation_audit_owner");
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const title = `Document creation rollback ${suffix}`;
+    const triggerName = `fail_document_creation_audit_${suffix}`;
+    const functionName = `${triggerName}_fn`;
+    let communityId: number | undefined;
+    let triggerCreated = false;
+    let functionCreated = false;
+    try {
+      assert.equal((await apiRequest(owner, "/me")).status, 200);
+      const community = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
+        ["Creation audit rollback", `creation-audit-${suffix}`, owner.userId],
+      );
+      communityId = community.rows[0].id;
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'owner')",
+        [communityId, owner.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_owner', 'community', $2, $1)`,
+        [owner.userId, communityId],
+      );
+      await pool.query(
+        `CREATE FUNCTION "${functionName}"() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.action = 'created_business_document' AND NEW.community_id = ${communityId} THEN
+             RAISE EXCEPTION 'forced document creation audit failure';
+           END IF;
+           RETURN NEW;
+         END;
+         $$;`,
+      );
+      functionCreated = true;
+      await pool.query(
+        `CREATE TRIGGER "${triggerName}"
+         BEFORE INSERT ON irc_admin_audit_logs
+         FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`,
+      );
+      triggerCreated = true;
+
+      const create = () => apiRequest(owner, `/communities/${communityId}/documents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title,
+          objectPath: `/objects/uploads/${randomUUID()}`,
+          fileName: "initial.txt",
+          contentType: "text/plain",
+          fileSize: 1,
+        }),
+      });
+      const documents = () => pool.query<{ id: number }>(
+        "SELECT id FROM irc_business_documents WHERE community_id = $1 AND title = $2",
+        [communityId, title],
+      );
+      const versions = () => pool.query(
+        `SELECT v.id FROM irc_document_versions v
+         JOIN irc_business_documents d ON d.id = v.document_id
+         WHERE d.community_id = $1 AND d.title = $2`,
+        [communityId, title],
+      );
+      const audits = () => pool.query(
+        `SELECT id FROM irc_admin_audit_logs
+         WHERE community_id = $1 AND action = 'created_business_document' AND details = $2`,
+        [communityId, title],
+      );
+      const notifications = () => pool.query(
+        `SELECT id FROM irc_notifications
+         WHERE community_id = $1 AND type = 'administrative_action' AND body = $2`,
+        [communityId, `created business document: ${title}`],
+      );
+
+      const failed = await create();
+      assert.equal(failed.status, 500, JSON.stringify(failed));
+      assert.deepEqual((await documents()).rows, []);
+      assert.deepEqual((await versions()).rows, []);
+      assert.deepEqual((await audits()).rows, []);
+      assert.deepEqual((await notifications()).rows, []);
+
+      await pool.query(`DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs`);
+      triggerCreated = false;
+      const retried = await create();
+      assert.equal(retried.status, 201, JSON.stringify(retried));
+      const saved = retried.body as { id: number; versions: Array<{ id: number; version: number }> };
+      assert.equal(saved.versions.length, 1);
+      assert.equal(saved.versions[0].version, 1);
+      assert.deepEqual((await documents()).rows, [{ id: saved.id }]);
+      assert.deepEqual((await versions()).rows, [{ id: saved.versions[0].id }]);
+      assert.equal((await audits()).rows.length, 1);
+      assert.equal((await notifications()).rows.length, 1);
+    } finally {
+      try {
+        if (triggerCreated) await pool.query(`DROP TRIGGER "${triggerName}" ON irc_admin_audit_logs`);
+        if (functionCreated) await pool.query(`DROP FUNCTION "${functionName}"()`);
+      } finally {
+        if (communityId !== undefined) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("rolls back a document version and timestamp when its audit insert fails", async () => {
     assert.ok(
       process.env.TEST_DATABASE_URL && !process.env.DATABASE_URL,
