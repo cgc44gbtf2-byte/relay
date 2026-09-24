@@ -2776,67 +2776,106 @@ router.patch("/communities/:communityId/members/:memberId/role", requireAuth, as
     res.status(400).json({ error: "Invalid community role assignment." });
     return;
   }
-  if (!(await communityPermission(userId, communityId, "manage_community_members"))) {
+  await ensureProfile(userId);
+  const result = await db.transaction(async (tx) => {
+    const orderedUserIds = [...new Set([userId, memberId])].sort();
+    await tx.select({ clerkId: usersTable.clerkId })
+      .from(usersTable)
+      .where(inArray(usersTable.clerkId, orderedUserIds))
+      .for("update");
+
+    if (!(await hasPermission(userId, "manage_community_members", { communityId }, tx, true))) {
+      return { outcome: "forbidden" } as const;
+    }
+
+    const [actor] = await tx.select({ role: usersTable.role })
+      .from(usersTable)
+      .where(eq(usersTable.clerkId, userId))
+      .for("update");
+    if (!actor) {
+      return { outcome: "forbidden" } as const;
+    }
+    if (actor.role !== "admin") {
+      const actorAssignments = await tx.select({ role: userRolesTable.role })
+        .from(userRolesTable)
+        .where(and(
+          eq(userRolesTable.userId, userId),
+          eq(userRolesTable.communityId, communityId),
+        ))
+        .for("update");
+      if (!canGrantWorkspaceRole(
+        actorAssignments.map((assignment) => assignment.role),
+        role,
+      )) {
+        return { outcome: "rank_forbidden" } as const;
+      }
+    }
+
+    const [member] = await tx.select({ userId: communityMembersTable.userId })
+      .from(communityMembersTable)
+      .where(and(
+        eq(communityMembersTable.communityId, communityId),
+        eq(communityMembersTable.userId, memberId),
+      ))
+      .for("share");
+    if (!member) {
+      return { outcome: "not_found" } as const;
+    }
+    try {
+      await assertDeletionEligibleUser(memberId, tx);
+    } catch {
+      return { outcome: "pending_deletion" } as const;
+    }
+
+    await tx.delete(userRolesTable).where(and(
+      eq(userRolesTable.userId, memberId),
+      eq(userRolesTable.communityId, communityId),
+      eq(userRolesTable.scopeType, "community"),
+    ));
+    if (role !== "member") {
+      await tx.insert(userRolesTable).values({
+        userId: memberId,
+        role,
+        scopeType: "community",
+        communityId,
+        grantedBy: userId,
+      });
+    }
+    const [targetProfile] = await tx.select({
+      displayName: usersTable.displayName,
+    }).from(usersTable).where(eq(usersTable.clerkId, memberId)).limit(1);
+    const [targetEmployee] = await tx.select({
+      departmentId: employeeProfilesTable.departmentId,
+      locationId: employeeProfilesTable.locationId,
+    }).from(employeeProfilesTable).where(and(
+      eq(employeeProfilesTable.communityId, communityId),
+      eq(employeeProfilesTable.userId, memberId),
+    )).limit(1);
+    return { outcome: "updated", targetProfile, targetEmployee } as const;
+  });
+
+  if (result.outcome === "forbidden") {
     res.status(403).json({ error: "You cannot manage members in this community." });
     return;
   }
-  const actor = await ensureProfile(userId);
-  if (actor.role !== "admin") {
-    const actorAssignments = await db.select({ role: userRolesTable.role })
-      .from(userRolesTable)
-      .where(and(
-        eq(userRolesTable.userId, userId),
-        eq(userRolesTable.communityId, communityId),
-      ));
-    if (!canGrantWorkspaceRole(
-      actorAssignments.map((assignment) => assignment.role),
-      role,
-    )) {
-      res.status(403).json({ error: "You can only assign roles below your own workspace role." });
-      return;
-    }
+  if (result.outcome === "rank_forbidden") {
+    res.status(403).json({ error: "You can only assign roles below your own workspace role." });
+    return;
   }
-  const member = await db.query.communityMembersTable.findFirst({
-    where: and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, memberId)),
-  });
-  if (!member) {
+  if (result.outcome === "not_found") {
     res.status(404).json({ error: "Community member not found." });
     return;
   }
-  try { await assertDeletionEligibleUser(memberId); } catch {
+  if (result.outcome === "pending_deletion") {
     res.status(409).json({ error: "This account is pending deletion and cannot receive roles." });
     return;
   }
-  await db.delete(userRolesTable).where(and(
-    eq(userRolesTable.userId, memberId),
-    eq(userRolesTable.communityId, communityId),
-    eq(userRolesTable.scopeType, "community"),
-  ));
-  if (role !== "member") {
-    await db.insert(userRolesTable).values({
-      userId: memberId,
-      role,
-      scopeType: "community",
-      communityId,
-      grantedBy: userId,
-    });
-  }
-  const [targetProfile] = await db.select({
-    displayName: usersTable.displayName,
-  }).from(usersTable).where(eq(usersTable.clerkId, memberId)).limit(1);
-  const [targetEmployee] = await db.select({
-    departmentId: employeeProfilesTable.departmentId,
-    locationId: employeeProfilesTable.locationId,
-  }).from(employeeProfilesTable).where(and(
-    eq(employeeProfilesTable.communityId, communityId),
-    eq(employeeProfilesTable.userId, memberId),
-  )).limit(1);
   await writeCommunityAudit(userId, "changed_community_role", communityId, {
     resourceType: "employee",
     resourceId: memberId,
-    resourceLabel: targetProfile?.displayName ?? memberId,
-    departmentId: targetEmployee?.departmentId,
-    locationId: targetEmployee?.locationId,
+    resourceLabel: result.targetProfile?.displayName ?? memberId,
+    departmentId: result.targetEmployee?.departmentId,
+    locationId: result.targetEmployee?.locationId,
     details: `role → ${role}`,
   });
   res.json({ ok: true, userId: memberId, role, communityId });
