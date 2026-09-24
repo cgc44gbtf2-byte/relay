@@ -3266,18 +3266,25 @@ describe("admin access controls", () => {
     }
   });
 
-  test("ignores malformed realtime channel subscriptions", async () => {
-    const ownerSession = await createTestSession("malformed_subscription");
+  test("rejects malformed and nonexistent realtime subscriptions and typing", async () => {
+    const ownerSession = await createTestSession("invalid_subscription_owner");
+    const memberSession = await createTestSession("invalid_subscription_member");
+    const invalidSession = await createTestSession("invalid_subscription_probe");
     const channelIds: number[] = [];
     const sockets: WebSocket[] = [];
 
     try {
+      for (const session of [ownerSession, memberSession, invalidSession]) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+
       const createChannel = await apiRequest(ownerSession, "/channels", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          name: `malformed-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
-          topic: "Malformed subscription isolation",
+          name: `invalid-sub-${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+          topic: "Invalid subscription isolation",
         }),
       });
       assert.equal(createChannel.status, 201, JSON.stringify(createChannel));
@@ -3286,31 +3293,59 @@ describe("admin access controls", () => {
       assert.equal(typeof channelId, "number");
       channelIds.push(channelId as number);
 
-      const socket = await openWebSocket(ownerSession);
-      sockets.push(socket);
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [channelId, memberSession.userId],
+      );
+
+      const unknownChannelId = 2_000_000_000;
+      const existingUnknownChannel = await pool.query(
+        "SELECT 1 FROM irc_channels WHERE id = $1",
+        [unknownChannelId],
+      );
+      assert.equal(existingUnknownChannel.rowCount, 0);
+
+      const ownerSocket = await openWebSocket(ownerSession);
+      const memberSocket = await openWebSocket(memberSession);
+      const invalidSocket = await openWebSocket(invalidSession);
+      sockets.push(ownerSocket, memberSocket, invalidSocket);
+      ownerSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+      memberSocket.send(JSON.stringify({ type: "subscribe", channelId }));
+
       const malformedFrames = [
         "{",
         JSON.stringify({}),
         JSON.stringify({ type: "unknown", channelId }),
-        JSON.stringify({ type: "subscribe", channelId: String(channelId) }),
-        JSON.stringify({ type: "subscribe", channelId: null }),
-        JSON.stringify({ type: "subscribe", channelId: 1.5 }),
-        JSON.stringify({ type: "subscribe", channelId: -1 }),
-        JSON.stringify({
-          type: "subscribe",
-          channelId: Number.MAX_SAFE_INTEGER + 1,
-        }),
+        ...[
+          String(channelId),
+          null,
+          1.5,
+          -1,
+          Number.MAX_SAFE_INTEGER + 1,
+        ].map((invalidChannelId) =>
+          JSON.stringify({ type: "subscribe", channelId: invalidChannelId }),
+        ),
+        JSON.stringify({ type: "subscribe", channelId: unknownChannelId }),
+        JSON.stringify({ type: "typing", channelId: String(channelId), active: true }),
+        JSON.stringify({ type: "typing", channelId: unknownChannelId, active: true }),
       ];
-      for (const frame of malformedFrames) socket.send(frame);
+      for (const frame of malformedFrames) invalidSocket.send(frame);
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
-      const body = `Malformed subscription ${randomUUID()}`;
-      const blockedEvent = expectNoWebSocketEvent(
-        socket,
+      const body = `Valid subscription ${randomUUID()}`;
+      const validMessage = waitForWebSocketEvent(
+        memberSocket,
         (event) =>
           event.type === "message" &&
-          Boolean(event.message) &&
-          (event.message as { body?: unknown }).body === body,
-        750,
+          (event.message as { body?: unknown } | undefined)?.body === body,
+      );
+      const blockedMessage = expectNoWebSocketEvent(
+        invalidSocket,
+        (event) =>
+          event.type === "message" &&
+          (event.message as { body?: unknown } | undefined)?.body === body,
+        1_000,
       );
       const message = await apiRequest(
         ownerSession,
@@ -3322,10 +3357,60 @@ describe("admin access controls", () => {
         },
       );
       assert.equal(message.status, 201, JSON.stringify(message));
-      await blockedEvent;
+      await validMessage;
+      await blockedMessage;
+
+      const unknownBroadcastMarker = randomUUID();
+      const blockedUnknownBroadcast = expectNoWebSocketEvent(
+        invalidSocket,
+        (event) =>
+          event.type === "subscription_probe" &&
+          event.marker === unknownBroadcastMarker,
+        250,
+      );
+      wsHub.broadcastChannel(unknownChannelId, {
+        type: "subscription_probe",
+        marker: unknownBroadcastMarker,
+      });
+      await blockedUnknownBroadcast;
+
+      const blockedInvalidTyping = Promise.all([
+        expectNoWebSocketEvent(
+          ownerSocket,
+          (event) => event.type === "typing" && event.userId === invalidSession.userId,
+          750,
+        ),
+        expectNoWebSocketEvent(
+          memberSocket,
+          (event) => event.type === "typing" && event.userId === invalidSession.userId,
+          750,
+        ),
+      ]);
+      invalidSocket.send(
+        JSON.stringify({ type: "typing", channelId: String(channelId), active: true }),
+      );
+      invalidSocket.send(
+        JSON.stringify({ type: "typing", channelId: unknownChannelId, active: true }),
+      );
+      await blockedInvalidTyping;
+
+      const validTyping = waitForWebSocketEvent(
+        ownerSocket,
+        (event) =>
+          event.type === "typing" &&
+          event.channelId === channelId &&
+          event.userId === memberSession.userId,
+      );
+      memberSocket.send(JSON.stringify({ type: "typing", channelId, active: true }));
+      const typingEvent = await validTyping;
+      assert.equal(typingEvent.active, true);
     } finally {
       for (const socket of sockets) closeWebSocket(socket);
-      await removeTestChannels(channelIds, [ownerSession.userId]);
+      await removeTestChannels(channelIds, [
+        ownerSession.userId,
+        memberSession.userId,
+        invalidSession.userId,
+      ]);
     }
   });
 
