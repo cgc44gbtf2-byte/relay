@@ -28,6 +28,19 @@ checklist, not a production-readiness sign-off.
   checks passed locally. Local checks do not establish a green hosted CI run.
 - Temporary test databases and regression users were cleaned up. No production
   data was modified or production migrations applied.
+- Query/index justification is recorded in
+  `docs/RELEASE-1-QUERY-INDEX-JUSTIFICATION.md`. The review found that the
+  policy-acknowledgement user index from migration 0012 lacked its matching
+  Drizzle declaration; that declaration is restored. An additive message
+  creation-time index now supports the global recent-message overview query.
+  Speculative indexes remain deferred until an observed query and representative
+  plan justify their cost.
+- After these changes, library/API typechecks and database migration tests
+  passed; both disposable PostgreSQL 16 runs passed migration rehearsal, fresh
+  schema setup, and the strict no-op check. The authenticated API suite was not
+  consistently green: the first run had one notification-delivery assertion
+  failure (171/172), and the second had separate email-verification and
+  WebSocket-handshake failures (170/172). No production database was used.
 - Local tenant-access reconciliation used an isolated PostgreSQL 16 database:
   the two-workspace read/write substitution test and the targeted/scheduled
   announcement test passed. The full `admin.test.ts` run passed 107/114 tests
@@ -68,8 +81,8 @@ API source paths in the table are relative to `artifacts/api-server`.
 2. Collection pagination inventory is recorded below. Continue to distinguish
    navigable collections from intentionally recent dashboard snapshots when
    adding endpoints; do not introduce a cap without a continuation path.
-3. Finish query/index justification, all-event WebSocket review, storage
-   enforcement, abuse-control inventory, and accessibility verification.
+3. Complete the all-event WebSocket review, storage enforcement, abuse-control
+   inventory, and accessibility verification.
 4. Run/document the available security/static-analysis checks and reconcile
    their findings; do not equate license checking with security analysis.
 5. Resolve the separately queued unclassified dependency-license review.

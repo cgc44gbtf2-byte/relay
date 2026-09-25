@@ -291,7 +291,10 @@ export const policyAcknowledgementsTable = pgTable("irc_policy_acknowledgements"
   policyId: integer("policy_id").notNull().references(() => workspacePoliciesTable.id, { onDelete: "cascade" }),
   userId: text("user_id").notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }),
   acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [primaryKey({ columns: [table.policyId, table.userId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.policyId, table.userId] }),
+  index("irc_policy_acknowledgements_user_idx").on(table.userId),
+]);
 
 export const documentFoldersTable = pgTable("irc_document_folders", {
   id: serial("id").primaryKey(),
@@ -554,6 +557,7 @@ export const messagesTable = pgTable("irc_messages", {
   notificationLastError: text("notification_last_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
+  index("irc_messages_created_idx").on(table.createdAt),
   index("irc_messages_channel_created_idx").on(table.channelId, table.createdAt, table.id),
   index("irc_messages_recipient_created_idx").on(table.recipientId, table.createdAt),
   index("irc_messages_sender_created_idx").on(table.senderId, table.createdAt),
