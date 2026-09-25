@@ -59,6 +59,12 @@ checklist, not a production-readiness sign-off.
   are process-local; focused isolation and ticket-lifecycle verification was
   run against synthetic attempts on a disposable database. No production
   traffic, email, or stored user objects were used.
+- The accessibility/recovery review below covers selected chat, direct-message,
+  notification, workspace and administrator flows. Web typechecking, the
+  production build, and all 81 App UI tests passed after accessible-name
+  selectors were updated for previously hover-only member actions. The
+  existing large JavaScript chunk warning remains. This is not a claim of
+  manual assistive-technology or production verification.
 
 ## Implemented safeguards and evidence locations
 
@@ -72,11 +78,42 @@ checklist, not a production-readiness sign-off.
 | Storage | `docs/RELEASE-1-STORAGE-AUDIT.md`: upload-to-reference and read/cleanup chain; storage unit tests, two-workspace path/ID substitution and legacy unscoped reuse checks, web upload-context test | Direct signed PUTs do not have established provider-level size/type/byte enforcement; abandoned uploads are not automatically collected. Do not claim provider-boundary enforcement. |
 | Abuse protection | Route-by-route high-risk inventory in `docs/RELEASE-1-ABUSE-CONTROL-AUDIT.md`; actor/workspace attempt budgets; fixed-window, ticket-cleanup, and focused authenticated boundary checks | Counters and WebSocket tickets/clients are process-local; deployment must use one continuous API process or add shared enforcement and routing before scaling out. No multi-instance guarantee. |
 | Data retention | `docs/DATA-RETENTION.md` | Strategy documented; no destructive retention job added. |
-| Frontend recovery | `artifacts/web-irc/src/App.test.tsx`: room retry, reconnect, DM preservation, username conflicts, developer denial | Comprehensive keyboard/focus/accessibility and error-state review is still outstanding. |
+| Frontend recovery | `artifacts/web-irc/src/App.test.tsx`: room retry, reconnect, DM preservation, failed-send/history/workspace retry, named dialogs, notification retry and admin confirmation focus | Manual assistive-technology testing and signed-in responsive interaction remain outstanding; automated DOM tests do not certify WCAG compliance. |
 | WebSocket event delivery | Employee-offboarding revocation, post-commit subscription-end notice, live recipient/non-recipient checks, and server/client reconnect contract; see `RELEASE-1-WEBSOCKET-AUDIT.md` | The named delivery families are verified; this is not an exhaustive event-class matrix or production release sign-off. |
 | Collection pagination | Workspace detail/list, IRC directories/search, admin collections and release archive now use bounded pages with deterministic ID tie-break ordering; frontend consumers traverse pages or offer workspace load-more | Offset traversal is not a database snapshot: concurrent insertion, removal or renaming can shift page boundaries. Nested resource details retain their existing contract. |
 
 API source paths in the table are relative to `artifacts/api-server`.
+
+## Accessibility and recovery review (2026-09-25)
+
+Code-path review focused on chat and direct messages, notification inbox/detail,
+workspace loading and selection, and administrator navigation/confirmations:
+
+- Keyboard users now have a visible focus outline, named send/search controls
+  and reaction actions, and member moderation actions no longer require hover.
+  The narrow chat header has a keyboard-operable rooms/people picker. Selected
+  room, workspace, admin section and notification filters expose their current
+  state to assistive technology.
+- Shared dialogs and notification details expose a modal name, focus an
+  available control, keep Tab within the dialog, close with Escape and restore
+  focus to the still-present trigger. Administrator destructive confirmations
+  use the same behavior; failed confirmations are reported inside the dialog.
+- Failed message sends retain their text for retry, failed history stays
+  distinguishable from an empty room with a retry action, and people/history
+  search, notification archive/details and workspace-list/detail failures have
+  visible alerts and recovery actions. Workspace retries retain selection
+  guards so older responses cannot replace newer selections.
+- Focused React Testing Library checks exercise dialog focus/Tab/Escape and
+  restoration, send/history/workspace retries, notification archived retry and
+  admin confirmation selection/cancellation, plus the narrow rooms/people
+  picker and a failed people-search retry. The running preview was captured
+  at 1280×900 and 390×844 with no browser-console errors; both views showed
+  the signed-out landing page because no authenticated preview session was
+  available. Those screenshots do **not** verify signed-in chat, workspace or
+  admin layout at either width, native keyboard traversal or screen-reader
+  announcements. No NVDA, VoiceOver, TalkBack or switch-control session was
+  performed; contrast and all mobile screen states still need hands-on
+  validation before claiming accessibility conformance.
 
 ## Outstanding audit scope
 
@@ -93,8 +130,9 @@ API source paths in the table are relative to `artifacts/api-server`.
     `RELEASE-1-WEBSOCKET-AUDIT.md`. Storage application enforcement and
     provider-boundary limits are recorded in `RELEASE-1-STORAGE-AUDIT.md`;
      abuse-control inventory and single-process deployment assumptions are
-     recorded in `RELEASE-1-ABUSE-CONTROL-AUDIT.md`; accessibility verification
-     is still open.
+      recorded in `RELEASE-1-ABUSE-CONTROL-AUDIT.md`; automated accessibility
+      fixes are documented above, while manual assistive-technology and
+      signed-in narrow-screen verification remain open.
 4. Run/document the available security/static-analysis checks and reconcile
    their findings; do not equate license checking with security analysis.
 5. Resolve the separately queued unclassified dependency-license review.

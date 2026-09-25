@@ -7,6 +7,11 @@
 
 @custom-variant dark (&:is(.dark *));
 
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
+}
+
 @theme inline {
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));

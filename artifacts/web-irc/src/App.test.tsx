@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, cleanup, within } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +24,7 @@ vi.mock("@clerk/react", () => ({
 }));
 
 import App, { AdminChannelRoomOrganizer, DocumentCenter, ModerationHistoryPanel, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, loadAdminScopeOptions, loadCustomRoleCatalog, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
+import { NotificationCenter, type Notification } from "./components/notification-center";
 
 describe("IRC collection pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -392,6 +393,9 @@ function installApi({
   fallbackChannelsAfterDeniedJoin,
   denyFallbackHistoryUntilJoined = false,
   createChannelFailureOnce = false,
+  sendFailureOnce = false,
+  historyFailureOnce = false,
+  peopleSearchFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
   currentChannelWorkspaceId,
@@ -426,6 +430,9 @@ function installApi({
   fallbackChannelsAfterDeniedJoin?: Channel[];
   denyFallbackHistoryUntilJoined?: boolean;
   createChannelFailureOnce?: boolean;
+  sendFailureOnce?: boolean;
+  historyFailureOnce?: boolean;
+  peopleSearchFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
   currentChannelWorkspaceId?: number;
@@ -444,6 +451,8 @@ function installApi({
   };
   let channelListCalls = 0;
   let historyCalls = 0;
+  let sendCalls = 0;
+  let peopleSearchCalls = 0;
   let dmPaginationCalls = 0;
   let joinCalls = 0;
   let fallbackAccessGranted = fallbackJoined;
@@ -489,7 +498,11 @@ function installApi({
         categoryId: null,
       });
     }
-    if (url.startsWith("/api/users/search?q=or")) return jsonResponse([members()[1]]);
+    if (url.startsWith("/api/users/search?q=or")) {
+      peopleSearchCalls += 1;
+      if (peopleSearchFailureOnce && peopleSearchCalls === 1) return jsonResponse({ error: "people unavailable" }, 503);
+      return jsonResponse([members()[1]]);
+    }
     if (url.startsWith("/api/dm/user-2/messages?before=") && method === "GET") {
       dmPaginationCalls += 1;
       if (dmPaginationFailureOnce && dmPaginationCalls === 1) {
@@ -533,6 +546,7 @@ function installApi({
     }
     if (url === "/api/channels/1/messages" && method === "GET") {
       historyCalls += 1;
+      if (historyFailureOnce && historyCalls === 1) return jsonResponse({ error: "history unavailable" }, 503);
       if (denyHistoryAfterFirst && historyCalls > 1) return channelAccessRequired();
       if (accessRequiredRequest === "history") return channelAccessRequired();
       return missingRequest === "history"
@@ -558,6 +572,8 @@ function installApi({
       return jsonResponse(members());
     }
     if (url === "/api/channels/1/messages" && method === "POST") {
+      sendCalls += 1;
+      if (sendFailureOnce && sendCalls === 1) return jsonResponse({ error: "send unavailable" }, 503);
       if (accessRequiredRequest === "send") return channelAccessRequired();
       return missingRequest === "send" ? channelNotFound(missingChannelMessage) : jsonResponse(message(1, "sent"));
     }
@@ -621,6 +637,94 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   render(<App />);
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
+
+describe("keyboard access and recoverable chat failures", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    latestWebSocket = null;
+    window.history.pushState({}, "", "/");
+  });
+
+  it("focuses a named dialog, traps keyboard tabs, and returns focus after Escape", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(1, "#deleted-room")] });
+    const trigger = screen.getByRole("button", { name: "Create category" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Create a category" });
+    const name = within(dialog).getByRole("textbox", { name: "category name" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    name.focus();
+    const submit = within(dialog).getByRole("button", { name: "create category" });
+    submit.focus();
+    fireEvent.keyDown(submit, { key: "Tab" });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Close Create a category" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create a category" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("retains a failed message draft and allows retry without a blocking alert", async () => {
+    vi.stubGlobal("alert", vi.fn());
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(1, "#deleted-room")], sendFailureOnce: true });
+    const composer = screen.getByRole("textbox", { name: "Message #deleted-room" }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Can you hear me?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("send unavailable");
+    expect(composer.value).toBe("Can you hear me?");
+    expect(window.alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(screen.queryByText(/send unavailable/)).toBeNull());
+    expect(composer.value).toBe("");
+  });
+
+  it("distinguishes failed history from an empty room and offers a retry", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(1, "#deleted-room")], historyFailureOnce: true });
+    expect((await screen.findByRole("alert")).textContent).toContain("history unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "retry history" }));
+    expect(await screen.findByText("stale history")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/history unavailable/)).toBeNull());
+  });
+
+  it("opens the narrow rooms/people picker and retries people search before selecting a DM", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(1, "#deleted-room")], peopleSearchFailureOnce: true });
+    fireEvent.click(screen.getByRole("button", { name: "rooms & people" }));
+    const dialog = screen.getByRole("dialog", { name: "Rooms and people" });
+    expect(within(dialog).getByRole("button", { name: /deleted-room/ })).toBeTruthy();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Find a person" }), { target: { value: "or" } });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("People search failed");
+    fireEvent.click(within(dialog).getByRole("button", { name: "retry people search" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Orion" }));
+    expect(screen.queryByRole("dialog", { name: "Rooms and people" })).toBeNull();
+    expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
+  });
+
+  it("makes notification details modal and retries a failed archived load", async () => {
+    let archivedCalls = 0;
+    const request = async <T,>(path: string): Promise<T> => {
+      if (path.includes("archived=true") && ++archivedCalls === 1) throw new Error("archived unavailable");
+      return [] as T;
+    };
+    function Inbox() {
+      const [open, setOpen] = useState(false);
+      const [items, setItems] = useState<Notification[]>([]);
+      return <><button onClick={() => setOpen(true)}>Show notifications</button>{open && <NotificationCenter notifications={items} setNotifications={setItems} request={request} onClose={() => setOpen(false)} onNavigate={() => undefined} onOpenMessage={() => undefined} revision={0} />}</>;
+    }
+    render(<Inbox />);
+    const trigger = screen.getByRole("button", { name: "Show notifications" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Notifications" });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Close notifications" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archived" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("archived unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "retry archived" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+});
 
 describe("workspace moderation history", () => {
   beforeEach(() => cleanup());
@@ -693,6 +797,26 @@ describe("community organization polling", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   });
 
+  it("announces a failed workspace list and retries it without reloading the page", async () => {
+    let listCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/permissions/me") return jsonResponse({ permissions: [], assignments: [], role: "member" });
+      if (url === "/api/me") return jsonResponse(profile);
+      if (url.startsWith("/api/communities?")) return ++listCalls === 1
+        ? jsonResponse({ error: "workspace list unavailable" }, 503)
+        : jsonResponse([]);
+      return jsonResponse({});
+    }));
+    window.history.pushState({}, "", "/communities");
+    render(<App />);
+    expect((await screen.findByRole("alert")).textContent).toContain("workspace list unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "retry load" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByText("No business workspaces yet.")).toBeTruthy();
+    expect(listCalls).toBe(2);
+  });
+
   it("keeps the newly created workspace selected in the URL and after remounting", async () => {
     const workspace = (id: number, name: string) => ({
       id, name, description: "", rules: "", services: "", serviceArea: "",
@@ -730,7 +854,7 @@ describe("community organization polling", () => {
     await screen.findByRole("heading", { name: "Existing business" });
     expect(screen.queryByTestId("section-moderation-history")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "new" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create business workspace" }));
     fireEvent.change(screen.getByLabelText("business name"), { target: { value: "New business" } });
     fireEvent.click(screen.getByRole("button", { name: "create business workspace" }));
     await waitFor(() => expect(window.location.pathname).toBe("/communities/72"));
@@ -1164,7 +1288,7 @@ describe("deleted room recovery", () => {
     });
 
     fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
-    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Orion" }));
 
     const loadOlder = await screen.findByRole("button", { name: "load older messages" });
     expect(screen.getByText("dm message 99")).toBeTruthy();
@@ -1358,7 +1482,7 @@ describe("deleted room recovery", () => {
     });
 
     fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
-    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Orion" }));
     expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
 
     await act(async () => {
@@ -1500,7 +1624,7 @@ describe("deleted room recovery", () => {
     expect(screen.getByText("Orion typing…")).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
-    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Orion" }));
     expect(await screen.findByRole("heading", { name: "@orion" })).toBeTruthy();
     expect(latestWebSocket).toBe(roomSocket);
     expect(screen.queryByText(/typing…/)).toBeNull();
@@ -1546,7 +1670,7 @@ describe("deleted room recovery", () => {
     expect(screen.queryByText("stale history")).toBeNull();
     expect(screen.getAllByText("reaction survived")).toHaveLength(1);
     expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove 👍 reaction, 2 reactions" })).toBeTruthy();
   });
 
   it("restores members after a presence change was missed while disconnected", async () => {
@@ -1557,7 +1681,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
       channelMembers,
     });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => { await Promise.resolve(); });
     const callsBefore = channelMembers.mock.calls.length;
     const firstSocket = latestWebSocket;
@@ -1569,8 +1693,8 @@ describe("deleted room recovery", () => {
     expect(latestWebSocket).not.toBe(firstSocket);
     await act(async () => { latestWebSocket?.onopen?.(); });
     expect(channelMembers.mock.calls.length).toBeGreaterThan(callsBefore);
-    expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Orion/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Message Nova" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Message Orion" })).toBeNull();
   });
 
   it("preserves members when a presence refresh temporarily fails", async () => {
@@ -1583,7 +1707,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
       channelMembers,
     });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => { await Promise.resolve(); });
     const callsBefore = channelMembers.mock.calls.length;
     fail = true;
@@ -1608,7 +1732,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
       channelMembers,
     });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => { await Promise.resolve(); });
     delay = true;
     for (const action of ["join", "leave"]) {
@@ -1630,11 +1754,11 @@ describe("deleted room recovery", () => {
 
     const nova = { ...members()[1], id: "user-3", username: "nova", displayName: "Nova" };
     await act(async () => { pending[2](await jsonResponse([members()[0], nova])); });
-    expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Message Nova" })).toBeTruthy();
     for (const index of [1, 0]) {
       await act(async () => { pending[index](await jsonResponse(index === 1 ? [members()[0]] : members())); });
-      expect(screen.getByRole("button", { name: /Nova/ })).toBeTruthy();
-      expect(screen.queryByRole("button", { name: /Orion/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "Message Nova" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Message Orion" })).toBeNull();
     }
 
     // A pending presence request must also stay scoped to its original room.
@@ -1646,10 +1770,10 @@ describe("deleted room recovery", () => {
     expect(pending).toHaveLength(4);
     fireEvent.click(screen.getByRole("button", { name: /fallback-room/ }));
     await screen.findByRole("heading", { name: "#fallback-room" });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => { pending[3](await jsonResponse([nova])); });
-    expect(screen.getByRole("button", { name: /Orion/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Nova/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Message Orion" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Message Nova" })).toBeNull();
   });
 
   it("ignores a delayed reconnect member response after switching rooms", async () => {
@@ -1662,7 +1786,7 @@ describe("deleted room recovery", () => {
       fallbackChannels: [room(1, "#deleted-room"), room(2, "#fallback-room")],
       channelMembers,
     });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => { await Promise.resolve(); });
     const callsBefore = channelMembers.mock.calls.length;
     vi.useFakeTimers();
@@ -1674,12 +1798,12 @@ describe("deleted room recovery", () => {
     vi.useRealTimers();
     fireEvent.click(screen.getByRole("button", { name: /fallback-room/ }));
     await screen.findByRole("heading", { name: "#fallback-room" });
-    await screen.findByRole("button", { name: /Orion/ });
+    await screen.findByRole("button", { name: "Message Orion" });
     await act(async () => {
       resolveMembers(await jsonResponse([{ ...members()[1], id: "user-3", username: "nova", displayName: "Nova" }]));
     });
-    expect(screen.getByRole("button", { name: /Orion/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Nova/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Message Orion" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Message Nova" })).toBeNull();
   });
 
   it("refreshes direct messages after reconnecting without duplicating stale reactions or deletions", async () => {
@@ -1700,10 +1824,10 @@ describe("deleted room recovery", () => {
     });
 
     fireEvent.change(screen.getByPlaceholderText("find a person"), { target: { value: "or" } });
-    fireEvent.click(await screen.findByRole("button", { name: /Orion/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Orion" }));
     expect(await screen.findByText("reaction before reconnect")).toBeTruthy();
     expect(screen.getByText("message before deletion")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "👍 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add 👍 reaction, 1 reactions" })).toBeTruthy();
     await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());
     const firstSocket = latestWebSocket;
     await act(async () => { firstSocket?.onopen?.(); });
@@ -1726,11 +1850,11 @@ describe("deleted room recovery", () => {
     await waitFor(() => {
       expect(screen.getAllByText("reaction after reconnect")).toHaveLength(1);
       expect(screen.getAllByText("[message deleted]")).toHaveLength(1);
-      expect(screen.getByRole("button", { name: "👍 2" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove 👍 reaction, 2 reactions" })).toBeTruthy();
     });
     expect(screen.queryByText("reaction before reconnect")).toBeNull();
     expect(screen.queryByText("message before deletion")).toBeNull();
-    expect(screen.queryByRole("button", { name: "👍 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add 👍 reaction, 1 reactions" })).toBeNull();
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/dm/user-2/messages").length).toBeGreaterThanOrEqual(3);
   });
 
@@ -2106,6 +2230,23 @@ describe("admin channel and category deletion permissions", () => {
         body: JSON.stringify({ confirmation: "DELETE CATEGORY Project rooms AND CHANNELS FROM WORKSPACE Team workspace" }),
       }),
     ));
+  });
+
+  it("labels admin navigation and returns focus when a destructive dialog is cancelled", async () => {
+    installAdminApi("user-1");
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+    const section = await screen.findByTestId("button-admin-nav-channels");
+    fireEvent.click(section);
+    expect(section.getAttribute("aria-current")).toBe("page");
+    const trigger = await screen.findByRole("button", { name: "delete category + channels" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Delete Project rooms?" });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Delete Project rooms?" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith("/with-channels"))).toBe(false);
   });
 
   it("shows non-owner administrators the owner-only state while deleting channels through the manager endpoint", async () => {

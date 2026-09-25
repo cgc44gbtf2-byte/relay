@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Archive, ArrowLeft, Bell, CheckCheck, RotateCcw, Trash2 } from "lucide-react";
+import { useDialogFocus } from "../use-dialog-focus";
 
 export type Notification = {
   id: number;
@@ -53,6 +54,11 @@ type Props = {
 };
 
 export function NotificationCenter({ notifications, setNotifications, request, requestPage, onClose, onNavigate, onOpenMessage, revision }: Props) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const close = useCallback(() => closeRef.current(), []);
+  useDialogFocus(dialogRef, close);
   const [view, setView] = useState<"inbox" | "archived">("inbox");
   const [archived, setArchived] = useState<Notification[]>([]);
   const [selected, setSelected] = useState<Notification | null>(null);
@@ -63,11 +69,16 @@ export function NotificationCenter({ notifications, setNotifications, request, r
   const [nextOffset, setNextOffset] = useState({ inbox: 0, archived: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [archivedReload, setArchivedReload] = useState(0);
   const [filter, setFilter] = useState<"all" | Notification["category"]>("all");
   const detailRequestId = useRef(0);
   const items = view === "inbox" ? notifications : archived;
   const visible = filter === "all" ? items : items.filter((item) => item.category === filter);
   const unreadCount = notifications.filter((item) => !item.readAt).length;
+  useEffect(() => {
+    if (selected) dialogRef.current?.querySelector<HTMLElement>('[data-testid="button-back-notifications"]')?.focus();
+    else if (document.activeElement === document.body) dialogRef.current?.querySelector<HTMLElement>('[data-testid="button-notifications-inbox"]')?.focus();
+  }, [selected?.id]);
 
   // Bootstrap data arrives after this component may mount. Until the app
   // supplies page metadata, a full page is the only safe indication that
@@ -97,7 +108,7 @@ export function NotificationCenter({ notifications, setNotifications, request, r
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load archived notifications."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [view, request, requestPage, revision]);
+  }, [view, request, requestPage, revision, archivedReload]);
 
   const loadOlder = async () => {
     if (loadingMore || !hasMore[view]) return;
@@ -188,19 +199,19 @@ export function NotificationCenter({ notifications, setNotifications, request, r
   };
 
   return <div className="fixed inset-0 z-40 flex items-end justify-center bg-background/70 p-3 backdrop-blur-sm sm:items-center" role="presentation">
-    <section role="dialog" aria-modal="true" aria-label={selected ? "Notification details" : "Notifications"} className="flex max-h-[min(85vh,720px)] w-full max-w-lg flex-col rounded-xl border border-border bg-card shadow-2xl">
+    <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="notification-dialog-title" tabIndex={-1} className="flex max-h-[min(85vh,720px)] w-full max-w-lg flex-col rounded-xl border border-border bg-card shadow-2xl">
       <header className="flex items-center justify-between gap-3 border-b border-border p-5">
         <div className="flex items-center gap-2">
           {selected && <button type="button" onClick={() => { detailRequestId.current += 1; setSelected(null); setError(""); }} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Back to notifications" data-testid="button-back-notifications"><ArrowLeft className="h-4 w-4" /></button>}
-          <h2 className="font-mono text-base font-bold">{selected ? labels[selected.category] : "Notifications"}</h2>
+           <h2 id="notification-dialog-title" className="font-mono text-base font-bold">{selected ? labels[selected.category] : "Notifications"}</h2>
         </div>
         <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Close notifications" data-testid="button-close-notifications">×</button>
       </header>
       <div className="min-h-0 overflow-y-auto p-5">
-        {error && <p role="alert" className="mb-3 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">{error}</p>}
+         {error && <div role="alert" className="mb-3 flex items-center gap-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive"><span>{error}</span>{selected ? <button type="button" onClick={() => void open(selected)} className="ml-auto underline">retry details</button> : view === "archived" ? <button type="button" onClick={() => setArchivedReload((value) => value + 1)} className="ml-auto underline">retry archived</button> : null}</div>}
         {selected ? <>
           <p className="font-mono text-[10px] text-muted-foreground">{new Date(selected.createdAt).toLocaleString()} · {selected.readAt ? "read" : "new"}</p>
-          {loading && <p className="mt-4 text-xs text-muted-foreground">Loading full details…</p>}
+           {loading && <p role="status" className="mt-4 text-xs text-muted-foreground">Loading full details…</p>}
           {linkedMessage ? <div className="mt-4 rounded-lg border border-border bg-background/60 p-4">
             <p className="mb-2 font-mono text-[11px] font-bold text-primary">{linkedMessage.sender?.displayName ?? "Message"}</p>
             <p className="whitespace-pre-wrap break-words text-sm leading-6" data-testid="text-notification-full-content">{linkedMessage.deletedAt ? "This message was deleted." : linkedMessage.body}</p>
@@ -213,14 +224,14 @@ export function NotificationCenter({ notifications, setNotifications, request, r
           </div>
         </> : <>
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <button type="button" onClick={() => setView("inbox")} className={`rounded px-3 py-1.5 font-mono text-xs ${view === "inbox" ? "bg-primary/15 text-primary" : "text-muted-foreground"}`} data-testid="button-notifications-inbox">Inbox</button>
-            <button type="button" onClick={() => setView("archived")} className={`rounded px-3 py-1.5 font-mono text-xs ${view === "archived" ? "bg-primary/15 text-primary" : "text-muted-foreground"}`} data-testid="button-notifications-archived">Archived</button>
+             <button type="button" onClick={() => setView("inbox")} aria-pressed={view === "inbox"} className={`rounded px-3 py-1.5 font-mono text-xs ${view === "inbox" ? "bg-primary/15 text-primary" : "text-muted-foreground"}`} data-testid="button-notifications-inbox">Inbox</button>
+             <button type="button" onClick={() => setView("archived")} aria-pressed={view === "archived"} className={`rounded px-3 py-1.5 font-mono text-xs ${view === "archived" ? "bg-primary/15 text-primary" : "text-muted-foreground"}`} data-testid="button-notifications-archived">Archived</button>
             {view === "inbox" && <div className="ml-auto flex gap-2">
               <button type="button" disabled={busy || unreadCount === 0} onClick={() => void perform("/notifications/read-all", "POST", () => setNotifications((list) => list.map((item) => ({ ...item, readAt: item.readAt ?? new Date().toISOString() }))))} className="flex items-center gap-1 font-mono text-[10px] text-primary disabled:opacity-40" data-testid="button-mark-all-read"><CheckCheck className="h-3.5 w-3.5" />Mark all read</button>
               <button type="button" disabled={busy || notifications.length === 0} onClick={() => { if (window.confirm("Clear all inbox notifications? Archived notifications will remain.")) void perform("/notifications/clear", "DELETE", () => setNotifications([])); }} className="font-mono text-[10px] text-destructive disabled:opacity-40" data-testid="button-clear-all-notifications">Clear all</button>
             </div>}
           </div>
-          <div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", ...Object.keys(labels)] as Array<"all" | Notification["category"]>).map((category) => <button type="button" key={category} onClick={() => setFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${filter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`} data-testid={`button-notification-filter-${category}`}>{category === "all" ? "All" : labels[category]}</button>)}</div>
+           <div className="mb-4 flex gap-1 overflow-x-auto pb-1">{(["all", ...Object.keys(labels)] as Array<"all" | Notification["category"]>).map((category) => <button type="button" key={category} aria-pressed={filter === category} onClick={() => setFilter(category)} className={`shrink-0 rounded border px-2 py-1 font-mono text-[9px] ${filter === category ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`} data-testid={`button-notification-filter-${category}`}>{category === "all" ? "All" : labels[category]}</button>)}</div>
            {loading ? <p className="text-xs text-muted-foreground">Loading notifications…</p> : visible.length === 0 ? <p className="font-mono text-xs text-muted-foreground">{view === "archived" ? "No archived notifications." : "You are all caught up."}</p> : <div className="space-y-2">{visible.map((notice) => <div key={notice.id} className={`flex items-start gap-1 rounded-lg ${notice.readAt ? "bg-muted/30" : "bg-primary/10"}`}>
             <button type="button" onClick={() => void open(notice)} className="flex min-w-0 flex-1 items-start gap-3 p-3 text-left" data-testid={`button-notification-${notice.id}`}><Bell className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><span className="min-w-0"><span className="mb-1 block font-mono text-[9px] uppercase tracking-wider text-primary">{labels[notice.category]}</span><span className="block line-clamp-2 break-words font-mono text-xs">{notice.body}</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">{new Date(notice.createdAt).toLocaleString()} · {notice.readAt ? "read" : "new"}</span></span></button>
             <button type="button" disabled={busy} onClick={() => view === "inbox" ? archive(notice) : restore(notice)} className="mt-2 rounded p-2 text-muted-foreground hover:text-primary disabled:opacity-40" aria-label={`${view === "inbox" ? "Archive" : "Restore"} notification ${notice.id}`} data-testid={`button-${view === "inbox" ? "archive" : "restore"}-notification-${notice.id}`}>{view === "inbox" ? <Archive className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}</button>

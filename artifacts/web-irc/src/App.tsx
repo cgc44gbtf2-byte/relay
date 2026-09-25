@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { fetchOrganizationPages, mergeOrganizationPages, requestOrganizationSnapshot, useOrganizationFreshness, type OrganizationPage } from "./useOrganizationFreshness";
 import {
@@ -53,6 +53,7 @@ import { getListModerationLogsQueryKey, useListModerationLogs, type ListModerati
 import { ErrorBoundary } from "@/components/error-boundary";
 import { clearTestAccountReturnContext, returnToTestAccountOwner, writeTestAccountReturnContext } from "./test-account-switch";
 import { NotificationCenter, type Notification, type LinkedNotificationMessage } from "./components/notification-center";
+import { useDialogFocus } from "./use-dialog-focus";
 import { WorkspaceIndicator } from "./components/workspace-indicator";
 
 const queryClient = new QueryClient();
@@ -391,13 +392,13 @@ const MessageRow = memo(function MessageRow({
       <div className="flex flex-wrap items-baseline gap-2">
         <span className="font-mono text-xs font-bold text-secondary-foreground">{message.sender?.displayName ?? "system"}</span>
         <span className="font-mono text-[10px] text-muted-foreground">{timeLabel(message.createdAt)}</span>
-        {message.sender?.id === currentUserId && message.kind !== "deleted" && <button onClick={() => onDelete(message)} className="ml-auto hidden font-mono text-[10px] text-muted-foreground hover:text-destructive group-hover:block">delete</button>}
+        {message.sender?.id === currentUserId && message.kind !== "deleted" && <button type="button" onClick={() => onDelete(message)} className="ml-auto rounded font-mono text-[10px] text-muted-foreground hover:text-destructive" aria-label={`Delete message: ${message.body.slice(0, 60)}`}>delete</button>}
       </div>
       <p className={`mt-1 break-words text-sm leading-6 ${message.kind === "deleted" ? "italic text-muted-foreground" : "text-foreground/90"}`}>{message.body}</p>
       {message.attachments?.map((attachment) => <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="mt-2 flex max-w-xs items-center gap-2 rounded border border-border bg-muted/40 px-2.5 py-2 font-mono text-[10px] text-primary hover:border-primary"><Paperclip className="h-3.5 w-3.5" /><span className="truncate">{attachment.fileName}</span><span className="text-muted-foreground">{Math.ceil(attachment.fileSize / 1024)}kb</span></a>)}
       {message.kind !== "deleted" && <div className="mt-2 flex items-center gap-1">{["👍", "❤️", "🎉"].map((emoji) => {
         const reaction = message.reactions?.find((item) => item.emoji === emoji);
-        return <button key={emoji} onClick={() => onToggleReaction(message, emoji)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>;
+        return <button key={emoji} type="button" onClick={() => onToggleReaction(message, emoji)} aria-label={`${reaction?.reacted ? "Remove" : "Add"} ${emoji} reaction${reaction?.count ? `, ${reaction.count} reactions` : ""}`} aria-pressed={Boolean(reaction?.reacted)} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${reaction?.reacted ? "border-primary bg-primary/10" : "border-transparent bg-muted/40 hover:border-border"}`}>{emoji}{reaction?.count ? ` ${reaction.count}` : ""}</button>;
       })}</div>}
     </div>
   </div>;
@@ -405,6 +406,7 @@ const MessageRow = memo(function MessageRow({
 
 function useRoomData(channelId: number | null, activeDm: Profile | null, onUnavailableChannel?: (channelId: number) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messagesError, setMessagesError] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -457,6 +459,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
     try {
       const data = await promise;
       if (refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) {
+        setMessagesError("");
         const changedDuringRefresh = [...changedMessagesRef.current.values()]
           .filter(({ version }) => version > startVersion)
           .map(({ message }) => message);
@@ -476,8 +479,12 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
       }
     } catch (error) {
       if (refreshId !== messageRefreshRef.current || roomKeyRef.current !== refreshRoomKey) return;
-      setMessages([]);
-      if (channelId && !activeDm && isRecoverableChannelError(error)) onUnavailableChannelRef.current?.(channelId);
+      if (channelId && !activeDm && isRecoverableChannelError(error)) {
+        setMessages([]);
+        onUnavailableChannelRef.current?.(channelId);
+      } else {
+        setMessagesError(error instanceof Error ? `History could not be loaded: ${error.message}` : "History could not be loaded.");
+      }
     } finally {
       if (showLoading && refreshId === messageRefreshRef.current && roomKeyRef.current === refreshRoomKey) setLoading(false);
     }
@@ -487,6 +494,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
     if (!activeDm || loadingOlder || !hasOlder || messages.length === 0) return;
     const paginationRoomKey = roomKey;
     setOlderMessagesError("");
+    setMessagesError("");
     setLoadingOlder(true);
     try {
       const cursor = encodeURIComponent(messages[0].createdAt);
@@ -531,6 +539,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
     setHasOlder(false);
     setLoadingOlder(false);
     setOlderMessagesError("");
+    setMessagesError("");
     if (!channelId && !activeDm) {
       setLoading(false);
       return;
@@ -539,7 +548,7 @@ function useRoomData(channelId: number | null, activeDm: Profile | null, onUnava
     void refreshMembers();
     return () => { memberRefreshRef.current += 1; };
   }, [channelId, activeDm, refreshMessages, refreshMembers, roomKey]);
-  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, olderMessagesError, loadOlderMessages, refreshMessages, refreshMembers };
+  return { messages, setMessages: updateMessages, members, setMembers, loading, loadingOlder, hasOlder, olderMessagesError, messagesError, loadOlderMessages, refreshMessages, refreshMembers };
 }
 
 function ChatApp() {
@@ -552,7 +561,14 @@ function ChatApp() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [currentChannelId, setCurrentChannelId] = useState<number | null>(null);
   const [activeDm, setActiveDm] = useState<Profile | null>(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  const [messageError, setMessageError] = useState("");
+  const [memberActionError, setMemberActionError] = useState("");
+  const [memberActionNotice, setMemberActionNotice] = useState("");
+  const [searchError, setSearchError] = useState("");
+  const [userSearchError, setUserSearchError] = useState("");
+  const [userSearchRetry, setUserSearchRetry] = useState(0);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -950,24 +966,29 @@ function ChatApp() {
     const query = userSearch.trim();
     if (query.length < 2) {
       setUserResults([]);
+      setUserSearchError("");
       return () => {
         if (userSearchRequestRef.current === requestId) userSearchRequestRef.current += 1;
       };
     }
     const timer = window.setTimeout(() => {
+      setUserSearchError("");
       pagedApi<Profile>(`/users/search?q=${encodeURIComponent(query)}`, true)
         .then((results) => {
           if (userSearchRequestRef.current === requestId) setUserResults(results);
         })
         .catch(() => {
-          if (userSearchRequestRef.current === requestId) setUserResults([]);
+          if (userSearchRequestRef.current === requestId) {
+            setUserResults([]);
+            setUserSearchError("People search failed. Change the search to try again.");
+          }
         });
     }, 250);
     return () => {
       window.clearTimeout(timer);
       if (userSearchRequestRef.current === requestId) userSearchRequestRef.current += 1;
     };
-  }, [userSearch]);
+  }, [userSearch, userSearchRetry]);
 
   const visibleChannels = useMemo(() => channels.filter((channel) => channel.name.includes(filter.toLowerCase())), [channels, filter]);
   const channelGroups = useMemo(() => categories
@@ -984,6 +1005,7 @@ function ChatApp() {
     const channelId = activeDm ? null : currentChannelId;
     const dmId = activeDm?.id ?? null;
     if (!activeDm && channelId === null) return;
+    setMessageError("");
     setDraft("");
     if (channelId !== null) {
       if (typingStartTimerRef.current !== null) window.clearTimeout(typingStartTimerRef.current);
@@ -1006,17 +1028,19 @@ function ChatApp() {
           : upsertBoundedMessage(items, sent, 100));
       }
     } catch (error) {
+      if (activeDmIdRef.current !== dmId || currentChannelIdRef.current !== channelId) return;
       if (channelId !== null && isRecoverableChannelError(error)) {
         setDraft("");
         await recoverFromUnavailableChannel(channelId);
       } else {
         setDraft(body);
-        window.alert(error instanceof Error ? error.message : "Message could not be sent");
+        setMessageError(`Message could not be sent: ${error instanceof Error ? error.message : "Try again."} Your draft is ready to retry.`);
       }
     }
   };
   useEffect(() => {
     setReplyingTo(null);
+    setMessageError("");
   }, [currentChannelId, activeDm?.id]);
   const sendTyping = (value: string) => {
     setDraft(value);
@@ -1186,11 +1210,16 @@ function ChatApp() {
       }
     }
   };
-  const searchHistory = async (event: FormEvent) => {
-    event.preventDefault();
+  const searchHistory = async (event?: FormEvent) => {
+    event?.preventDefault();
     if (search.trim().length < 2) return;
-    setSearchResults(await pagedApi<ChatMessage>(`/search/messages?q=${encodeURIComponent(search)}`));
-    setPanel("search");
+    setSearchError("");
+    try {
+      setSearchResults(await pagedApi<ChatMessage>(`/search/messages?q=${encodeURIComponent(search)}`));
+      setPanel("search");
+    } catch (reason) {
+      setSearchError(reason instanceof Error ? `Search failed: ${reason.message}` : "Search failed. Try again.");
+    }
   };
   const openNotificationMessage = (message: LinkedNotificationMessage) => {
     if (message.channelId) {
@@ -1279,7 +1308,7 @@ function ChatApp() {
     try {
       const deleted = await api<ChatMessage>(`/messages/${message.id}`, { method: "DELETE" });
       setRoomMessages((items) => items.map((item) => item.id === deleted.id ? deleted : item));
-    } catch (error) { window.alert(error instanceof Error ? error.message : "Message could not be deleted"); }
+    } catch (error) { setMessageError(error instanceof Error ? `Message could not be deleted: ${error.message}` : "Message could not be deleted. Try again."); }
   }, [setRoomMessages]);
   const toggleReaction = useCallback(async (message: ChatMessage, emoji: string) => {
     const current = message.reactions?.find((reaction) => reaction.emoji === emoji);
@@ -1288,7 +1317,7 @@ function ChatApp() {
         ? await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions/${encodeURIComponent(emoji)}`, { method: "DELETE" })
         : await api<ChatMessage["reactions"]>(`/messages/${message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) });
       setRoomMessages((items) => items.map((item) => item.id === message.id ? { ...item, reactions } : item));
-    } catch (error) { window.alert(error instanceof Error ? error.message : "Reaction could not be changed"); }
+    } catch (error) { setMessageError(error instanceof Error ? `Reaction could not be changed: ${error.message}` : "Reaction could not be changed. Try again."); }
   }, [setRoomMessages]);
   const sendAttachment = async (file: File) => {
     const channelId = currentChannelId;
@@ -1339,12 +1368,23 @@ function ChatApp() {
   };
   const moderate = async (member: Member, action: "mute" | "kick" | "ban" | "moderator") => {
     if (!currentChannel) return;
-    await api(`/channels/${currentChannel.id}/moderation`, { method: "POST", body: JSON.stringify({ action, targetUserId: member.id, minutes: 10, reason: "Channel moderation" }) });
-    if (action !== "mute") room.setMembers((items) => items.filter((item) => item.id !== member.id));
+    setMemberActionError("");
+    try {
+      await api(`/channels/${currentChannel.id}/moderation`, { method: "POST", body: JSON.stringify({ action, targetUserId: member.id, minutes: 10, reason: "Channel moderation" }) });
+      if (action !== "mute") room.setMembers((items) => items.filter((item) => item.id !== member.id));
+      setMemberActionNotice(`${member.displayName}: ${action} completed.`);
+    } catch (reason) {
+      setMemberActionError(reason instanceof Error ? reason.message : "Could not update room membership. Try again.");
+    }
   };
   const blockUser = async (member: Member) => {
-    await api(`/users/${member.id}/block`, { method: "POST", body: "{}" });
-    window.alert(`${member.displayName} is now blocked.`);
+    setMemberActionError("");
+    try {
+      await api(`/users/${member.id}/block`, { method: "POST", body: "{}" });
+      setMemberActionNotice(`${member.displayName} is now blocked.`);
+    } catch (reason) {
+      setMemberActionError(reason instanceof Error ? reason.message : "Could not block this person. Try again.");
+    }
   };
   const returnToOwner = async () => {
     if (returningToOwner) return;
@@ -1374,7 +1414,9 @@ function ChatApp() {
   };
   const renderChannel = (channel: Channel) => <div key={channel.id}>
     <button disabled={joiningChannelId === channel.id}
-      onClick={() => channel.joined ? (setRoomRecoveryError(""), setCurrentChannelId(channel.id), setActiveDm(null)) : void joinChannel(channel)}
+      onClick={() => { setMobileNavOpen(false); if (channel.joined) { setRoomRecoveryError(""); setCurrentChannelId(channel.id); setActiveDm(null); } else void joinChannel(channel); }}
+      aria-current={channel.id === currentChannelId && !activeDm ? "page" : undefined}
+      aria-label={`${channel.name} in ${channel.communityName ?? "Public network"}${channel.accessStatus === "pending" ? ", request pending" : ""}`}
       className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left font-mono text-xs disabled:opacity-50 ${channel.id === currentChannelId && !activeDm ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}>
       <span className="flex min-w-0 items-center gap-2"><Hash className={`h-3.5 w-3.5 ${channel.isPrivate ? "text-secondary-foreground" : "text-primary/70"}`} /><span className="truncate">{channel.name.slice(1)}</span></span>
       <span className="ml-2 text-[10px]">{joiningChannelId === channel.id ? "joining…" : channel.accessStatus === "pending" ? "…" : channel.memberCount}</span>
@@ -1412,7 +1454,8 @@ function ChatApp() {
             </div>
           <p className="mb-2 mt-7 px-2 font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">direct messages</p>
           <div className="relative"><Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} placeholder="find a person" className="h-9 w-full rounded-md border border-sidebar-border bg-sidebar-accent/40 pl-9 pr-3 font-mono text-[11px] outline-none focus:border-primary" /></div>
-          {userResults.length > 0 && <div className="mt-2 space-y-1 rounded-md border border-sidebar-border bg-sidebar-accent/60 p-1">{userResults.map((result) => <button key={result.id} onClick={() => { setActiveDm(result); setUserSearch(""); setUserResults([]); }} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-sidebar-accent"><Avatar user={result} size="sm" /><span className="min-w-0 truncate font-mono text-xs">{result.displayName}</span></button>)}</div>}
+          {userSearchError && <div role="alert" className="mt-2 font-mono text-[10px] text-destructive">{userSearchError} <button type="button" onClick={() => setUserSearchRetry((value) => value + 1)} className="underline">retry people search</button></div>}
+          {userResults.length > 0 && <div aria-label="People search results" className="mt-2 space-y-1 rounded-md border border-sidebar-border bg-sidebar-accent/60 p-1">{userResults.map((result) => <button key={result.id} type="button" aria-label={result.displayName} onClick={() => { setActiveDm(result); setUserSearch(""); setUserResults([]); }} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-sidebar-accent"><Avatar user={result} size="sm" /><span className="min-w-0 truncate font-mono text-xs">{result.displayName}</span></button>)}</div>}
         </div>
         <button className="m-3 flex items-center gap-2 rounded-md bg-sidebar-accent/60 p-2.5 text-left" onClick={() => setPanel("profile")}><Avatar user={profile} size="sm" /><span className="min-w-0 flex-1 truncate"><span className="block font-mono text-xs">{profile.displayName}</span><span className="block font-mono text-[9px] text-muted-foreground">@{profile.username}</span>{profile.isTestAccount && <span className="mt-1 inline-block rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[8px] uppercase text-primary">test account · {profile.testRole?.replaceAll("_", " ")}</span>}</span><ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /></button>
       </aside>
@@ -1421,7 +1464,8 @@ function ChatApp() {
         <header className="flex min-h-[76px] items-center justify-between border-b border-border bg-card/80 px-4 backdrop-blur sm:px-6">
            <div className="min-w-0"><WorkspaceIndicator channel={currentChannel} isDirectMessage={Boolean(activeDm)} />{activeDm ? <><h1 className="truncate font-mono text-base font-bold">@{activeDm.username}</h1></> : <><div className="flex items-center gap-2"><Hash className="h-4 w-4 text-primary" /><h1 className="truncate font-mono text-base font-bold">{currentChannel?.name ?? (channels.length > 0 ? "select a channel" : "no channels")}</h1>{currentChannel && <span className="rounded bg-chart-4/10 px-1.5 py-0.5 font-mono text-[9px] uppercase text-chart-4">{currentChannel.isPrivate ? "private" : "public"}</span>}{["owner", "moderator"].includes(actorRole ?? "") && <button onClick={editTopic} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit channel topic" aria-label="Edit channel topic"><Settings className="h-3.5 w-3.5" /></button>}</div><p className="mt-1 truncate text-[11px] text-muted-foreground">{currentChannel?.description || currentChannel?.topic}</p></>}</div>
            <div className="flex items-center gap-1.5">
-            <form onSubmit={searchHistory} className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 sm:flex"><Search className="h-3.5 w-3.5 text-muted-foreground" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="search history" className="h-8 w-28 bg-transparent font-mono text-[10px] outline-none" /></form>
+             <button type="button" onClick={() => setMobileNavOpen(true)} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] md:hidden">rooms &amp; people</button>
+             <form onSubmit={searchHistory} className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 sm:flex"><Search className="h-3.5 w-3.5 text-muted-foreground" /><input aria-label="Search message history" value={search} onChange={(event) => { setSearch(event.target.value); setSearchError(""); }} placeholder="search history" className="h-8 w-28 bg-transparent font-mono text-[10px] outline-none" /></form>
               {!activeDm && currentChannel && ["owner", "moderator"].includes(actorRole ?? "") && <button onClick={() => { setOrganizeCategoryId(currentChannel.categoryId === null ? "" : String(currentChannel.categoryId)); setOrganizeError(""); setOrganizeChannelOpen(true); }} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary" data-testid="button-organize-current-channel">organize</button>}
                {!activeDm && currentChannel?.canMovePublicSpace && <button onClick={() => void openPublicSpaceMove()} className="rounded-md border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary" data-testid="button-move-public-space">move space</button>}
               {!activeDm && joinRequests.length > 0 && <button onClick={() => setShowRequests(true)} className="rounded-md border border-primary/40 px-2 py-1.5 font-mono text-[10px] text-primary hover:bg-primary/10">{joinRequests.length} request{joinRequests.length === 1 ? "" : "s"}</button>}
@@ -1430,7 +1474,8 @@ function ChatApp() {
             <button onClick={() => signOut({ redirectUrl: basePath || "/" })} className="hidden rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground sm:block" aria-label="Sign out"><LogOut className="h-4 w-4" /></button>
           </div>
         </header>
-        {profile.isTestAccount && <div className="border-b border-primary/30 bg-primary/10 px-4 py-3 font-mono text-xs sm:px-6">
+         {searchError && <div role="alert" className="border-b border-destructive/30 bg-destructive/10 px-4 py-2 font-mono text-xs text-destructive sm:px-6">{searchError} <button type="button" onClick={() => void searchHistory()} className="ml-2 underline">retry search</button></div>}
+         {profile.isTestAccount && <div className="border-b border-primary/30 bg-primary/10 px-4 py-3 font-mono text-xs sm:px-6">
           <div className="flex flex-wrap items-center gap-3">
             <span className="font-bold text-primary">test mode</span>
             <span className="text-muted-foreground">You are viewing Relay as a test account.</span>
@@ -1444,19 +1489,48 @@ function ChatApp() {
               <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 font-mono text-[10px] leading-5 text-destructive">{roomRecoveryError}</p>
               {channels.length > 0 && <div aria-label="Room choices" className="mt-2 max-h-48 space-y-1 overflow-y-auto">{channels.map(renderChannel)}</div>}
             </div>}
+             {room.messagesError && <div role="alert" className="mx-3 mt-3 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-[10px] text-destructive sm:mx-6"><span>{room.messagesError}</span><button type="button" onClick={() => void room.refreshMessages(true)} className="shrink-0 underline">retry history</button></div>}
+             {messageError && <p role="alert" className="mx-3 mt-2 font-mono text-[10px] text-destructive sm:mx-6">{messageError}</p>}
             <div className="flex-1 overflow-y-auto px-3 py-5 sm:px-6">
                {!activeDm && !currentChannel ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center px-6 text-center"><Hash className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">{channels.length === 0 ? "no channels available" : "select a channel"}</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">{channels.length === 0 ? "You do not have access to any channels yet." : "Choose an available room from the channel list."}</p>{channelRefreshError && <p role="alert" className="mt-3 font-mono text-[10px] text-destructive">{channelRefreshError}</p>}<button onClick={() => void retryChannelRecovery()} className="mt-4 rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary"><RefreshCw className="mr-2 inline h-3.5 w-3.5" />{channelRefreshError ? "retry channel refresh" : "refresh channels"}</button></div> : room.loading ? <p className="font-mono text-xs text-muted-foreground">loading history…</p> : room.messages.length === 0 ? <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-center"><MessageSquare className="mb-3 h-8 w-8 text-primary" /><p className="font-mono text-sm">the room is quiet</p><p className="mt-2 max-w-xs font-mono text-[11px] text-muted-foreground">Start the conversation and make the room yours.</p></div> : <div className="space-y-5">{activeDm && room.hasOlder && <div className="text-center"><button type="button" onClick={() => void room.loadOlderMessages()} disabled={room.loadingOlder} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-50">{room.loadingOlder ? "loading older messages…" : "load older messages"}</button>{room.olderMessagesError && <p className="mt-2 font-mono text-[10px] text-destructive">{room.olderMessagesError}</p>}</div>}{room.messages.map((message) => <MessageRow key={message.id} message={message} currentUserId={profile.id} onDelete={deleteMessage} onToggleReaction={toggleReaction} />)}</div>}
               {room.messages.length > 0 && <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3"><span className="font-mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">reply to</span>{room.messages.slice(-4).map((message) => <button key={message.id} type="button" onClick={() => setReplyingTo(message)} disabled={message.kind === "deleted"} className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40">{message.sender?.displayName ?? "unknown sender"}: {message.body}</button>)}</div>}
               {!activeDm && Object.keys(typingUsers).length > 0 && <p className="mt-3 font-mono text-[10px] text-muted-foreground">{room.members.filter((member) => typingUsers[member.id]).map((member) => member.displayName).join(", ") || "Someone"} typing…</p>}
             </div>
-             <div className="border-t border-border bg-card/70 px-3 pb-4 pt-3 sm:px-6"><form onSubmit={sendMessage} className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary"><input ref={fileInputRef} type="file" accept="image/*,text/*,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void sendAttachment(file); }} /><button type="button" onClick={() => fileInputRef.current?.click()} disabled={!currentChannelId || Boolean(activeDm) || uploading} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-40" aria-label="Share a file"><Paperclip className="h-4 w-4" /></button><textarea disabled={!activeDm && !currentChannelId} value={draft} onChange={(event) => sendTyping(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} maxLength={500} placeholder={activeDm ? `message @${activeDm.username}` : currentChannel?.name ? `message ${currentChannel.name}` : "Select a channel to message"} className="max-h-28 min-h-[28px] flex-1 resize-none bg-transparent px-2 py-1 font-mono text-xs outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed" /><button type="submit" disabled={!draft.trim() || uploading || (!activeDm && !currentChannelId)} className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground disabled:opacity-40"><MessageCircle className="h-4 w-4" /></button></form><div className="mt-2 flex justify-between px-1 font-mono text-[9px] text-muted-foreground"><span><b>enter</b> send · <b>shift + enter</b> new line · <b>paperclip</b> share</span><span className={connection === "live" ? "text-chart-4" : "text-primary"}>● {uploading ? "uploading" : connection}</span></div></div>
+              <div className="border-t border-border bg-card/70 px-3 pb-4 pt-3 sm:px-6">
+                <form onSubmit={sendMessage} className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary">
+                  <input ref={fileInputRef} type="file" accept="image/*,text/*,application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void sendAttachment(file); }} />
+                  <button type="button" onClick={() => fileInputRef.current?.click()} disabled={!currentChannelId || Boolean(activeDm) || uploading} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-40" aria-label="Share a file"><Paperclip className="h-4 w-4" /></button>
+                  <textarea aria-label={activeDm ? `Message ${activeDm.displayName}` : `Message ${currentChannel?.name ?? "a room"}`} disabled={!activeDm && !currentChannelId} value={draft} onChange={(event) => sendTyping(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} rows={1} maxLength={500} placeholder={activeDm ? `message @${activeDm.username}` : currentChannel?.name ? `message ${currentChannel.name}` : "Select a channel to message"} className="max-h-28 min-h-[28px] flex-1 resize-none bg-transparent px-2 py-1 font-mono text-xs outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed" />
+                  <button type="submit" aria-label="Send message" disabled={!draft.trim() || uploading || (!activeDm && !currentChannelId)} className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground disabled:opacity-40"><MessageCircle className="h-4 w-4" /></button>
+                </form>
+                <div className="mt-2 flex justify-between px-1 font-mono text-[9px] text-muted-foreground"><span><b>enter</b> send · <b>shift + enter</b> new line · <b>paperclip</b> share</span><span role="status" className={connection === "live" ? "text-chart-4" : "text-primary"}>● {uploading ? "uploading" : connection}</span></div>
+              </div>
              {replyingTo && <div className="border-t border-border bg-primary/5 px-3 py-2 sm:px-6"><div className="flex items-center justify-between gap-3"><p className="min-w-0 truncate font-mono text-[10px] text-primary">Replying to {replyingTo.sender?.displayName ?? "unknown sender"}: {replyingTo.body}</p><button type="button" onClick={() => setReplyingTo(null)} className="shrink-0 font-mono text-[10px] text-muted-foreground hover:text-foreground">cancel</button></div></div>}
            </section>
-          {showMembers && !activeDm && <aside className="hidden w-[285px] shrink-0 border-l border-border bg-card/70 lg:flex lg:flex-col"><div className="border-b border-border px-4 py-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">in the room</p><p className="mt-1 font-mono text-lg font-bold">{room.members.length} <span className="text-xs font-normal text-muted-foreground">people</span></p></div><div className="flex-1 overflow-y-auto p-3">{room.members.map((member) => <div key={member.id} className="group rounded-md px-2 py-2 hover:bg-muted"><div className="flex items-center gap-2"><Avatar user={member} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName} {member.status === "online" ? <span className="ml-1 text-chart-4">●</span> : <span className="ml-1 text-muted-foreground">○</span>}</p><p className="font-mono text-[9px] text-muted-foreground">@{member.username} · {member.role}</p></div><button onClick={() => setActiveDm(member)} className="rounded p-1 text-muted-foreground hover:text-primary" aria-label={`Message ${member.displayName}`}><MessageCircle className="h-3.5 w-3.5" /></button></div>{member.id !== profile.id && <div className="mt-2 hidden gap-1 group-hover:flex"><button onClick={() => blockUser(member)} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-accent hover:text-accent">block</button>{actorRole === "owner" && member.role === "member" && <button onClick={() => moderate(member, "moderator")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-secondary-foreground hover:text-secondary-foreground">mod</button>}{["owner", "moderator"].includes(actorRole ?? "") && member.role === "member" && <><button onClick={() => moderate(member, "mute")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">mute</button><button onClick={() => moderate(member, "kick")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">kick</button><button onClick={() => moderate(member, "ban")} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-destructive hover:text-destructive">ban</button></>}</div>}</div>)}</div></aside>}
+          {showMembers && !activeDm && <aside className="hidden w-[285px] shrink-0 border-l border-border bg-card/70 lg:flex lg:flex-col">
+            <div className="border-b border-border px-4 py-5"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">in the room</p><p className="mt-1 font-mono text-lg font-bold">{room.members.length} <span className="text-xs font-normal text-muted-foreground">people</span></p></div>
+            {memberActionError && <p role="alert" className="p-3 text-xs text-destructive">{memberActionError}</p>}
+            {memberActionNotice && <p role="status" className="p-3 text-xs text-chart-4">{memberActionNotice}</p>}
+            <div className="flex-1 overflow-y-auto p-3">{room.members.map((member) => <div key={member.id} className="group rounded-md px-2 py-2 hover:bg-muted">
+              <div className="flex items-center gap-2"><Avatar user={member} size="sm" /><div className="min-w-0 flex-1"><p className="truncate font-mono text-xs">{member.displayName} {member.status === "online" ? <span className="ml-1 text-chart-4">●</span> : <span className="ml-1 text-muted-foreground">○</span>}</p><p className="font-mono text-[9px] text-muted-foreground">@{member.username} · {member.role}</p></div><button type="button" onClick={() => setActiveDm(member)} className="rounded p-1 text-muted-foreground hover:text-primary" aria-label={`Message ${member.displayName}`}><MessageCircle className="h-3.5 w-3.5" /></button></div>
+              {member.id !== profile.id && <div className="mt-2 flex flex-wrap gap-1">
+                <button type="button" onClick={() => void blockUser(member)} aria-label={`Block ${member.displayName}`} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-accent hover:text-accent">block</button>
+                {actorRole === "owner" && member.role === "member" && <button type="button" onClick={() => void moderate(member, "moderator")} aria-label={`Make ${member.displayName} a moderator`} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-secondary-foreground hover:text-secondary-foreground">mod</button>}
+                {["owner", "moderator"].includes(actorRole ?? "") && member.role === "member" && <>{(["mute", "kick", "ban"] as const).map((action) => <button key={action} type="button" onClick={() => void moderate(member, action)} aria-label={`${action} ${member.displayName}`} className="rounded border border-border px-1.5 py-1 font-mono text-[9px] text-muted-foreground hover:border-primary hover:text-primary">{action}</button>)}</>}
+              </div>}
+            </div>)}</div>
+          </aside>}
         </div>
       </main>
 
-      {moveSpaceOpen && currentChannel && <Overlay title={`Move ${currentChannel.name} to a public space`} onClose={() => { if (!moveSpaceWorking) setMoveSpaceOpen(false); }}>
+       {mobileNavOpen && <div className="md:hidden"><Overlay title="Rooms and people" onClose={() => setMobileNavOpen(false)}>
+         <label className="mb-3 block font-mono text-xs">Find a room<input value={filter} onChange={(event) => setFilter(event.target.value)} className="mt-1 h-9 w-full rounded border border-input bg-background px-2" /></label>
+         <div aria-label="Rooms" className="max-h-48 space-y-1 overflow-y-auto">{visibleChannels.map(renderChannel)}{visibleChannels.length === 0 && <p className="text-xs text-muted-foreground">No rooms match this filter.</p>}</div>
+         <label className="mb-2 mt-4 block font-mono text-xs">Find a person<input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} className="mt-1 h-9 w-full rounded border border-input bg-background px-2" /></label>
+         {userSearchError && <div role="alert" className="text-xs text-destructive">{userSearchError} <button type="button" onClick={() => setUserSearchRetry((value) => value + 1)} className="underline">retry people search</button></div>}
+         <div aria-label="People search results" className="max-h-36 space-y-1 overflow-y-auto">{userResults.map((person) => <button key={person.id} type="button" onClick={() => { setActiveDm(person); setMobileNavOpen(false); setUserSearch(""); }} className="block w-full rounded px-2 py-1 text-left font-mono text-xs hover:bg-muted">{person.displayName}</button>)}</div>
+       </Overlay></div>}
+       {moveSpaceOpen && currentChannel && <Overlay title={`Move ${currentChannel.name} to a public space`} onClose={() => { if (!moveSpaceWorking) setMoveSpaceOpen(false); }}>
         <form onSubmit={movePublicSpace} className="space-y-4">
           <p className="text-xs text-muted-foreground">Current space: {currentChannel.communityName || "Public network"}. The channel, its members, and message history will move together. Its old category will be cleared.</p>
           <label className="block font-mono text-xs">destination
@@ -1487,7 +1561,13 @@ function ChatApp() {
 }
 
 function Overlay({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return <div className="fixed inset-0 z-40 flex items-end justify-center bg-background/70 p-3 backdrop-blur-sm sm:items-center"><div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl"><div className="mb-5 flex items-center justify-between"><h2 className="font-mono text-base font-bold">{title}</h2><button onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label="Close"><X className="h-4 w-4" /></button></div>{children}</div></div>;
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const close = useCallback(() => closeRef.current(), []);
+  useDialogFocus(dialogRef, close);
+  const titleId = useId();
+  return <div className="fixed inset-0 z-40 flex items-end justify-center bg-background/70 p-3 backdrop-blur-sm sm:items-center"><div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-2xl"><div className="mb-5 flex items-center justify-between"><h2 id={titleId} className="font-mono text-base font-bold">{title}</h2><button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted" aria-label={`Close ${title}`}><X className="h-4 w-4" /></button></div>{children}</div></div>;
 }
 
 function OwnerConfirmOverlay({ title, description, phrase, confirmLabel, working, error, onConfirm, onClose }: {
@@ -2115,8 +2195,18 @@ function AdminRoleAssignmentsPanel({
   );
 }
 
-function AdminConfirmDialog({ title, description, confirmLabel, destructive, working, onConfirm, onCancel }: { title: string; description: string; confirmLabel: string; destructive?: boolean; working: boolean; onConfirm: () => void; onCancel: () => void }) {
-  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-background/75 p-4 backdrop-blur-sm sm:items-center"><div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl"><div className="flex gap-3"><div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${destructive ? "bg-destructive/15 text-destructive" : "bg-primary/15 text-primary"}`}>{destructive ? <AlertTriangle className="h-4 w-4" /> : <Shield className="h-4 w-4" />}</div><div><h2 className="font-mono text-sm font-bold">{title}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{description}</p></div></div><div className="mt-6 flex justify-end gap-2"><button onClick={onCancel} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted">cancel</button><button disabled={working} onClick={onConfirm} className={`rounded-md px-3 py-2 font-mono text-[10px] font-bold disabled:opacity-50 ${destructive ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground"}`} data-testid="button-confirm-admin-action">{working ? "working…" : confirmLabel}</button></div></div></div>;
+function AdminConfirmDialog({ title, description, confirmLabel, destructive, working, error, onConfirm, onCancel }: { title: string; description: string; confirmLabel: string; destructive?: boolean; working: boolean; error?: string; onConfirm: () => void; onCancel: () => void }) {
+  return <Overlay title={title} onClose={() => { if (!working) onCancel(); }}>
+    <div className="flex gap-3">
+      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${destructive ? "bg-destructive/15 text-destructive" : "bg-primary/15 text-primary"}`}>{destructive ? <AlertTriangle className="h-4 w-4" /> : <Shield className="h-4 w-4" />}</div>
+      <p className="text-sm leading-6 text-muted-foreground">{description}</p>
+    </div>
+    {error && <p role="alert" className="mt-4 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">{error}</p>}
+    <div className="mt-6 flex justify-end gap-2">
+      <button type="button" disabled={working} onClick={onCancel} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground hover:bg-muted">cancel</button>
+      <button type="button" disabled={working} onClick={onConfirm} className={`rounded-md px-3 py-2 font-mono text-[10px] font-bold disabled:opacity-50 ${destructive ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground"}`} data-testid="button-confirm-admin-action">{working ? "working…" : confirmLabel}</button>
+    </div>
+  </Overlay>;
 }
 
 function AdminCommunityUpgradesPanel({ focusedRequestId }: { focusedRequestId: number | null }) {
@@ -2224,6 +2314,9 @@ function AdminConsole() {
     | { kind: "category-with-channels"; item: ConsoleOverview["categories"][number] }
     | null
   >(null);
+  useEffect(() => {
+    if (pendingRole || pendingAccountStatus || pendingRevoke || pendingClear || pendingResourceDelete) setError("");
+  }, [pendingRole, pendingAccountStatus, pendingRevoke, pendingClear, pendingResourceDelete]);
   const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [announcementDraft, setAnnouncementDraft] = useState("");
   const load = async (
@@ -2555,14 +2648,14 @@ function AdminConsole() {
       <div className="mx-auto flex max-w-[1500px]">
         <aside className="hidden w-[218px] shrink-0 border-r border-border px-3 py-6 lg:block">
           <p className="px-3 font-mono text-[9px] uppercase tracking-[.2em] text-muted-foreground">operations</p>
-          <nav className="mt-3 space-y-1">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left font-mono text-xs ${section === key ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`} data-testid={`button-admin-nav-${key}`}><Icon className="h-4 w-4" />{label}{section === key && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" />}</button>)}</nav>
+           <nav aria-label="Admin sections" className="mt-3 space-y-1">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? "page" : undefined} className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left font-mono text-xs ${section === key ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`} data-testid={`button-admin-nav-${key}`}><Icon className="h-4 w-4" />{label}{section === key && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-primary" />}</button>)}</nav>
           <div className="mt-10 border-t border-border px-3 pt-5"><p className="font-mono text-[9px] uppercase tracking-[.16em] text-muted-foreground">signed in as</p><p className="mt-3 truncate font-mono text-xs font-bold">{status.profile.displayName}</p><p className="mt-1 truncate font-mono text-[10px] text-secondary-foreground">@{status.profile.username}</p><p className="mt-3 inline-flex items-center gap-1.5 rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary"><Shield className="h-3 w-3" /> administrator</p></div>
         </aside>
         <main className="min-w-0 flex-1 px-4 py-5 sm:px-7 sm:py-7">
-          <div className="mb-5 flex gap-1 overflow-x-auto pb-1 lg:hidden">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 font-mono text-[10px] ${section === key ? "bg-primary text-primary-foreground" : "border border-border text-muted-foreground"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}</div>
+           <nav aria-label="Admin sections" className="mb-5 flex gap-1 overflow-x-auto pb-1 lg:hidden">{nav.map(([key, label, Icon]) => <button key={key} onClick={() => setSection(key)} aria-current={section === key ? "page" : undefined} className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 font-mono text-[10px] ${section === key ? "bg-primary text-primary-foreground" : "border border-border text-muted-foreground"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}</nav>
            <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-primary">/{title}</p><h1 className="mt-2 font-mono text-2xl font-bold tracking-tight sm:text-3xl">{section === "overview" ? "Network at a glance." : section === "accounts" ? "Account governance." : section === "channels" ? "Public rooms." : section === "roles" ? "Scoped access." : section === "activity" ? "A clear audit trail." : section === "upgrades" ? "Community upgrade requests." : "System status."}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{section === "overview" ? "The essential signals for keeping Relay available, safe, and understandable." : section === "accounts" ? "Review identity, presence, and privilege without leaving the control room." : section === "channels" ? "Keep room context useful and remove history only when you mean to." : section === "roles" ? "Grant and revoke least-privilege access across platform and business scopes." : section === "activity" ? "Recent administrative changes and network events, newest first." : section === "upgrades" ? "Review pending requests and record externally verified payments." : "A live read on the services behind the conversation."}</p></div><div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground"><Clock3 className="h-3.5 w-3.5" />{health ? `checked ${timeLabel(health.checkedAt)}` : "checking signals"}</div></div>
-          {error && <div className="mb-5 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span><button onClick={() => void load()} className="ml-auto underline">retry</button></div>}
-          {notice && <div className="mb-5 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notice" title="Dismiss notice"><X className="h-3.5 w-3.5" /></button></div>}
+           {error && <div role="alert" className="mb-5 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span><button onClick={() => void load()} className="ml-auto underline">retry load</button></div>}
+           {notice && <div role="status" className="mb-5 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notice" title="Dismiss notice"><X className="h-3.5 w-3.5" /></button></div>}
             {!overview ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[1, 2, 3, 4].map((item) => <div key={item} className="h-28 animate-pulse rounded-lg border border-border bg-card" />)}</div> : section === "overview" ? (
             <div className="space-y-5">
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{stats.map(([label, value, Icon]) => <div key={label} className="rounded-lg border border-border bg-card p-4"><div className="flex items-center justify-between"><Icon className="h-4 w-4 text-primary" /><span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">live</span></div><p className="mt-5 font-mono text-3xl font-bold">{value}</p><p className="mt-1 font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">{label}</p></div>)}</div>
@@ -2637,11 +2730,11 @@ function AdminConsole() {
         </main>
       </div>
       {announcementOpen && <Overlay title="Platform announcement" onClose={() => { if (!working) setAnnouncementOpen(false); }}><form onSubmit={sendAnnouncement}><p className="mb-4 text-sm leading-6 text-muted-foreground">This message will be delivered to every user as a notification.</p><textarea autoFocus required maxLength={500} value={announcementDraft} onChange={(event) => setAnnouncementDraft(event.target.value)} placeholder="Write a clear message for the network…" className="min-h-32 w-full resize-y rounded-md border border-input bg-background p-3 text-sm outline-none focus:border-primary" /><div className="mt-2 text-right font-mono text-[9px] text-muted-foreground">{announcementDraft.length}/500</div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={working} onClick={() => setAnnouncementOpen(false)} className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">cancel</button><button disabled={working || !announcementDraft.trim()} className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 font-mono text-[10px] font-bold text-primary-foreground disabled:opacity-50"><Megaphone className="h-3.5 w-3.5" />{working ? "sending…" : "send announcement"}</button></div></form></Overlay>}
-      {pendingRole && <AdminConfirmDialog title={`Change role for ${pendingRole.label}?`} description={`${pendingRole.label} will become ${pendingRole.role === "admin" ? "an Admin / Developer" : pendingRole.role.replace("_", " ")}. Platform roles are enforced on the server.`} confirmLabel={`set ${pendingRole.role === "admin" ? "admin / developer" : pendingRole.role.replace("_", " ")}`} destructive={pendingRole.role === "member"} working={working} onConfirm={() => void updateRole()} onCancel={() => setPendingRole(null)} />}
-      {pendingAccountStatus && <AdminConfirmDialog title={`${pendingAccountStatus.accountStatus === "suspended" ? "Suspend" : "Restore"} ${pendingAccountStatus.label}?`} description={pendingAccountStatus.accountStatus === "suspended" ? "This prevents the account from using the platform until an administrator restores it. Existing data is preserved." : "This restores the account's ability to sign in and use the platform."} confirmLabel={pendingAccountStatus.accountStatus === "suspended" ? "suspend account" : "restore account"} destructive={pendingAccountStatus.accountStatus === "suspended"} working={working} onConfirm={() => void updateAccountStatus()} onCancel={() => setPendingAccountStatus(null)} />}
-      {pendingRevoke && <AdminConfirmDialog title={`Revoke ${pendingRevoke.role} from ${pendingRevoke.displayName}?`} description="This removes the selected scoped access. The user will keep any other platform or scoped roles." confirmLabel="revoke role" destructive working={working} onConfirm={() => void revokeRole()} onCancel={() => setPendingRevoke(null)} />}
-      {pendingClear && <AdminConfirmDialog title={`Clear ${pendingClear.name} history?`} description="This permanently deletes every message in this channel. The room and its members remain, but the conversation cannot be restored." confirmLabel="clear history" destructive working={working} onConfirm={() => void clearHistory()} onCancel={() => setPendingClear(null)} />}
-      {pendingResourceDelete && <AdminConfirmDialog title={`Delete ${pendingResourceDelete.item.name}?`} description={pendingResourceDelete.kind === "channel" ? "This permanently deletes the channel, its messages, members, requests, invitations, and stored attachments." : pendingResourceDelete.kind === "category-with-channels" ? "This permanently deletes the category and every channel inside it, including messages, members, requests, invitations, and stored attachments." : "This deletes the category and moves its channels to Uncategorized. Channel history is preserved."} confirmLabel={pendingResourceDelete.kind === "channel" ? "delete channel" : pendingResourceDelete.kind === "category-with-channels" ? "delete category and channels" : "delete category only"} destructive working={working} onConfirm={() => void deleteRegistryResource()} onCancel={() => setPendingResourceDelete(null)} />}
+      {pendingRole && <AdminConfirmDialog title={`Change role for ${pendingRole.label}?`} description={`${pendingRole.label} will become ${pendingRole.role === "admin" ? "an Admin / Developer" : pendingRole.role.replace("_", " ")}. Platform roles are enforced on the server.`} confirmLabel={`set ${pendingRole.role === "admin" ? "admin / developer" : pendingRole.role.replace("_", " ")}`} destructive={pendingRole.role === "member"} working={working} error={error} onConfirm={() => void updateRole()} onCancel={() => setPendingRole(null)} />}
+      {pendingAccountStatus && <AdminConfirmDialog title={`${pendingAccountStatus.accountStatus === "suspended" ? "Suspend" : "Restore"} ${pendingAccountStatus.label}?`} description={pendingAccountStatus.accountStatus === "suspended" ? "This prevents the account from using the platform until an administrator restores it. Existing data is preserved." : "This restores the account's ability to sign in and use the platform."} confirmLabel={pendingAccountStatus.accountStatus === "suspended" ? "suspend account" : "restore account"} destructive={pendingAccountStatus.accountStatus === "suspended"} working={working} error={error} onConfirm={() => void updateAccountStatus()} onCancel={() => setPendingAccountStatus(null)} />}
+      {pendingRevoke && <AdminConfirmDialog title={`Revoke ${pendingRevoke.role} from ${pendingRevoke.displayName}?`} description="This removes the selected scoped access. The user will keep any other platform or scoped roles." confirmLabel="revoke role" destructive working={working} error={error} onConfirm={() => void revokeRole()} onCancel={() => setPendingRevoke(null)} />}
+      {pendingClear && <AdminConfirmDialog title={`Clear ${pendingClear.name} history?`} description="This permanently deletes every message in this channel. The room and its members remain, but the conversation cannot be restored." confirmLabel="clear history" destructive working={working} error={error} onConfirm={() => void clearHistory()} onCancel={() => setPendingClear(null)} />}
+      {pendingResourceDelete && <AdminConfirmDialog title={`Delete ${pendingResourceDelete.item.name}?`} description={pendingResourceDelete.kind === "channel" ? "This permanently deletes the channel, its messages, members, requests, invitations, and stored attachments." : pendingResourceDelete.kind === "category-with-channels" ? "This permanently deletes the category and every channel inside it, including messages, members, requests, invitations, and stored attachments." : "This deletes the category and moves its channels to Uncategorized. Channel history is preserved."} confirmLabel={pendingResourceDelete.kind === "channel" ? "delete channel" : pendingResourceDelete.kind === "category-with-channels" ? "delete category and channels" : "delete category only"} destructive working={working} error={error} onConfirm={() => void deleteRegistryResource()} onCancel={() => setPendingResourceDelete(null)} />}
     </div>
   );
 }
@@ -4399,6 +4492,8 @@ function CommunityConsole() {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState<"communities" | "detail" | null>(null);
+  const [retryingLoad, setRetryingLoad] = useState(false);
   const [notice, setNotice] = useState("");
   const [newCommunityOpen, setNewCommunityOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -4456,6 +4551,7 @@ function CommunityConsole() {
     setPermissions(nextPermissions);
     setCurrentUserId(me.id);
     setCommunities(nextCommunities);
+    setLoadError(null);
     setSelectedId((current) => {
       if (requestedCommunityId !== null && nextCommunities.some((community) => community.id === requestedCommunityId)) {
         return requestedCommunityId;
@@ -4474,6 +4570,7 @@ function CommunityConsole() {
     // The legacy detail shape remains unchanged, while large workspaces are
     // reassembled explicitly here so existing panels still see every record.
     setDetail(next);
+    setLoadError(null);
     setSettings({
       name: next.community.name,
       description: next.community.description,
@@ -4520,7 +4617,12 @@ function CommunityConsole() {
     }
   };
   useEffect(() => {
-    loadCommunities().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load communities")).finally(() => setLoading(false));
+    const generation = communitiesRequestGeneration.current + 1;
+    loadCommunities().catch((reason) => {
+      if (generation !== communitiesRequestGeneration.current || requestedCommunityIdRef.current !== requestedCommunityId) return;
+      setLoadError("communities");
+      setError(reason instanceof Error ? reason.message : "Could not load communities");
+    }).finally(() => setLoading(false));
   }, [requestedCommunityId]);
   useEffect(() => {
     if (selectedId === null) {
@@ -4529,11 +4631,28 @@ function CommunityConsole() {
       return;
     }
     ++detailRequestGeneration.current;
-    loadDetail(selectedId).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load community"));
+    loadDetail(selectedId).catch((reason) => {
+      if (selectedIdRef.current !== selectedId) return;
+      setLoadError("detail");
+      setError(reason instanceof Error ? reason.message : "Could not load community");
+    });
     return () => {
       ++detailRequestGeneration.current;
     };
   }, [selectedId]);
+  const retryLoad = async () => {
+    if (retryingLoad) return;
+    setRetryingLoad(true);
+    setError("");
+    try {
+      if (loadError === "communities") await loadCommunities();
+      else if (selectedId !== null) await loadDetail(selectedId);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not reload the workspace.");
+    } finally {
+      setRetryingLoad(false);
+    }
+  };
   const createCommunity = async (event: FormEvent) => {
     event.preventDefault();
     setWorking(true);
@@ -4771,12 +4890,12 @@ function CommunityConsole() {
       </header>
       <main className="mx-auto grid max-w-7xl gap-5 px-5 py-8 lg:grid-cols-[250px_1fr] sm:px-10">
         <aside className="rounded-xl border border-border bg-card p-3">
-          <div className="flex items-center justify-between px-2 py-2"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">your businesses</p><button onClick={() => setNewCommunityOpen(true)} className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground">new</button></div>
-           <div className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => selectCommunity(community.id)} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "business access" : community.joined ? "team member" : "available"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No business workspaces yet.</p>}</div>
+           <div className="flex items-center justify-between px-2 py-2"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">your businesses</p><button onClick={() => setNewCommunityOpen(true)} aria-label="Create business workspace" className="rounded bg-primary px-2 py-1 font-mono text-[9px] font-bold text-primary-foreground">new</button></div>
+           <nav aria-label="Business workspaces" className="mt-2 space-y-1">{communities.map((community) => <button key={community.id} onClick={() => selectCommunity(community.id)} aria-current={selectedId === community.id ? "page" : undefined} className={`w-full rounded-md px-3 py-2 text-left font-mono text-xs ${selectedId === community.id ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted"}`}><span className="block truncate">{community.name}</span><span className="mt-1 block text-[9px] opacity-70">{community.canManage ? "business access" : community.joined ? "team member" : "available"}</span></button>)}{communities.length === 0 && <p className="px-2 py-6 font-mono text-[10px] text-muted-foreground">No business workspaces yet.</p>}</nav>
         </aside>
         <section className="min-w-0">
-          {error && <div className="mb-4 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" />{error}<button onClick={() => setError("")} className="ml-auto" aria-label="Dismiss error" title="Dismiss error"><X className="h-3.5 w-3.5" /></button></div>}
-          {notice && <div className="mb-4 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notification" title="Dismiss notification"><X className="h-3.5 w-3.5" /></button></div>}
+           {error && <div role="alert" className="mb-4 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive"><AlertTriangle className="h-4 w-4" /><span>{error}</span>{loadError && <button type="button" disabled={retryingLoad} onClick={() => void retryLoad()} className="ml-auto underline disabled:opacity-50">{retryingLoad ? "retrying…" : "retry load"}</button>}<button type="button" onClick={() => setError("")} className={loadError ? "" : "ml-auto"} aria-label="Dismiss error" title="Dismiss error"><X className="h-3.5 w-3.5" /></button></div>}
+           {notice && <div role="status" className="mb-4 flex items-center gap-2 rounded-md border border-chart-4/30 bg-chart-4/10 p-3 font-mono text-xs text-chart-4"><CheckCircle2 className="h-4 w-4" />{notice}<button onClick={() => setNotice("")} className="ml-auto" aria-label="Dismiss notification" title="Dismiss notification"><X className="h-3.5 w-3.5" /></button></div>}
            {!detail || detail.community.id !== selectedId ? <div className="rounded-xl border border-border bg-card p-8"><Users className="h-6 w-6 text-primary" /><h1 className="mt-5 font-mono text-2xl font-bold">{selectedId === null ? "Choose a business." : "Loading business…"}</h1><p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">Business owners and managers operate only inside assigned private workspaces. Platform settings stay with Admin / Developer accounts.</p></div> : <div className="space-y-5">
             <div className="rounded-xl border border-border bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-primary">business workspace</p><h1 className="mt-2 font-mono text-2xl font-bold">{detail.community.name}</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground">{detail.community.description || "No business description yet."}</p></div><span className="rounded bg-primary/10 px-2 py-1 font-mono text-[9px] uppercase text-primary">{detail.canManage ? "manage access" : "read access"}</span></div></div>
             {detail.canManage && <div className="grid gap-5 xl:grid-cols-2">

@@ -40,3 +40,4 @@
 - [Nested history pagination](nested-history-pagination.md) — opt-in child pages must retain complete legacy responses and expose per-child continuation rather than silently truncating detail.
 - [Drizzle schema prerequisites](drizzle-schema-prerequisites.md) — fresh schema push needs extension setup, and SQL-expression trigram indexes can cause false no-op differences.
 - [Announcement audience boundary](announcement-audience-boundary.md) — targeted announcement access must hold across feeds, attachments, receipts, and delayed delivery.
+- [Responsive UI test visibility](responsive-ui-test-visibility.md) — JSDOM may expose both CSS-hidden responsive controls; scope role queries and verify actual widths separately.
