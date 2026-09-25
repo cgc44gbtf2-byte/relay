@@ -394,6 +394,7 @@ function installApi({
   createChannelFailureOnce = false,
   fallbackJoined = true,
   uploadFailure = false,
+  currentChannelWorkspaceId,
   categories = [],
   publicSpaces = [],
 }: {
@@ -427,10 +428,15 @@ function installApi({
   createChannelFailureOnce?: boolean;
   fallbackJoined?: boolean;
   uploadFailure?: boolean;
+  currentChannelWorkspaceId?: number;
   categories?: Array<{ id: number; name: string; description: string; ownerId: string; communityId: number | null }>;
   publicSpaces?: Array<{ id: number | null; name: string }>;
 }) {
-  const deleted = { ...room(1, "#deleted-room", owner ? "user-1" : "owner-1"), canMovePublicSpace: owner };
+  const deleted = {
+    ...room(1, "#deleted-room", owner ? "user-1" : "owner-1"),
+    communityId: currentChannelWorkspaceId ?? null,
+    canMovePublicSpace: owner,
+  };
   const fallback = {
     ...room(2, "#fallback-room"),
     joined: fallbackJoined,
@@ -1913,6 +1919,32 @@ describe("deleted room recovery", () => {
     } as MessageEvent);
 
     await waitFor(() => expect(screen.getByText(/· read$/)).toBeTruthy());
+  });
+
+  it("includes workspace channel context when requesting a file upload URL", async () => {
+    await renderChat({
+      missingRequest: "event",
+      fallbackChannels: [room(2, "#fallback-room")],
+      currentChannelWorkspaceId: 13,
+    });
+
+    const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, { target: { files: [file] } });
+
+    await waitFor(() => {
+      const request = vi.mocked(fetch).mock.calls.find(([input, init]) =>
+        String(input) === "/api/storage/uploads/request-url" && init?.method === "POST");
+      expect(request).toBeTruthy();
+      expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({
+        name: "notes.txt",
+        contentType: "text/plain",
+        workspaceId: 13,
+        resourceType: "channel",
+        resourceId: 1,
+      });
+    });
   });
 
   it("does not create a placeholder message when an attachment upload fails", async () => {

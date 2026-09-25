@@ -1299,8 +1299,17 @@ function ChatApp() {
     }
     setUploading(true);
     try {
+      if (!currentChannel) throw new Error("The channel is not available for uploads.");
       const contentType = file.type || "application/octet-stream";
-      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", { method: "POST", body: JSON.stringify({ name: file.name, size: file.size, contentType }) });
+      const upload = await api<{ uploadURL: string; objectPath: string }>("/storage/uploads/request-url", {
+        method: "POST",
+        body: JSON.stringify({
+          name: file.name, size: file.size, contentType,
+          ...(currentChannel.communityId === null ? {} : {
+            workspaceId: currentChannel.communityId, resourceType: "channel", resourceId: channelId,
+          }),
+        }),
+      });
       const uploaded = await fetch(upload.uploadURL, { method: "PUT", body: file, headers: { "content-type": file.type || "application/octet-stream" } });
       if (!uploaded.ok) throw new Error("File upload failed");
       const sent = await api<ChatMessage>(`/channels/${channelId}/file-messages`, {

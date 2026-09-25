@@ -63,7 +63,7 @@ checklist, not a production-readiness sign-off.
 | Roles and destructive operations | Integration tests for revocation races, denied-operation audit absence, moderation records, and forced audit-write rollback | Does not prove every mutation and failure path. |
 | Database integrity and migrations | `lib/db/migrations`, `docs/DATABASE-MIGRATIONS.md`, rehearsal/bootstrap tests | Production baseline/application and recovery remain an operational verification step. |
 | Audit preservation | Actor snapshot/preservation migrations and integration tests | No blanket sign-off on every audit producer. |
-| Storage | `src/routes/storage.ts`, storage unit tests, authenticated attachment/document tests | Exhaustive object-ID substitution and provider-level size/type enforcement remain to be reviewed. |
+| Storage | `docs/RELEASE-1-STORAGE-AUDIT.md`: upload-to-reference and read/cleanup chain; storage unit tests, two-workspace path/ID substitution and legacy unscoped reuse checks, web upload-context test | Direct signed PUTs do not have established provider-level size/type/byte enforcement; abandoned uploads are not automatically collected. Do not claim provider-boundary enforcement. |
 | Abuse protection | Fixed-window limiter and ticket-cleanup tests; route-specific limits | Full route inventory and multi-instance behavior remain unverified. |
 | Data retention | `docs/DATA-RETENTION.md` | Strategy documented; no destructive retention job added. |
 | Frontend recovery | `artifacts/web-irc/src/App.test.tsx`: room retry, reconnect, DM preservation, username conflicts, developer denial | Comprehensive keyboard/focus/accessibility and error-state review is still outstanding. |
@@ -84,8 +84,9 @@ API source paths in the table are relative to `artifacts/api-server`.
    adding endpoints; do not introduce a cap without a continuation path.
 3. The WebSocket event review, offboarding and subscription-end fixes, and
    focused authenticated recipient/non-recipient checks are recorded in
-   `RELEASE-1-WEBSOCKET-AUDIT.md`. Storage enforcement, abuse-control
-   inventory, and accessibility verification are still open.
+    `RELEASE-1-WEBSOCKET-AUDIT.md`. Storage application enforcement and
+    provider-boundary limits are recorded in `RELEASE-1-STORAGE-AUDIT.md`;
+    abuse-control inventory and accessibility verification are still open.
 4. Run/document the available security/static-analysis checks and reconcile
    their findings; do not equate license checking with security analysis.
 5. Resolve the separately queued unclassified dependency-license review.

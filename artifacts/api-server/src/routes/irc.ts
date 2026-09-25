@@ -48,7 +48,7 @@ import { wsHub } from "../lib/ws";
 import { canPromoteChannelModerator } from "../lib/channel-moderation-policy";
 import { canReadChannel } from "../lib/channel-access";
 import { isPublicCommunityAvailable, subscriberPaidThrough } from "../lib/community-subscription";
-import { isValidUploadedObjectPath, signedObjectUrlForPath, validateUploadMetadata } from "./storage";
+import { isAvailableUnscopedObjectPath, isUploadedObjectPathForResource, signedObjectUrlForPath, validateUploadMetadata } from "./storage";
 import { channelAccessRequiredError, channelNotFoundError } from "./errors";
 import { hasPermission, permissionsForCommunities } from "../lib/permissions";
 import { categoryForNotification, createNotification, createNotifications, hasNotificationForEntity } from "../lib/notifications";
@@ -1401,7 +1401,11 @@ router.post("/channels/:channelId/file-messages", requireAuth, async (req: Authe
     contentType: req.body?.contentType,
   });
   if (
-    !isValidUploadedObjectPath(objectPath)
+    !(channel.communityId === null
+      ? await isAvailableUnscopedObjectPath(objectPath, userId)
+      : isUploadedObjectPathForResource(objectPath, {
+        workspaceId: channel.communityId, resourceType: "channel", resourceId: channel.id,
+      }))
     || !metadata
     || metadata.size > 10_000_000
   ) {
@@ -1781,13 +1785,19 @@ router.post("/messages/:messageId/attachments", requireAuth, async (req: Authent
     return;
   }
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
+  const attachmentChannel = message.channelId === null ? null : await channelFor(String(message.channelId));
+  const validObjectPath = message.channelId === null || attachmentChannel?.communityId === null
+    ? await isAvailableUnscopedObjectPath(objectPath, userId)
+    : typeof attachmentChannel?.communityId === "number" && isUploadedObjectPathForResource(objectPath, {
+      workspaceId: attachmentChannel.communityId, resourceType: "channel", resourceId: attachmentChannel.id,
+    });
   const metadata = validateUploadMetadata({
     name: req.body?.fileName,
     size: req.body?.fileSize,
     contentType: req.body?.contentType,
   });
   if (
-    !isValidUploadedObjectPath(objectPath)
+    !validObjectPath
     || !metadata
     || metadata.size > 10_000_000
   ) {

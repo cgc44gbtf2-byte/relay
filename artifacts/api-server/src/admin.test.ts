@@ -19,6 +19,7 @@ import {
   type CommunityPermissionOperation,
 } from "./lib/permissions";
 import { wsHub } from "./lib/ws";
+import { uploadObjectPath } from "./routes/storage";
 
 type TestSession = {
   userId: string;
@@ -3794,6 +3795,185 @@ describe("admin access controls", () => {
     } finally {
       if (workspaceId !== undefined) {
         await pool.query("DELETE FROM irc_communities WHERE id = $1", [workspaceId]);
+      }
+    }
+  });
+
+  test("keeps uploaded paths bound to their workspace and resource across signing and attachment routes", async () => {
+    const owner = await createTestSession("storage_path_owner");
+    const outsider = await createTestSession("storage_path_outsider");
+    const workspaces: number[] = [];
+    const originalFetch = globalThis.fetch;
+    let signedCount = 0;
+    const post = (session: TestSession, path: string, body: object) => apiRequest(session, path, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const insertId = async (query: string, args: unknown[]) =>
+      (await pool.query<{ id: number }>(query, args)).rows[0].id;
+    const file = (objectPath: string) => ({
+      objectPath, fileName: "private.txt", contentType: "text/plain", fileSize: 1,
+    });
+
+    try {
+      assert.equal((await apiRequest(owner, "/me")).status, 200);
+      assert.equal((await apiRequest(outsider, "/me")).status, 200);
+      for (const name of ["home", "foreign"]) {
+        const created = await post(owner, "/communities", {
+          name: `Storage ${name} ${randomUUID().slice(0, 8)}`, isPrivate: true,
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        workspaces.push((created.body as { id: number }).id);
+      }
+      const [home, foreign] = workspaces;
+      const homeTask = await insertId(
+        "INSERT INTO irc_workspace_tasks (community_id, title, created_by) VALUES ($1, 'Home task', $2) RETURNING id",
+        [home, owner.userId],
+      );
+      const foreignTask = await insertId(
+        "INSERT INTO irc_workspace_tasks (community_id, title, created_by) VALUES ($1, 'Foreign task', $2) RETURNING id",
+        [foreign, owner.userId],
+      );
+      const homeDocument = await insertId(
+        "INSERT INTO irc_business_documents (community_id, title, owner_id) VALUES ($1, 'Home document', $2) RETURNING id",
+        [home, owner.userId],
+      );
+      const foreignDocument = await insertId(
+        "INSERT INTO irc_business_documents (community_id, title, owner_id) VALUES ($1, 'Foreign document', $2) RETURNING id",
+        [foreign, owner.userId],
+      );
+      const homeAnnouncement = await insertId(
+        "INSERT INTO irc_server_announcements (community_id, author_id, title, body) VALUES ($1, $2, 'Home', 'Home') RETURNING id",
+        [home, owner.userId],
+      );
+      const foreignAnnouncement = await insertId(
+        "INSERT INTO irc_server_announcements (community_id, author_id, title, body) VALUES ($1, $2, 'Foreign', 'Foreign') RETURNING id",
+        [foreign, owner.userId],
+      );
+      const homeChannel = await post(owner, `/communities/${home}/channels`, {
+        name: `#storage-${randomUUID().slice(0, 8)}`, isPrivate: true,
+      });
+      const foreignChannel = await post(owner, `/communities/${foreign}/channels`, {
+        name: `#storage-${randomUUID().slice(0, 8)}`, isPrivate: true,
+      });
+      assert.equal(homeChannel.status, 201, JSON.stringify(homeChannel));
+      assert.equal(foreignChannel.status, 201, JSON.stringify(foreignChannel));
+      const homeChannelId = (homeChannel.body as { id: number }).id;
+      const foreignChannelId = (foreignChannel.body as { id: number }).id;
+
+      globalThis.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === "http://127.0.0.1:1106/object-storage/signed-object-url") {
+          signedCount += 1;
+          return new Response(JSON.stringify({ signed_url: "https://storage.example/signed" }), {
+            status: 200, headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+      const issue = async (workspaceId: number, resourceType: string, resourceId: number | "new") => {
+        const response = await post(owner, "/storage/uploads/request-url", {
+          name: "private.txt", size: 1, contentType: "text/plain",
+          workspaceId, resourceType, resourceId,
+        });
+        assert.equal(response.status, 200, JSON.stringify(response));
+        return (response.body as { objectPath: string }).objectPath;
+      };
+      const foreignPaths = {
+        newDocument: await issue(foreign, "document", "new"),
+        document: await issue(foreign, "document", foreignDocument),
+        task: await issue(foreign, "task", foreignTask),
+        announcement: await issue(foreign, "announcement", foreignAnnouncement),
+        channel: await issue(foreign, "channel", foreignChannelId),
+      };
+      for (const path of Object.values(foreignPaths)) {
+        assert.ok(path.includes(`/workspaces/${foreign}/`));
+      }
+      const foreignAttachmentId = await insertId(
+        `INSERT INTO irc_workspace_task_attachments
+         (task_id, uploader_id, object_path, file_name, content_type, file_size)
+         VALUES ($1, $2, $3, 'private.txt', 'text/plain', 1) RETURNING id`,
+        [foreignTask, owner.userId, foreignPaths.task],
+      );
+      const foreignTaskRead = await apiRequest(owner, `/communities/${home}/tasks/${foreignTask}/attachments/${foreignAttachmentId}`, {
+        redirect: "manual",
+      });
+      assert.equal(foreignTaskRead.status, 404, JSON.stringify(foreignTaskRead));
+      const foreignDocumentRead = await apiRequest(owner, `/communities/${home}/documents/${foreignDocument}`);
+      assert.equal(foreignDocumentRead.status, 404, JSON.stringify(foreignDocumentRead));
+      assert.equal(signedCount, 5, "Cross-workspace reads must not sign a GET URL");
+      const signedBeforeDenials = signedCount;
+      const wrongResource = await post(owner, "/storage/uploads/request-url", {
+        name: "private.txt", size: 1, contentType: "text/plain",
+        workspaceId: home, resourceType: "task", resourceId: foreignTask,
+      });
+      assert.equal(wrongResource.status, 403);
+      const wrongWorkspace = await post(outsider, "/storage/uploads/request-url", {
+        name: "private.txt", size: 1, contentType: "text/plain",
+        workspaceId: foreign, resourceType: "document", resourceId: "new",
+      });
+      assert.equal(wrongWorkspace.status, 403);
+      for (const [size, contentType] of [[25_000_001, "text/plain"], [1, "text/html; charset=utf-8"]] as const) {
+        const rejected = await post(owner, "/storage/uploads/request-url", {
+          name: "private.txt", size, contentType, workspaceId: home, resourceType: "document", resourceId: "new",
+        });
+        assert.equal(rejected.status, 400, JSON.stringify(rejected));
+      }
+      assert.equal(signedCount, signedBeforeDenials, "Invalid requests must not reach the signer");
+
+      const attempts = [
+        await post(owner, `/communities/${home}/documents`, { title: "Wrong document", ...file(foreignPaths.newDocument) }),
+        await post(owner, `/communities/${home}/documents/${homeDocument}/versions`, file(foreignPaths.document)),
+        await post(owner, `/communities/${home}/tasks/${homeTask}/attachments`, file(foreignPaths.task)),
+        await post(owner, `/communities/${home}/announcements/${homeAnnouncement}/attachments`, file(foreignPaths.announcement)),
+        await post(owner, `/channels/${homeChannelId}/file-messages`, file(foreignPaths.channel)),
+      ];
+      for (const attempt of attempts) assert.equal(attempt.status, 400, JSON.stringify(attempt));
+      const roomMessage = await post(owner, `/channels/${homeChannelId}/messages`, { body: "Storage path test" });
+      assert.equal(roomMessage.status, 201, JSON.stringify(roomMessage));
+      const messageId = (roomMessage.body as { id: string }).id;
+      const messageAttachment = await post(owner, `/messages/${messageId}/attachments`, file(foreignPaths.channel));
+      assert.equal(messageAttachment.status, 400, JSON.stringify(messageAttachment));
+      const legacyPath = `/objects/uploads/${randomUUID()}`;
+      await pool.query(
+        `INSERT INTO irc_announcement_attachments
+         (announcement_id, uploader_id, object_path, file_name, content_type, file_size)
+         VALUES ($1, $2, $3, 'old.txt', 'text/plain', 1)`,
+        [homeAnnouncement, owner.userId, legacyPath],
+      );
+      const dmId = randomUUID();
+      await pool.query(
+        `INSERT INTO irc_messages (id, sender_id, recipient_id, thread_key, body)
+         VALUES ($1, $2, $3, $4, 'Legacy path substitution')`,
+        [dmId, owner.userId, outsider.userId, [owner.userId, outsider.userId].sort().join(":")],
+      );
+      const legacyLeak = await post(owner, `/messages/${dmId}/attachments`, file(legacyPath));
+      assert.equal(legacyLeak.status, 400, JSON.stringify(legacyLeak));
+      const removedAnnouncement = await apiRequest(owner, `/communities/${home}/announcements/${homeAnnouncement}`, {
+        method: "DELETE",
+      });
+      assert.equal(removedAnnouncement.status, 200, JSON.stringify(removedAnnouncement));
+      const deletionJob = await pool.query(
+        "SELECT status FROM irc_workspace_object_deletion_jobs WHERE object_path = $1", [legacyPath],
+      );
+      assert.equal(deletionJob.rowCount, 1, "Deleting the last announcement reference must queue object cleanup");
+      const orphanedLegacyLeak = await post(owner, `/messages/${dmId}/attachments`, file(legacyPath));
+      assert.equal(orphanedLegacyLeak.status, 400, "A deleted legacy reference must not make its old path attachable");
+      const validPath = await issue(home, "task", homeTask);
+      const disallowed = await post(owner, `/communities/${home}/tasks/${homeTask}/attachments`, {
+        ...file(validPath), contentType: "text/html; charset=utf-8",
+      });
+      assert.equal(disallowed.status, 400, JSON.stringify(disallowed));
+      const oversized = await post(owner, `/communities/${home}/tasks/${homeTask}/attachments`, {
+        ...file(validPath), fileSize: 10_000_001,
+      });
+      assert.equal(oversized.status, 400, JSON.stringify(oversized));
+      const accepted = await post(owner, `/communities/${home}/tasks/${homeTask}/attachments`, file(validPath));
+      assert.equal(accepted.status, 201, JSON.stringify(accepted));
+      assert.equal((accepted.body as { objectPath: string }).objectPath, validPath);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (workspaces.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [workspaces]);
       }
     }
   });
@@ -13403,6 +13583,7 @@ describe("admin access controls", () => {
     const previousPrivateObjectDir = process.env.PRIVATE_OBJECT_DIR;
 
     try {
+      process.env.PRIVATE_OBJECT_DIR = "private";
       for (const session of [ownerSession, memberSession, outsiderSession]) {
         const profile = await apiRequest(session, "/me");
         assert.equal(profile.status, 200, JSON.stringify(profile));
@@ -13450,7 +13631,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            objectPath: `/objects/uploads/${randomUUID()}`,
+            objectPath: uploadObjectPath({}, memberSession.userId),
             fileName: "room.txt",
             contentType: "text/plain",
             fileSize: 12,
@@ -13462,7 +13643,6 @@ describe("admin access controls", () => {
       const roomAttachmentId = (roomAttachment.body as { id?: unknown }).id;
       assert.equal(typeof roomAttachmentId, "number");
 
-      process.env.PRIVATE_OBJECT_DIR = "private";
       globalThis.fetch = async (input, init) => {
         const requestUrl = typeof input === "string"
           ? input
@@ -13513,7 +13693,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            objectPath: `/objects/uploads/${randomUUID()}`,
+            objectPath: uploadObjectPath({}, ownerSession.userId),
             fileName: "direct.txt",
             contentType: "text/plain",
             fileSize: 14,
@@ -13547,7 +13727,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            objectPath: `/objects/uploads/${randomUUID()}`,
+            objectPath: uploadObjectPath({}, memberSession.userId),
             fileName: atomicFileName,
             contentType: "text/plain",
             fileSize: 18,
@@ -13590,7 +13770,7 @@ describe("admin access controls", () => {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              objectPath: `/objects/uploads/${randomUUID()}`,
+              objectPath: uploadObjectPath({}, memberSession.userId),
               fileName: failedFileName,
               contentType: "text/plain",
               fileSize: 21,
@@ -13796,7 +13976,7 @@ describe("admin access controls", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           title,
-          objectPath: `/objects/uploads/${randomUUID()}`,
+          objectPath: `/objects/uploads/${randomUUID()}/workspaces/${communityId}/document/new`,
           fileName: "initial.txt",
           contentType: "text/plain",
           fileSize: 1,
@@ -13918,7 +14098,7 @@ describe("admin access controls", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          objectPath: `/objects/uploads/${randomUUID()}`,
+          objectPath: `/objects/uploads/${randomUUID()}/workspaces/${communityId}/document/${documentId}`,
           fileName: "retry.txt",
           contentType: "text/plain",
           fileSize: 1,
@@ -13981,8 +14161,8 @@ describe("admin access controls", () => {
         [owner.userId, communityId],
       );
 
-      const file = (name: string) => ({
-        objectPath: `/objects/uploads/${randomUUID()}`,
+      const file = (name: string, resourceId: number | "new") => ({
+        objectPath: `/objects/uploads/${randomUUID()}/workspaces/${communityId}/document/${resourceId}`,
         fileName: name,
         contentType: "text/plain",
         fileSize: 1,
@@ -13993,14 +14173,14 @@ describe("admin access controls", () => {
         body: JSON.stringify(body),
       });
       const created = await upload(`/communities/${communityId}/documents`, {
-        ...file("initial.txt"), title: "Concurrent upload fixture",
+        ...file("initial.txt", "new"), title: "Concurrent upload fixture",
       });
       assert.equal(created.status, 201, JSON.stringify(created));
       const documentId = (created.body as { id: number }).id;
       const path = `/communities/${communityId}/documents/${documentId}/versions`;
       const responses = await Promise.all([
-        upload(path, file("second.txt")),
-        upload(path, file("third.txt")),
+        upload(path, file("second.txt", documentId)),
+        upload(path, file("third.txt", documentId)),
       ]);
       for (const response of responses) {
         assert.equal(response.status, 201, JSON.stringify(response));

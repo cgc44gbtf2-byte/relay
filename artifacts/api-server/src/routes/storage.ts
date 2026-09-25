@@ -1,11 +1,17 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, eq } from "drizzle-orm";
 import {
+  announcementAttachmentsTable,
   businessDocumentsTable,
+  channelMembersTable,
+  channelsTable,
   communityMembersTable,
   db,
+  documentVersionsTable,
+  messageAttachmentsTable,
   serverAnnouncementsTable,
+  workspaceTaskAttachmentsTable,
   workspaceTasksTable,
 } from "@workspace/db";
 import { getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
@@ -44,9 +50,16 @@ async function signObjectUrl(
   return payload.signed_url;
 }
 
-function privateObjectPath(): string {
+function unscopedUploadSignature(id: string, userId: string): string {
+  if (!process.env.SESSION_SECRET) throw new Error("SESSION_SECRET is not configured");
+  return createHmac("sha256", process.env.SESSION_SECRET)
+    .update(`unscoped-upload-v1\n${id}\n${userId}`).digest("hex");
+}
+
+function privateObjectPath(userId?: string): string {
   if (!process.env.PRIVATE_OBJECT_DIR) throw new Error("PRIVATE_OBJECT_DIR is not configured");
-  return `/objects/uploads/${randomUUID()}`;
+  const id = randomUUID();
+  return `/objects/uploads/${id}${userId ? `-${unscopedUploadSignature(id, userId)}` : ""}`;
 }
 
 const supportedUploadTypes = new Set([
@@ -62,6 +75,8 @@ const blockedActiveContentTypes = new Set([
   "image/svg+xml",
   "text/html",
   "application/xhtml+xml",
+  "text/javascript",
+  "application/javascript",
 ]);
 
 export const MAX_UPLOAD_SIZE = 25_000_000;
@@ -74,7 +89,7 @@ export function validateUploadMetadata(input: {
   const name = typeof input.name === "string" ? input.name.trim().slice(0, 160) : "";
   const size = typeof input.size === "number" ? input.size : Number(input.size);
   const contentType = typeof input.contentType === "string"
-    ? input.contentType.trim().toLowerCase().slice(0, 120)
+    ? input.contentType.trim().toLowerCase().split(";", 1)[0].trim().slice(0, 120)
     : "";
   if (
     !name
@@ -97,7 +112,7 @@ function safePathPart(value: unknown): string | null {
   return /^[a-zA-Z0-9_-]{1,100}$/.test(part) ? part : null;
 }
 
-const scopedUploadResourceTypes = ["document", "task", "announcement"] as const;
+const scopedUploadResourceTypes = ["document", "task", "announcement", "channel"] as const;
 type ScopedUploadResourceType = typeof scopedUploadResourceTypes[number];
 type UploadResourceContext = {
   workspaceId: number;
@@ -144,6 +159,18 @@ async function canUploadToResource(userId: string, context: UploadResourceContex
     return Boolean(document);
   }
   if (context.resourceId === "new") return false;
+  if (context.resourceType === "channel") {
+    const [channel] = await db.select({ id: channelsTable.id }).from(channelsTable)
+      .innerJoin(channelMembersTable, and(
+        eq(channelMembersTable.channelId, channelsTable.id),
+        eq(channelMembersTable.userId, userId),
+      ))
+      .where(and(
+        eq(channelsTable.id, context.resourceId),
+        eq(channelsTable.communityId, context.workspaceId),
+      ));
+    return Boolean(channel);
+  }
   if (context.resourceType === "task") {
     const [task] = await db.select({ id: workspaceTasksTable.id }).from(workspaceTasksTable)
       .innerJoin(communityMembersTable, and(
@@ -169,20 +196,55 @@ export function uploadObjectPath(input: {
   workspaceId?: unknown;
   resourceType?: unknown;
   resourceId?: unknown;
-}): string {
+}, userId?: string): string {
   const workspaceId = safePathPart(input.workspaceId);
   const resourceType = safePathPart(input.resourceType);
   const resourceId = safePathPart(input.resourceId);
   if (workspaceId && resourceType && resourceId) {
     return `${privateObjectPath()}/workspaces/${workspaceId}/${resourceType}/${resourceId}`;
   }
-  return privateObjectPath();
+  if (!userId) throw new Error("An authenticated user is required for unscoped uploads");
+  return privateObjectPath(userId);
 }
 
 export function isValidUploadedObjectPath(value: unknown): value is string {
   return typeof value === "string"
-    && /^\/objects\/uploads\/[0-9a-f-]{36}(?:\/workspaces\/[a-zA-Z0-9_-]{1,100}\/[a-zA-Z0-9_-]{1,100}\/[a-zA-Z0-9_-]{1,100})?$/i.test(value)
+    && /^\/objects\/uploads\/[0-9a-f-]{36}(?:-[0-9a-f]{64}|\/workspaces\/[a-zA-Z0-9_-]{1,100}\/[a-zA-Z0-9_-]{1,100}\/[a-zA-Z0-9_-]{1,100})?$/i.test(value)
     && !value.includes("..");
+}
+
+export function isUploadedObjectPathForResource(
+  value: unknown,
+  context: UploadResourceContext,
+): value is string {
+  return isValidUploadedObjectPath(value)
+    && value.endsWith(`/workspaces/${context.workspaceId}/${context.resourceType}/${context.resourceId}`);
+}
+
+export function isUnscopedUploadedObjectPath(value: unknown): value is string {
+  return isValidUploadedObjectPath(value) && !value.includes("/workspaces/");
+}
+
+// Older workspace files can have unscoped paths. Never allow one of those
+// existing objects to be reattached to a DM or public room.
+export async function isAvailableUnscopedObjectPath(value: unknown, userId: string): Promise<boolean> {
+  if (!isUnscopedUploadedObjectPath(value)) return false;
+  const match = /^\/objects\/uploads\/([0-9a-f-]{36})-([0-9a-f]{64})$/i.exec(value);
+  if (!match) return false; // Bare legacy paths may be read, never attached again.
+  const supplied = Buffer.from(match[2], "hex");
+  const expected = Buffer.from(unscopedUploadSignature(match[1], userId), "hex");
+  if (!timingSafeEqual(supplied, expected)) return false;
+  const [tasks, documents, announcements, messages] = await Promise.all([
+    db.select({ id: workspaceTaskAttachmentsTable.id }).from(workspaceTaskAttachmentsTable)
+      .where(eq(workspaceTaskAttachmentsTable.objectPath, value)).limit(1),
+    db.select({ id: documentVersionsTable.id }).from(documentVersionsTable)
+      .where(eq(documentVersionsTable.objectPath, value)).limit(1),
+    db.select({ id: announcementAttachmentsTable.id }).from(announcementAttachmentsTable)
+      .where(eq(announcementAttachmentsTable.objectPath, value)).limit(1),
+    db.select({ id: messageAttachmentsTable.id }).from(messageAttachmentsTable)
+      .where(eq(messageAttachmentsTable.objectPath, value)).limit(1),
+  ]);
+  return !tasks.length && !documents.length && !announcements.length && !messages.length;
 }
 
 router.post("/storage/uploads/request-url", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
@@ -205,12 +267,16 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: Authenticat
     res.status(403).json({ error: "You cannot upload files to this workspace resource." });
     return;
   }
+  if (context && context.resourceType !== "document" && metadata.size > 10_000_000) {
+    res.status(400).json({ error: "Files for this resource must be smaller than 10 MB." });
+    return;
+  }
   try {
     const objectPath = uploadObjectPath(context ? {
       workspaceId: String(context.workspaceId),
       resourceType: context.resourceType,
       resourceId: String(context.resourceId),
-    } : {});
+    } : {}, getUserId(req));
     const uploadURL = await signedObjectUrlForPath(objectPath, "PUT");
     res.json({ uploadURL, objectPath, metadata });
   } catch {

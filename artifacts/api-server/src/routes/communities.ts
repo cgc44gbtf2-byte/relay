@@ -45,7 +45,7 @@ import {
   workspaceTaskCommentsTable,
   workspaceTaskAttachmentsTable,
 } from "@workspace/db";
-import { isValidUploadedObjectPath, signedObjectUrlForPath } from "./storage";
+import { isUploadedObjectPathForResource, signedObjectUrlForPath } from "./storage";
 import {
   ensureProfile,
   getUserId,
@@ -1971,18 +1971,17 @@ router.post("/communities/:communityId/tasks/:taskId/attachments", requireAuth, 
     .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, workspaceTasksTable.communityId), eq(communityMembersTable.userId, userId)))
     .where(and(eq(workspaceTasksTable.id, taskId), eq(workspaceTasksTable.communityId, communityId)));
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
-  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
-  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
-  const fileSize = Number(req.body?.fileSize);
+  const metadata = validateUploadMetadata({ name: req.body?.fileName, size: req.body?.fileSize, contentType: req.body?.contentType });
   if (!task) {
     res.status(404).json({ error: "Task not found." });
     return;
   }
-   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 10_000_000) {
+  if (!isUploadedObjectPathForResource(objectPath, { workspaceId: communityId, resourceType: "task", resourceId: taskId })
+    || !metadata || metadata.size > 10_000_000) {
     res.status(400).json({ error: "Invalid task attachment." });
     return;
   }
-  const [attachment] = await db.insert(workspaceTaskAttachmentsTable).values({ taskId, uploaderId: userId, objectPath, fileName, contentType, fileSize }).returning();
+  const [attachment] = await db.insert(workspaceTaskAttachmentsTable).values({ taskId, uploaderId: userId, objectPath, fileName: metadata.name, contentType: metadata.contentType, fileSize: metadata.size }).returning();
   res.status(201).json(attachment);
 });
 
@@ -3241,14 +3240,13 @@ router.post("/communities/:communityId/documents", requireAuth, async (req: Auth
   const requiresAcknowledgement = Boolean(req.body?.requiresAcknowledgement);
   const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt) : null;
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
-  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
-  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
-  const fileSize = Number(req.body?.fileSize);
+  const metadata = validateUploadMetadata({ name: req.body?.fileName, size: req.body?.fileSize, contentType: req.body?.contentType });
   if (!title || !documentCategories.includes(category as typeof documentCategories[number]) || !documentVisibilities.includes(visibility as typeof documentVisibilities[number]) || (expiresAt && Number.isNaN(expiresAt.getTime()))) {
     res.status(400).json({ error: "A valid document title, category, visibility, and expiration are required." });
     return;
   }
-   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+  if (!isUploadedObjectPathForResource(objectPath, { workspaceId: communityId, resourceType: "document", resourceId: "new" })
+    || !metadata) {
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
@@ -3275,7 +3273,7 @@ router.post("/communities/:communityId/documents", requireAuth, async (req: Auth
       communityId, folderId, title, description, category, visibility, targetUserId, requiresAcknowledgement, expiresAt, ownerId: userId,
     }).returning();
     const [version] = await tx.insert(documentVersionsTable).values({
-      documentId: document.id, version: 1, objectPath, fileName, contentType, fileSize, uploadedBy: userId,
+      documentId: document.id, version: 1, objectPath, fileName: metadata.name, contentType: metadata.contentType, fileSize: metadata.size, uploadedBy: userId,
     }).returning();
     const audit = { details: title };
     await insertCommunityAudit(tx, userId, "created_business_document", communityId, audit);
@@ -3298,14 +3296,13 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
   }
   const [document] = await db.select().from(businessDocumentsTable).where(and(eq(businessDocumentsTable.id, documentId), eq(businessDocumentsTable.communityId, communityId)));
   const objectPath = typeof req.body?.objectPath === "string" ? req.body.objectPath : "";
-  const fileName = typeof req.body?.fileName === "string" ? req.body.fileName.trim().slice(0, 200) : "";
-  const contentType = typeof req.body?.contentType === "string" ? req.body.contentType.slice(0, 120) : "application/octet-stream";
-  const fileSize = Number(req.body?.fileSize);
+  const metadata = validateUploadMetadata({ name: req.body?.fileName, size: req.body?.fileSize, contentType: req.body?.contentType });
   if (!document) {
     res.status(404).json({ error: "Document not found." });
     return;
   }
-   if (!isValidUploadedObjectPath(objectPath) || !fileName || fileName.includes("/") || fileName.includes("\\") || !Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 25_000_000) {
+  if (!isUploadedObjectPathForResource(objectPath, { workspaceId: communityId, resourceType: "document", resourceId: documentId })
+    || !metadata) {
     res.status(400).json({ error: "A valid uploaded file is required." });
     return;
   }
@@ -3325,9 +3322,9 @@ router.post("/communities/:communityId/documents/:documentId/versions", requireA
       documentId,
       version: (latest?.version ?? 0) + 1,
       objectPath,
-      fileName,
-      contentType,
-      fileSize,
+      fileName: metadata.name,
+      contentType: metadata.contentType,
+      fileSize: metadata.size,
       uploadedBy: userId,
     }).returning();
     await tx.update(businessDocumentsTable).set({ updatedAt: new Date() })
@@ -4279,14 +4276,23 @@ router.delete("/communities/:communityId/announcements/:announcementId", require
     res.status(403).json({ error: "You cannot delete announcements in this community." });
     return;
   }
-  const [announcement] = await db.select({ id: serverAnnouncementsTable.id, title: serverAnnouncementsTable.title })
-    .from(serverAnnouncementsTable)
-    .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
+  const announcement = await db.transaction(async (tx) => {
+    const [existing] = await tx.select({ id: serverAnnouncementsTable.id, title: serverAnnouncementsTable.title })
+      .from(serverAnnouncementsTable)
+      .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)))
+      .for("update");
+    if (!existing) return null;
+    const attachments = await tx.select({ objectPath: announcementAttachmentsTable.objectPath })
+      .from(announcementAttachmentsTable)
+      .where(eq(announcementAttachmentsTable.announcementId, announcementId));
+    await enqueueObjectDeletionJobs(tx, attachments.map(({ objectPath }) => objectPath), `announcement:${announcementId}`);
+    await tx.delete(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.id, announcementId));
+    return existing;
+  });
   if (!announcement) {
     res.status(404).json({ error: "Announcement not found." });
     return;
   }
-  await db.delete(serverAnnouncementsTable).where(eq(serverAnnouncementsTable.id, announcementId));
   await writeCommunityAudit(userId, "deleted_community_announcement", communityId, announcement.title);
   res.json({ ok: true, announcementId });
 });
@@ -4343,7 +4349,8 @@ router.post("/communities/:communityId/announcements/:announcementId/attachments
     res.status(404).json({ error: "Announcement not found." });
     return;
   }
-  if (!isValidUploadedObjectPath(objectPath) || !metadata || metadata.size > 10_000_000) {
+  if (!isUploadedObjectPathForResource(objectPath, { workspaceId: communityId, resourceType: "announcement", resourceId: announcementId })
+    || !metadata || metadata.size > 10_000_000) {
     res.status(400).json({ error: "Invalid announcement attachment." });
     return;
   }
