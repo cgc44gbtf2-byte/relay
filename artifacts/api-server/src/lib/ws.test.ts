@@ -230,6 +230,195 @@ describe("websocket ticket cleanup", () => {
 });
 
 describe("websocket multi-connection presence", () => {
+  test("retries an isolated rejected presence save without another socket event", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    type Status = "online" | "offline";
+    let storedStatus: Status = "offline";
+    const writes: Array<{ status: Status; commit: () => void; reject: (error: Error) => void }> = [];
+
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: ({ status }: { status: Status }) => ({
+          where: () => new Promise<void>((resolve, reject) => {
+            writes.push({
+              status,
+              commit: () => {
+                storedStatus = status;
+                resolve();
+              },
+              reject,
+            });
+          }),
+        }),
+      };
+    });
+
+    const waitFor = async (predicate: () => boolean, message: string) => {
+      const deadline = Date.now() + 1_000;
+      while (!predicate()) {
+        assert.ok(Date.now() < deadline, message);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    const connected = client("retry-user", socket());
+    internals.registerClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 1, "the initial presence save should start");
+    assert.equal(writes[0].status, "online");
+
+    writes[0].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => writes.length === 2, "a retry should run without another socket event");
+    assert.equal(writes[1].status, "online");
+    writes[1].commit();
+    await waitFor(() => internals.presenceWrites.size === 0, "the recovered presence queue should clear");
+
+    assert.equal(storedStatus, "online");
+    assert.equal(internals.hasConnectedUser(connected.userId), true);
+
+    internals.unregisterClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 3, "the last disconnect should start an offline save");
+    assert.equal(writes[2].status, "offline");
+    writes[2].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => writes.length === 4, "the offline save should retry without another socket event");
+    assert.equal(writes[3].status, "offline");
+    writes[3].commit();
+    await waitFor(() => internals.presenceWrites.size === 0, "the offline recovery queue should clear");
+
+    assert.equal(storedStatus, "offline");
+    assert.equal(internals.hasConnectedUser(connected.userId), false);
+  });
+
+  test("recomputes presence after socket changes during retry backoff", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    type Status = "online" | "offline";
+    const writes: Array<{ status: Status; commit: () => void; reject: (error: Error) => void }> = [];
+
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: ({ status }: { status: Status }) => ({
+          where: () => new Promise<void>((resolve, reject) => {
+            writes.push({ status, commit: resolve, reject });
+          }),
+        }),
+      };
+    });
+
+    const waitFor = async (predicate: () => boolean, message: string) => {
+      const deadline = Date.now() + 1_000;
+      while (!predicate()) {
+        assert.ok(Date.now() < deadline, message);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    const connected = client("changing-user", socket());
+    internals.registerClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 1, "the initial presence save should start");
+    writes[0].reject(new Error("temporary presence-save failure"));
+    await waitFor(
+      () => internals.presenceRetryTimers.size === 1,
+      "the failed save should enter its retry backoff",
+    );
+
+    internals.unregisterClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 2, "the queued save should start after the socket closes");
+    assert.equal(writes[1].status, "offline", "the queued write must recompute current connection status");
+    assert.equal(internals.presenceRetryTimers.size, 0, "a newer write should cancel the stale retry backoff");
+
+    writes[1].commit();
+    await waitFor(() => internals.presenceWrites.size === 0, "the serialized queue should clear");
+    assert.equal(writes.length, 2, "the queued socket-change write should supersede the retry");
+  });
+
+  test("cancels pending presence retries when disposed", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    const writes: Array<{ reject: (error: Error) => void }> = [];
+
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: () => ({
+          where: () => new Promise<void>((_resolve, reject) => writes.push({ reject })),
+        }),
+      };
+    });
+
+    const waitFor = async (predicate: () => boolean, message: string) => {
+      const deadline = Date.now() + 1_000;
+      while (!predicate()) {
+        assert.ok(Date.now() < deadline, message);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    const connected = client("disposed-user", socket());
+    internals.registerClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 1, "the initial presence save should start");
+    writes[0].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => internals.presenceRetryTimers.size === 1, "a retry should be scheduled");
+
+    hub.dispose();
+    await waitFor(() => internals.presenceWrites.size === 0, "disposal should clear the presence queue");
+    assert.equal(internals.presenceRetryTimers.size, 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(writes.length, 1, "disposing must prevent another database attempt");
+  });
+
+  test("stops retrying after the bounded number of presence attempts", async (t) => {
+    const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
+    const hub = new Hub();
+    t.after(() => hub.dispose());
+    const internals = hub as any;
+    const writes: Array<{ reject: (error: Error) => void }> = [];
+
+    t.mock.method(db, "update", (table: unknown) => {
+      assert.equal(table, usersTable);
+      return {
+        set: () => ({
+          where: () => new Promise<void>((_resolve, reject) => writes.push({ reject })),
+        }),
+      };
+    });
+
+    const waitFor = async (predicate: () => boolean, message: string) => {
+      const deadline = Date.now() + 1_000;
+      while (!predicate()) {
+        assert.ok(Date.now() < deadline, message);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    const connected = client("bounded-user", socket());
+    internals.registerClient(connected);
+    internals.updatePresence(connected.userId);
+    await waitFor(() => writes.length === 1, "the initial presence save should start");
+    writes[0].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => writes.length === 2, "the first retry should run");
+    writes[1].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => writes.length === 3, "the final retry should run");
+    writes[2].reject(new Error("temporary presence-save failure"));
+    await waitFor(() => internals.presenceWrites.size === 0, "exhausted retries should clear the queue");
+
+    assert.equal(writes.length, 3, "the initial attempt and two retries are the limit");
+    assert.equal(internals.presenceRetryTimers.size, 0);
+  });
+
   test("recovers a queued presence write after a rejected write and persists the last disconnect", async (t) => {
     const { db, usersTable } = require("@workspace/db") as typeof import("@workspace/db");
     const hub = new Hub();

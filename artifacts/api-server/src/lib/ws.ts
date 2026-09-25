@@ -27,6 +27,7 @@ const TICKET_CLEANUP_INTERVAL_MS = 60_000;
 const MAX_TICKETS_CLEANED_PER_SWEEP = 1_000;
 const CHANNEL_LIST_ACCESS_CONCURRENCY = 8;
 
+const PRESENCE_RETRY_DELAYS_MS = [25, 100] as const;
 export class Hub {
   private clients = new Set<Client>();
   private sessionClients = new Map<string, Set<Client>>();
@@ -35,6 +36,8 @@ export class Hub {
   private channelClients = new Map<number, Set<Client>>();
   private tickets = new Map<string, Ticket>();
   private presenceWrites = new Map<string, Promise<void>>();
+  private presenceRetryTimers = new Map<string, () => void>();
+  private disposed = false;
   private readonly ticketCleanupTimer: ReturnType<typeof setInterval>;
   private readonly subscriptionCheckTimer: ReturnType<typeof setInterval>;
 
@@ -101,10 +104,13 @@ export class Hub {
    * and deterministic tests; the process-wide hub remains active by default.
    */
   dispose(): void {
+    this.disposed = true;
     clearInterval(this.ticketCleanupTimer);
     clearInterval(this.subscriptionCheckTimer);
     for (const timer of this.sessionCheckTimers.values()) clearInterval(timer);
     this.sessionCheckTimers.clear();
+    for (const cancelRetry of this.presenceRetryTimers.values()) cancelRetry();
+    this.presenceWrites.clear();
   }
 
   broadcastChannel(channelId: number, event: unknown, excludedUserId?: string): void {
@@ -263,18 +269,66 @@ export class Hub {
   }
 
   private updatePresence(userId: string): void {
+    if (this.disposed) return;
+    // A newer queued write will recompute the current status itself, so it
+    // supersedes any retry delay for the older snapshot.
+    this.presenceRetryTimers.get(userId)?.();
+
     // Serialize writes for this user: a delayed offline write must not finish
     // after a replacement socket's online write.
     const previous = this.presenceWrites.get(userId) ?? Promise.resolve();
     const write = previous.catch(() => undefined).then(async () => {
-      await db
-        .update(usersTable)
-        .set({ status: this.hasConnectedUser(userId) ? "online" : "offline", lastSeenAt: new Date() })
-        .where(eq(usersTable.clerkId, userId));
+      for (let attempt = 0; attempt <= PRESENCE_RETRY_DELAYS_MS.length; attempt++) {
+        if (this.disposed) return;
+
+        try {
+          await db
+            .update(usersTable)
+            .set({
+              status: this.hasConnectedUser(userId) ? "online" : "offline",
+              lastSeenAt: new Date(),
+            })
+            .where(eq(usersTable.clerkId, userId));
+          return;
+        } catch {
+          // If another socket change queued a newer write, let it persist the
+          // latest status rather than retrying this superseded write.
+          if (this.presenceWrites.get(userId) !== write) return;
+          const retryDelay = PRESENCE_RETRY_DELAYS_MS[attempt];
+          if (
+            retryDelay === undefined
+            || !(await this.waitForPresenceRetry(userId, retryDelay))
+            || this.presenceWrites.get(userId) !== write
+          ) return;
+        }
+      }
     });
     this.presenceWrites.set(userId, write);
     void write.catch(() => undefined).finally(() => {
       if (this.presenceWrites.get(userId) === write) this.presenceWrites.delete(userId);
+    });
+  }
+
+  private waitForPresenceRetry(userId: string, delayMs: number): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      let cancelRetry: () => void;
+      const finish = (shouldRetry: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.presenceRetryTimers.get(userId) === cancelRetry) {
+          this.presenceRetryTimers.delete(userId);
+        }
+        resolve(shouldRetry);
+      };
+      cancelRetry = () => finish(false);
+      timer = setTimeout(() => finish(true), delayMs);
+      timer.unref?.();
+      this.presenceRetryTimers.set(userId, cancelRetry);
     });
   }
 
