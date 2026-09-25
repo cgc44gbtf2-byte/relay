@@ -1830,6 +1830,112 @@ describe("admin access controls", () => {
     }
   });
 
+  test("sends upgrade request, approval, and subscription-ending notices only to their live recipients", async () => {
+    const requester = await createTestSession("delivery_upgrade_requester");
+    const outsider = await createTestSession("delivery_upgrade_outsider");
+    const sockets: WebSocket[] = [];
+    let requestId: number | null = null;
+    let originalRole: string | null = null;
+    let getUserMock: { mock: { restore(): void } } | null = null;
+    try {
+      for (const session of [firstSession, requester, outsider]) {
+        assert.equal((await apiRequest(session, "/me")).status, 200);
+      }
+      const admin = await pool.query<{ role: string }>(
+        "SELECT role FROM irc_users WHERE clerk_id = $1", [firstSession.userId],
+      );
+      originalRole = admin.rows[0].role;
+      if (originalRole !== "admin") {
+        await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [firstSession.userId]);
+      }
+      getUserMock = mock.method(clerkClient.users, "getUser", async () => ({
+        emailAddresses: [{ emailAddress: "confirmed@example.invalid", verification: { status: "verified" } }],
+      }) as unknown as Awaited<ReturnType<typeof clerkClient.users.getUser>>);
+
+      const [adminSocket, requesterSocket, outsiderSocket] = await Promise.all([
+        openWebSocket(firstSession), openWebSocket(requester), openWebSocket(outsider),
+      ]);
+      sockets.push(adminSocket, requesterSocket, outsiderSocket);
+      const isUpgradeNotice = (event: Record<string, unknown>, text: string) => {
+        const notification = event.notification as { entityType?: string; body?: string } | undefined;
+        return event.type === "notification"
+          && notification?.entityType === "community_upgrade_request"
+          && notification.body?.includes(text) === true;
+      };
+      const requestNotice = waitForWebSocketEvent(adminSocket,
+        (event) => isUpgradeNotice(event, "New public community subscription request"));
+      const requestBlocked = [requesterSocket, outsiderSocket].map((socket) =>
+        expectNoWebSocketEvent(socket, (event) =>
+          isUpgradeNotice(event, "New public community subscription request")));
+      const request = await apiRequest(requester, "/community-upgrades/request", {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      });
+      assert.equal(request.status, 201, JSON.stringify(request));
+      requestId = (request.body as { id: number }).id;
+      const createdNotice = await requestNotice;
+      assert.equal((createdNotice.notification as { userId: string; entityId: string }).userId, firstSession.userId);
+      assert.equal((createdNotice.notification as { entityId: string }).entityId, String(requestId));
+      await Promise.all(requestBlocked);
+
+      const approvalNotice = waitForWebSocketEvent(requesterSocket,
+        (event) => isUpgradeNotice(event, "subscription is active until"));
+      const approvalBlocked = [adminSocket, outsiderSocket].map((socket) =>
+        expectNoWebSocketEvent(socket, (event) => isUpgradeNotice(event, "subscription is active until")));
+      const approved = await apiRequest(firstSession, `/admin/community-upgrades/${requestId}/approve`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          paymentReference: `delivery-${randomUUID()}`,
+          paidThrough: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+        }),
+      });
+      assert.equal(approved.status, 200, JSON.stringify(approved));
+      const deliveredApproval = await approvalNotice;
+      assert.equal((deliveredApproval.notification as { userId: string; entityId: string }).userId, requester.userId);
+      assert.equal((deliveredApproval.notification as { entityId: string }).entityId, String(requestId));
+      await Promise.all(approvalBlocked);
+
+      const deniedEndNotice = expectNoWebSocketEvent(requesterSocket,
+        (event) => isUpgradeNotice(event, "subscription has ended"));
+      const deniedEnd = await apiRequest(requester, `/admin/community-upgrades/${requestId}/end`, { method: "POST" });
+      assert.equal(deniedEnd.status, 403);
+      await deniedEndNotice;
+      const endNotice = waitForWebSocketEvent(requesterSocket,
+        (event) => isUpgradeNotice(event, "subscription has ended"));
+      const endBlocked = [adminSocket, outsiderSocket].map((socket) =>
+        expectNoWebSocketEvent(socket, (event) => isUpgradeNotice(event, "subscription has ended")));
+      const ended = await apiRequest(firstSession, `/admin/community-upgrades/${requestId}/end`, { method: "POST" });
+      assert.equal(ended.status, 200, JSON.stringify(ended));
+      const delivered = await endNotice;
+      assert.equal((delivered.notification as { userId: string; entityId: string }).userId, requester.userId);
+      assert.equal((delivered.notification as { entityId: string }).entityId, String(requestId));
+      await Promise.all(endBlocked);
+      assert.ok(sockets.every((socket) => socket.readyState === WebSocket.OPEN));
+    } finally {
+      getUserMock?.mock.restore();
+      await Promise.all(sockets.map(async (socket) => {
+        if (socket.readyState === WebSocket.CLOSED) return;
+        const closed = waitForWebSocketClose(socket);
+        socket.close();
+        await closed;
+      }));
+      if (requestId !== null) {
+        await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(requestId)]);
+        await pool.query(
+          "DELETE FROM irc_messages WHERE sender_id = $1 AND recipient_id = $2 AND body LIKE $3",
+          [requester.userId, firstSession.userId, `Public community subscription #${requestId} pending.%`],
+        );
+        await pool.query(
+          "DELETE FROM irc_admin_audit_logs WHERE target_id = $1 AND action IN ('approved_community_upgrade', 'ended_community_subscription')",
+          [String(requestId)],
+        );
+        await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
+      }
+      if (originalRole !== null && originalRole !== "admin") {
+        await pool.query("UPDATE irc_users SET role = $1 WHERE clerk_id = $2", [originalRole, firstSession.userId]);
+      }
+    }
+  });
+
   test("requires a verified active subscription, owns multiple public communities, and pauses them on downgrade", async () => {
     const post = (session: TestSession, path: string, body: object) => apiRequest(session, path, {
       method: "POST",
@@ -7177,6 +7283,179 @@ describe("admin access controls", () => {
         memberSession.userId,
         invalidSession.userId,
       ]);
+    }
+  });
+
+  test("isolates moderation, direct messages, notification state, and reconnect subscriptions across workspaces", async () => {
+    const owner = await createTestSession("delivery_owner");
+    const member = await createTestSession("delivery_member");
+    const otherMemberSession = await createSessionForUser(member.userId);
+    const outsider = await createTestSession("delivery_outsider");
+    const sockets: WebSocket[] = [];
+    const communityIds: number[] = [];
+    let dmId: string | null = null;
+    const notificationIds: number[] = [];
+
+    try {
+      for (const session of [owner, member, outsider]) {
+        assert.equal((await apiRequest(session, "/me")).status, 200);
+      }
+      const makeWorkspace = async (session: TestSession) => {
+        const response = await apiRequest(session, "/communities", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `Delivery ${randomUUID().slice(0, 8)}`, isPrivate: true }),
+        });
+        assert.equal(response.status, 201, JSON.stringify(response));
+        const id = (response.body as { id: number }).id;
+        communityIds.push(id);
+        return id;
+      };
+      const workspaceId = await makeWorkspace(owner);
+      await makeWorkspace(outsider);
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+        [workspaceId, member.userId],
+      );
+      const channel = await apiRequest(owner, `/communities/${workspaceId}/channels`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `delivery-${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(channel.status, 201, JSON.stringify(channel));
+      const channelId = (channel.body as { id: number }).id;
+      await pool.query(
+        "INSERT INTO irc_channel_members (channel_id, user_id, role) VALUES ($1, $2, 'member')",
+        [channelId, member.userId],
+      );
+
+      const [ownerSocket, memberSocket, memberOtherSocket, outsiderSocket] = await Promise.all([
+        openWebSocket(owner), openWebSocket(member), openWebSocket(otherMemberSession), openWebSocket(outsider),
+      ]);
+      sockets.push(ownerSocket, memberSocket, memberOtherSocket, outsiderSocket);
+      for (const socket of [ownerSocket, memberSocket, memberOtherSocket, outsiderSocket]) {
+        socket.send(JSON.stringify({ type: "subscribe", channelId }));
+      }
+      await Promise.all([ownerSocket, memberSocket, memberOtherSocket]
+        .map((socket) => waitForChannelSubscription(socket, channelId)));
+      assert.equal((await apiRequest(outsider, `/channels/${channelId}/messages`)).status, 403);
+
+      const moderationPredicate = (event: Record<string, unknown>) =>
+        event.type === "moderation" && event.action === "mute" && event.targetUserId === member.userId;
+      const moderationReceived = [ownerSocket, memberSocket, memberOtherSocket]
+        .map((socket) => waitForWebSocketEvent(socket, moderationPredicate));
+      const moderationBlocked = expectNoWebSocketEvent(outsiderSocket, moderationPredicate);
+      const moderated = await apiRequest(owner, `/channels/${channelId}/moderation`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "mute", targetUserId: member.userId }),
+      });
+      assert.equal(moderated.status, 200, JSON.stringify(moderated));
+      await Promise.all([...moderationReceived, moderationBlocked]);
+
+      const dmBody = `Private delivery ${randomUUID()}`;
+      const dmPredicate = (event: Record<string, unknown>) =>
+        event.type === "dm" && (event.message as { body?: unknown } | undefined)?.body === dmBody;
+      const dmReceived = [ownerSocket, memberSocket, memberOtherSocket]
+        .map((socket) => waitForWebSocketEvent(socket, dmPredicate));
+      const dmBlocked = expectNoWebSocketEvent(outsiderSocket, dmPredicate);
+      const sent = await apiRequest(owner, `/dm/${member.userId}/messages`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: dmBody }),
+      });
+      assert.equal(sent.status, 201, JSON.stringify(sent));
+      dmId = (sent.body as { id: string }).id;
+      await Promise.all([...dmReceived, dmBlocked]);
+
+      const inserted = await pool.query<{ id: number }>(
+        `INSERT INTO irc_notifications (user_id, type, category, body)
+         VALUES ($1, 'general', 'general', $2), ($1, 'general', 'general', $3) RETURNING id`,
+        [member.userId, `Private notification ${randomUUID()}`, `Unread notification ${randomUUID()}`],
+      );
+      notificationIds.push(...inserted.rows.map((row) => row.id));
+      const [notificationId, otherNotificationId] = notificationIds;
+      const expectOwnerOnly = async (
+        predicate: (event: Record<string, unknown>) => boolean,
+        action: () => ReturnType<typeof apiRequest>,
+      ) => {
+        const received = [memberSocket, memberOtherSocket]
+          .map((socket) => waitForWebSocketEvent(socket, predicate));
+        const blocked = [ownerSocket, outsiderSocket]
+          .map((socket) => expectNoWebSocketEvent(socket, predicate));
+        const response = await action();
+        assert.equal(response.status, 200, JSON.stringify(response));
+        const events = await Promise.all(received);
+        await Promise.all(blocked);
+        return events;
+      };
+      const readPredicate = (event: Record<string, unknown>) =>
+        event.type === "notification_read" && event.notificationId === notificationId;
+      const deniedReadEvent = expectNoWebSocketEvent(memberSocket, readPredicate);
+      const deniedRead = await apiRequest(outsider, `/notifications/${notificationId}/read`, { method: "POST" });
+      assert.equal(deniedRead.status, 200);
+      await deniedReadEvent;
+      const unread = await pool.query<{ read_at: Date | null }>(
+        "SELECT read_at FROM irc_notifications WHERE id = $1", [notificationId],
+      );
+      assert.equal(unread.rows[0].read_at, null);
+      await expectOwnerOnly(readPredicate,
+        () => apiRequest(member, `/notifications/${notificationId}/read`, { method: "POST" }));
+      await expectOwnerOnly(
+        (event) => event.type === "notification_archived" && event.notificationId === notificationId,
+        () => apiRequest(member, `/notifications/${notificationId}/archive`, { method: "POST" }),
+      );
+      await expectOwnerOnly(
+        (event) => event.type === "notification_restored" && event.notificationId === notificationId,
+        () => apiRequest(member, `/notifications/${notificationId}/restore`, { method: "POST" }),
+      );
+      await expectOwnerOnly(
+        (event) => event.type === "notifications_read_all"
+          && Array.isArray(event.notificationIds) && event.notificationIds.includes(otherNotificationId),
+        () => apiRequest(member, "/notifications/read-all", { method: "POST" }),
+      );
+      await expectOwnerOnly(
+        (event) => event.type === "notification_deleted" && event.notificationId === notificationId,
+        () => apiRequest(member, `/notifications/${notificationId}`, { method: "DELETE" }),
+      );
+      await expectOwnerOnly(
+        (event) => event.type === "notifications_cleared"
+          && Array.isArray(event.notificationIds) && event.notificationIds.includes(otherNotificationId),
+        () => apiRequest(member, "/notifications/clear", { method: "DELETE" }),
+      );
+      assert.ok([ownerSocket, outsiderSocket].every((socket) => socket.readyState === WebSocket.OPEN));
+
+      const closed = waitForWebSocketClose(memberSocket);
+      memberSocket.close();
+      await closed;
+      const reconnected = await openWebSocket(member);
+      sockets.push(reconnected);
+      const marker = randomUUID();
+      const noInheritedEvents = expectNoWebSocketEvent(
+        reconnected,
+        (event) => event.type === "channel_subscription_probe" && event.marker === marker,
+      );
+      wsHub.broadcastChannel(channelId, { type: "channel_subscription_probe", marker });
+      await noInheritedEvents;
+      reconnected.send(JSON.stringify({ type: "subscribe", channelId }));
+      await waitForChannelSubscription(reconnected, channelId);
+      const afterSubscribe = waitForWebSocketEvent(
+        reconnected,
+        (event) => event.type === "channel_subscription_probe" && event.marker === marker,
+      );
+      wsHub.broadcastChannel(channelId, { type: "channel_subscription_probe", marker });
+      await afterSubscribe;
+      assert.equal(reconnected.readyState, WebSocket.OPEN);
+    } finally {
+      await Promise.all(sockets.map(async (socket) => {
+        if (socket.readyState === WebSocket.CLOSED) return;
+        const closed = waitForWebSocketClose(socket);
+        socket.close();
+        await closed;
+      }));
+      if (notificationIds.length) await pool.query("DELETE FROM irc_notifications WHERE id = ANY($1::int[])", [notificationIds]);
+      if (dmId !== null) await pool.query("DELETE FROM irc_messages WHERE id = $1", [dmId]);
+      if (communityIds.length) {
+        await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
+      }
     }
   });
 

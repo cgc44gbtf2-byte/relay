@@ -15,7 +15,7 @@ revocation paths, and the web client’s event handling in:
 This is a code-level authorization review with focused live-socket regression
 coverage. It is not a claim that every event has an end-to-end recipient test.
 
-## Confirmed issue fixed
+## Confirmed issues fixed
 
 Terminating an employee removed their channel memberships and workspace
 membership in the database, but did not revoke existing WebSocket subscriptions.
@@ -36,6 +36,12 @@ workspace subscription, a remaining workspace member receives the presence
 change, and the employee remains subscribed to a private channel in a different
 workspace.
 
+Ending an approved community subscription persisted the requester's notification
+but did not broadcast it to their open sessions. The end route now returns the
+persisted notification from its transaction and, after commit and subscription
+revocation, sends it to the requester only. Failed or unauthorized end attempts
+do not send a notice.
+
 ## Event delivery boundaries
 
 | Event family | Delivery scope reviewed |
@@ -48,15 +54,32 @@ workspace.
 
 No other cross-workspace delivery leak was confirmed in this review.
 
-## Remaining test coverage
+## Focused live-socket evidence
 
-These are test gaps, not confirmed authorization defects:
+`artifacts/api-server/src/admin.test.ts` now checks authenticated sockets for:
 
-- Add explicit recipient/non-recipient live-socket assertions for moderation,
-  direct messages, notification-state changes, and community-upgrade notices.
-- Specify and test reconnect behavior. The server sends `ready` without a
-  subscription snapshot; the client’s re-subscription behavior should be
-  asserted as the contract.
+- Moderation on a private workspace channel: the owner and two authorized
+  member sessions receive the event; a connected user in another workspace who
+  attempts to subscribe does not.
+- Direct messages: the sender and both recipient sessions receive the message;
+  the unrelated connected user does not.
+- Notification read, archive, restore, read-all, individual delete, and clear:
+  both owner sessions receive state changes; the workspace peer and unrelated
+  user do not. An unrelated user's read request does not alter the notification
+  or emit the owner's read event.
+- Community-upgrade request, approval, and end: the admin receives only the
+  request notice, the requester receives the approval and end notices, and the
+  unrelated user receives none. A denied end attempt emits no end notice.
+- A replacement socket starts without its predecessor's channel subscriptions:
+  a channel broadcast before re-subscription does not arrive, while one after
+  re-subscription does.
 
-The broader storage, abuse-control, and accessibility reviews remain separate
-audit areas.
+The existing web-client regression in `artifacts/web-irc/src/App.test.tsx`
+asserts that reconnect requests a fresh socket ticket and re-subscribes to the
+active channel. The contract is a new `ready` frame with no subscription
+snapshot; the client must explicitly re-subscribe. The focused API checks run
+against a disposable test database, not development or production data.
+
+These checks cover the named delivery families, not every outbound event class
+or every authorization race. The broader storage, abuse-control, and
+accessibility reviews remain separate audit areas.

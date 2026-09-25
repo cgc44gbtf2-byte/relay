@@ -232,36 +232,37 @@ router.post("/admin/community-upgrades/:id/end", requireAuth, async (req: Authen
   const result = await db.transaction(async (tx) => {
     const [admin] = await tx.select({ role: usersTable.role, displayName: usersTable.displayName })
       .from(usersTable).where(eq(usersTable.clerkId, adminId)).for("share");
-    if (admin?.role !== "admin") return "forbidden";
+    if (admin?.role !== "admin") return { outcome: "forbidden" } as const;
     const [request] = await tx.select().from(communityUpgradeRequestsTable)
       .where(eq(communityUpgradeRequestsTable.id, id));
-    if (!request || request.expiresAt === null) return "not_found";
+    if (!request || request.expiresAt === null) return { outcome: "not_found" } as const;
     await tx.select({ id: usersTable.clerkId }).from(usersTable)
       .where(eq(usersTable.clerkId, request.userId)).for("update");
     const active = await tx.update(communityUpgradeRequestsTable).set({ status: "ended" })
       .where(and(eq(communityUpgradeRequestsTable.userId, request.userId),
         eq(communityUpgradeRequestsTable.status, "approved"),
         gt(communityUpgradeRequestsTable.expiresAt, new Date()))).returning({ id: communityUpgradeRequestsTable.id });
-    if (!active.length) return "not_found";
+    if (!active.length) return { outcome: "not_found" } as const;
     await tx.insert(adminAuditLogsTable).values({
       actorId: adminId, actorDisplayName: admin.displayName,
       action: "ended_community_subscription", targetId: String(id),
       targetLabel: request.displayName,
       details: `Ended ${active.length} active subscription term(s); communities retained for renewal.`,
     });
-    await tx.insert(notificationsTable).values({
+    const [notification] = await tx.insert(notificationsTable).values({
       userId: request.userId, type: "administrative_action", category: "administrative_action",
       body: "Your public community subscription has ended. Subscriber communities are paused until renewal.",
       entityType: "community_upgrade_request", entityId: String(id), actionUrl: "/community-upgrades",
-    });
-    return "ok";
+    }).returning();
+    return { outcome: "ok", requesterId: request.userId, notification } as const;
   });
-  if (result === "forbidden") res.status(403).json({ error: "Platform admin access required." });
-  else if (result === "not_found") res.status(409).json({ error: "No active subscription to end." });
+  if (result.outcome === "forbidden") res.status(403).json({ error: "Platform admin access required." });
+  else if (result.outcome === "not_found") res.status(409).json({ error: "No active subscription to end." });
   else {
-    const [request] = await db.select({ userId: communityUpgradeRequestsTable.userId })
-      .from(communityUpgradeRequestsTable).where(eq(communityUpgradeRequestsTable.id, id));
-    if (request) await wsHub.revokeExpiredCommunitySubscriptions(request.userId);
+    await wsHub.revokeExpiredCommunitySubscriptions(result.requesterId);
+    wsHub.broadcastUser(result.requesterId, {
+      type: "notification", notification: result.notification,
+    });
     res.json({ ok: true });
   }
 });

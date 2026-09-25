@@ -59,7 +59,7 @@ checklist, not a production-readiness sign-off.
 | Area | Evidence | Remaining qualification |
 | --- | --- | --- |
 | Tenant authorization | Endpoint/access-chain matrix in `docs/RELEASE-1-TENANT-ACCESS-MATRIX.md`; two-workspace positive/negative integration matrix and same-workspace announcement audience regression in `artifacts/api-server/src/admin.test.ts`; scoped channel helper in `src/lib/channel-access.ts` | Does not establish exhaustive realtime event-class or storage-provider isolation. |
-| WebSocket event privacy | `src/lib/ws.ts`, `src/lib/ws.test.ts`: subscriber-only deletion; access-checked channel-list invalidation; bounded, per-user authorization checks | Complete event-class and real multi-workspace delivery matrix is not yet established. Invalidation unit tests inject access decisions. |
+| WebSocket event privacy | `src/lib/ws.ts`, `src/lib/ws.test.ts`: subscriber-only deletion; access-checked channel-list invalidation; bounded, per-user authorization checks; authenticated recipient/non-recipient multi-workspace checks in `src/admin.test.ts` | The focused live matrix covers moderation, DMs, notification state, and upgrade notices, not every event class or authorization race. Invalidation unit tests inject access decisions. |
 | Roles and destructive operations | Integration tests for revocation races, denied-operation audit absence, moderation records, and forced audit-write rollback | Does not prove every mutation and failure path. |
 | Database integrity and migrations | `lib/db/migrations`, `docs/DATABASE-MIGRATIONS.md`, rehearsal/bootstrap tests | Production baseline/application and recovery remain an operational verification step. |
 | Audit preservation | Actor snapshot/preservation migrations and integration tests | No blanket sign-off on every audit producer. |
@@ -67,7 +67,7 @@ checklist, not a production-readiness sign-off.
 | Abuse protection | Fixed-window limiter and ticket-cleanup tests; route-specific limits | Full route inventory and multi-instance behavior remain unverified. |
 | Data retention | `docs/DATA-RETENTION.md` | Strategy documented; no destructive retention job added. |
 | Frontend recovery | `artifacts/web-irc/src/App.test.tsx`: room retry, reconnect, DM preservation, username conflicts, developer denial | Comprehensive keyboard/focus/accessibility and error-state review is still outstanding. |
-| WebSocket event delivery | All current event emitters, subscription/session revocation, channel-list invalidation, and client handling; see `RELEASE-1-WEBSOCKET-AUDIT.md` | The employee-offboarding subscription leak is fixed; targeted delivery tests remain for moderation, DMs, notification-state changes, upgrade notices, and reconnect behavior. |
+| WebSocket event delivery | Employee-offboarding revocation, post-commit subscription-end notice, live recipient/non-recipient checks, and server/client reconnect contract; see `RELEASE-1-WEBSOCKET-AUDIT.md` | The named delivery families are verified; this is not an exhaustive event-class matrix or production release sign-off. |
 | Collection pagination | Workspace detail/list, IRC directories/search, admin collections and release archive now use bounded pages with deterministic ID tie-break ordering; frontend consumers traverse pages or offer workspace load-more | Offset traversal is not a database snapshot: concurrent insertion, removal or renaming can shift page boundaries. Nested resource details retain their existing contract. |
 
 API source paths in the table are relative to `artifacts/api-server`.
@@ -82,10 +82,10 @@ API source paths in the table are relative to `artifacts/api-server`.
 2. Collection pagination inventory is recorded below. Continue to distinguish
    navigable collections from intentionally recent dashboard snapshots when
    adding endpoints; do not introduce a cap without a continuation path.
-3. The WebSocket event review and confirmed offboarding fix are recorded in
-   `RELEASE-1-WEBSOCKET-AUDIT.md`; add the remaining event-delivery tests listed
-   there. Storage enforcement, abuse-control inventory, and accessibility
-   verification are still open.
+3. The WebSocket event review, offboarding and subscription-end fixes, and
+   focused authenticated recipient/non-recipient checks are recorded in
+   `RELEASE-1-WEBSOCKET-AUDIT.md`. Storage enforcement, abuse-control
+   inventory, and accessibility verification are still open.
 4. Run/document the available security/static-analysis checks and reconcile
    their findings; do not equate license checking with security analysis.
 5. Resolve the separately queued unclassified dependency-license review.
