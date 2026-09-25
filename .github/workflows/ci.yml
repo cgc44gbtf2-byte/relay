@@ -44,6 +44,9 @@ jobs:
           PORT: 4173
           BASE_PATH: /web-irc/
 
+      - name: Check notices in final API and web outputs
+        run: pnpm run verify:release-notices
+
   validate-scheduled-cleanup:
     runs-on: ubuntu-latest
     steps:

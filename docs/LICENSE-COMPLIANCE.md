@@ -1,6 +1,6 @@
 # License compliance and acquisition readiness
 
-**Snapshot date:** 2026-09-24  
+**Snapshot date:** 2026-09-25
 **Status:** The dependency license gate passes for the current installed graph. This is **not an acquisition sign-off**; notices and legal review remain outstanding.
 
 This is a technical evidence report. It does not determine legal ownership,
@@ -15,9 +15,12 @@ The graph includes 2 platform-optional unknown records
 not installed here: `@tailwindcss/oxide-wasm32-wasi@4.3.3`, `fsevents@2.3.3`.
 Check their licenses before building on a platform that installs them.
 
-**Notice handling remains open:** before distributing a production bundle or
-transferring it, preserve applicable license and notice texts for included
-packages. See the separately tracked release notice work.
+**Notice handling:** the API and web production builds now generate
+`THIRD-PARTY-NOTICES.txt` and a package/version manifest in their respective
+outputs. `pnpm run verify:release-notices` checks both local outputs and fails
+if a selected package lacks license text. The bundle is conservatively scoped
+to bundler inputs plus runtime-reachable packages; it is not a legal approval
+or proof of what an as-yet-uninspected published archive contains.
 
 ## Items requiring legal or license review
 
@@ -47,9 +50,11 @@ packages. See the separately tracked release notice work.
 
 ## Items requiring documentation
 
-- Add a generated third-party notice bundle to the release process.
-- Record the exact source and version used for each production browser/server
-  artifact.
+- Check that the generated notices and version manifests accompany the actual
+  published browser/server deliverables; local build verification is not a
+  substitute for inspecting the shipped release.
+- Review the exact source and version used for each production browser/server
+  artifact, including any external runtime packages.
 - Preserve the Lightning CSS MPL-2.0 LICENSE file and any source-availability
   information when shipping artifacts that include it.
 - Verify that release archives contain only the intended production dependencies and notices.

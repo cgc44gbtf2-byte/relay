@@ -1,6 +1,6 @@
 # Relay IP ownership and provenance
 
-**Snapshot date:** 2026-09-24
+**Snapshot date:** 2026-09-25
 
 This document distinguishes repository evidence from legal ownership. No
 domain, trademark, registrar, contributor assignment, account, or user-asset

@@ -89,14 +89,12 @@ production-readiness sign-off.
   with Relay tables but no migration ledger would be rejected by the runner.
   The 8/8 local runner guard tests passed, but the migration owner for first
   Publish must be reconciled before release. No production SQL was run.
-- The notice-packaging audit found no separate license, notice or attribution
-  files in the local API and web build output directories; the release script
-  and CI build do not generate or inspect a notice bundle. The installed
-  dependency allowlist and 3/3 policy tests pass, but the inventory is not
-  a bundle of license texts. No shipped archive or production deployment was
-  available to inspect; actual included packages, applicable notices and
-  human license decisions remain open. See the notice audit in
-  `RELEASE-1-SECURITY-READINESS.md`.
+- The API and web build outputs now include generated third-party notice texts
+  and package/version manifests. Local verification passed for 139 API and
+  21 web package versions with no missing texts; release validation and CI
+  check both bundles. No shipped archive or production deployment was
+  available to inspect, so final distribution coverage and human license
+  decisions remain open. See `RELEASE-1-SECURITY-READINESS.md`.
 
 ## Implemented safeguards and evidence locations
 

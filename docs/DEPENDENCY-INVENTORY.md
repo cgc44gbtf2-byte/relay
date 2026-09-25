@@ -1,6 +1,6 @@
 # Dependency inventory
 
-**Snapshot date:** 2026-09-24  
+**Snapshot date:** 2026-09-25
 **Sources:** `pnpm-lock.yaml`, `pnpm list --recursive --depth Infinity --json`, installed package `package.json` files, installed license files, and `pnpm licenses list --json`.
 
 This snapshot records every unique package/version reported by the workspace

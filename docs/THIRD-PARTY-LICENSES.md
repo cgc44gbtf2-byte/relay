@@ -1,6 +1,6 @@
 # Third-party licenses
 
-**Snapshot date:** 2026-09-24  
+**Snapshot date:** 2026-09-25
 **Source:** installed package metadata and package license files, cross-checked
 with `pnpm licenses list --json`.
 

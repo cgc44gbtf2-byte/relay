@@ -95,34 +95,29 @@ migration-runner changes.
 
 ### Third-party notice packaging audit (2026-09-25)
 
-The current `pnpm run audit:licenses` gate passes and all 3/3 license-policy
-tests pass. This checks installed dependency metadata against a technical
-allowlist; `docs/DEPENDENCY-INVENTORY.md` and
-`docs/THIRD-PARTY-LICENSES.md` identify package/version candidates but are
-**not a generated bundle of license and notice texts**. The local
-`artifacts/api-server/dist` and `artifacts/web-irc/dist` outputs contain no
-separate files named for licenses, notices or attributions. The current
-`release:validate` script and GitHub CI build/check workflow have no step
-that assembles a notice bundle or verifies one inside a release archive.
-These checks do not establish whether comments embedded in bundled code
-carry any particular attribution.
+The current `pnpm run audit:licenses` gate and 3/3 license-policy tests pass.
+The API and web production builds now assemble `THIRD-PARTY-NOTICES.txt`
+and a versioned JSON manifest **in each build output** from the bundler
+inputs plus the artifact's conservatively included runtime dependency graph.
+The local outputs were generated and checked: 139 API package versions and
+21 web package versions, with no missing license texts. Version-bound
+upstream terms fill gaps where published npm packages omit a standalone
+license file; README license sections are used only when they contain full
+terms. The new `verify:release-notices` check fails on an absent, incomplete
+or mismatched bundle, and runs after both the local release builds and the
+final CI rebuild. The two build outputs are evidence of local packaging,
+**not** proof of the eventual published archive.
 
-There is no published deployment or inspected distributable archive, so
-nothing here establishes the exact set of shipped production dependencies or
-proves which notices reach recipients. The remaining human review includes
+There is still no published deployment or inspected distributable archive.
+Before distribution, release engineering must check that these generated
+files actually accompany the shipped browser and server deliverables,
+including any external runtime packages, and confirm their scope against
+the final production artifact. The legal owner must separately resolve
 MPL-2.0 (`lightningcss` and its native package), CC-BY-4.0 (`caniuse-lite`)
-and Unlicense (`fast-sha256`, `wouter`), **to the extent their contents are
+and Unlicense (`fast-sha256`, `wouter`) **to the extent their contents are
 distributed**. Two graph-only optional packages have unknown metadata on
-this platform and require checking if a target installs them. A passing
-allowlist is not legal approval.
-
-Before distribution, release engineering must generate applicable license
-texts, copyright/attribution notices and any required source-availability
-information for the **actual browser and server deliverables**, including
-externally loaded production packages; inspect those deliverables or their
-release archive for the generated bundle and make that verification part of
-the release process. The legal owner must resolve the flagged obligations.
-No notice packaging or approval was added by this audit.
+this platform and require review if a target installs them. Neither the
+license gate nor the generated bundle constitutes legal approval.
 
 ## Original audit areas: fix, evidence and residual risk
 
@@ -143,7 +138,7 @@ below are relative to `artifacts/api-server`.
 | Collection pagination and query indexes — **focused verified** | Inventory and tests in `docs/RELEASE-1-AUDIT-STATUS.md` and `docs/RELEASE-1-QUERY-INDEX-JUSTIFICATION.md` cover bounded reads, continuation and index rationale. | Offset pages are not a snapshot under concurrent inserts/deletes; monitor real query plans before speculative indexing (API/database engineering). |
 | Data retention — **strategy documented** | `docs/DATA-RETENTION.md` describes retention. | No destructive retention job has been implemented; operations/product must approve execution and recovery policy before claiming automated retention. |
 | Dependency licensing — **technical gate passed; legal review open** | `docs/REPLIT-PACKAGE-LICENSE-REVIEW.md` documents removal, not approval, of four unverified Replit packages. `docs/LICENSE-COMPLIANCE.md` and current gate results find no installed unknown licenses. | Release/legal owner must review MPL-2.0, CC-BY-4.0 and Unlicense obligations. Two unknown *platform-optional, uninstalled here* records require review if a target installs them. License checking is distinct from vulnerability scanning. |
-| Third-party notices — **local packaging gap found; shipped artifact unverified** | The technical license gate and 3/3 policy tests pass, but the two local build output directories have no separate license/notice/attribution files and CI has no notice-packaging verification. See the notice audit above. | Release engineering must generate applicable notice/source-availability material, verify it in the actual browser/server deliverables and release archive, and add a packaging check. Legal review remains open. |
+| Third-party notices — **local bundles verified; shipped artifact and legal review open** | Build outputs contain generated notices and package/version manifests (139 API, 21 web); local verification passes and the release/CI checks now require them. See the notice audit above. | Inspect the published browser/server deliverables for those files and externally loaded package coverage; a final archive and human review of license/source obligations are still needed. |
 | Hosted CI and release deployment — **failed / unverified** | Current local release validation passes; the latest hosted CI run above fails. | CI owner must diagnose failed jobs, rerun the current revision to green, and confirm cleanup. Operations must separately verify production migration baseline, backup/recovery and single-process deployment assumptions. |
 
 ## Release decision and priorities
@@ -161,12 +156,10 @@ below are relative to `artifacts/api-server`.
    approved rollout checks. There is no published target yet; never infer
    its baseline from the development database.
 3. **Blocker for distribution — notices and human license decisions.** Release
-   engineering and legal owner: generate applicable notices and
-   source-availability information, inspect them in the actual browser/server
-   deliverables or release archive, add a release check, and approve the
-   remaining license obligations. The local build outputs currently have no
-   separate notice files. Removed packages are not licensed by virtue of
-   prior inclusion.
+   engineering and legal owner: generated bundles pass local checks, but
+   inspect them in the actual published browser/server deliverables and
+   approve the remaining license/source-availability obligations. Removed
+   packages are not licensed by virtue of prior inclusion.
 4. **Deployment/security qualification — provider controls and topology.**
    Storage owner must validate direct-upload enforcement and cleanup; operations
    must ensure the process-local abuse and WebSocket state match the intended

@@ -30,6 +30,19 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss({ optimize: false }),
+    {
+      name: 'release-notice-inputs',
+      generateBundle(_options, bundle) {
+        const modulePaths = Object.values(bundle).flatMap((output) =>
+          output.type === 'chunk' ? Object.keys(output.modules) : [],
+        );
+        this.emitFile({
+          type: 'asset',
+          fileName: '.notice-inputs.json',
+          source: JSON.stringify(modulePaths),
+        });
+      },
+    },
   ],
   resolve: {
     alias: {
