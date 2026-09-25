@@ -1,7 +1,8 @@
 # Release 1 audit status
 
-Reviewed: 2026-09-25. This is a reconciliation of the original audit-fix
-checklist, not a production-readiness sign-off.
+Reviewed: 2026-09-25. The per-fix reconciliation, fresh security checks and
+release blockers are in `RELEASE-1-SECURITY-READINESS.md`. This is **not** a
+production-readiness sign-off.
 
 ## Verification evidence
 
@@ -11,7 +12,7 @@ checklist, not a production-readiness sign-off.
   collections, admin directory/release pages, invalid inputs and tied ordering.
   Temporary database profiles and newly created Clerk users were confirmed cleaned
   up. This was a focused run, not a rerun of the full authenticated suite.
-- PostgreSQL 16: the most recent complete authenticated CI run passed 120/120
+- An earlier complete PostgreSQL 16 authenticated run passed 120/120
   integration tests, migration rehearsal, fresh-schema bootstrap, strict no-op
   validation, and scheduled test-user cleanup.
 - PostgreSQL 14.18, 15.13 and 16.10: each passed all 30 database-script
@@ -22,7 +23,7 @@ checklist, not a production-readiness sign-off.
 - The subsequent scoped WebSocket invalidation change passed API typechecking
   and 32/32 API unit tests. The full authenticated suite was not rerun for that
   change.
-- Most recent frontend verification: 50/50 tests, typecheck, and production build
+- Earlier frontend verification: 50/50 tests, typecheck, and production build
   passed. A large JavaScript chunk warning remains.
 - CI YAML, concurrency/version-policy tests, and scheduled-cleanup configuration
   checks passed locally. Local checks do not establish a green hosted CI run.
@@ -65,6 +66,15 @@ checklist, not a production-readiness sign-off.
   selectors were updated for previously hover-only member actions. The
   existing large JavaScript chunk warning remains. This is not a claim of
   manual assistive-technology or production verification.
+- Current local `release:validate` passed: 28 migration files validated,
+  library/API/web typechecks, 60/60 API unit tests, 113/113 web tests,
+  both builds and the dependency-license gate. Three license policy tests
+  passed separately. The dependency, static-code and privacy/security
+  dataflow scans returned zero findings; this does not certify runtime
+  security. The latest hosted GitHub CI run (2026-09-24 22:59 UTC) **failed**
+  its database compatibility, authenticated API and scheduled-cleanup
+  validation jobs, although its release-validation job passed. See
+  `RELEASE-1-SECURITY-READINESS.md` for run links and release blockers.
 
 ## Implemented safeguards and evidence locations
 
@@ -133,11 +143,15 @@ workspace loading and selection, and administrator navigation/confirmations:
       recorded in `RELEASE-1-ABUSE-CONTROL-AUDIT.md`; automated accessibility
       fixes are documented above, while manual assistive-technology and
       signed-in narrow-screen verification remain open.
-4. Run/document the available security/static-analysis checks and reconcile
-   their findings; do not equate license checking with security analysis.
-5. Resolve the separately queued unclassified dependency-license review.
-6. Produce the original checklist's final per-fix report and confirm hosted CI
-   and production migration readiness before release approval.
+4. Security/static/dataflow scans and local release validation are recorded in
+   `RELEASE-1-SECURITY-READINESS.md`. Zero scanner findings are not a
+   production security sign-off; license checking is a separate gate.
+5. The four previously unverified Replit packages were **removed**, not
+   approved; the installed-graph license gate passes. Notices in shipped
+   artifacts and human legal review remain open.
+6. The per-fix report is `RELEASE-1-SECURITY-READINESS.md`. Latest hosted CI
+   is failing; production migration baseline, backup and recovery evidence
+   is absent. Release approval remains blocked.
 
 ## Collection-read inventory
 
