@@ -43,3 +43,4 @@
 - [Announcement audience boundary](announcement-audience-boundary.md) — targeted announcement access must hold across feeds, attachments, receipts, and delayed delivery.
 - [Responsive UI test visibility](responsive-ui-test-visibility.md) — JSDOM may expose both CSS-hidden responsive controls; scope role queries and verify actual widths separately.
 - [Release notice provenance](release-notice-provenance.md) — pin license terms to the distributed package/version; repository-root terms can differ from a subproject's.
+- [GitHub push transport](github-push-transport.md) — this workspace's SSH origin may reject pushes; preserve fast-forward history using authenticated HTTPS.
