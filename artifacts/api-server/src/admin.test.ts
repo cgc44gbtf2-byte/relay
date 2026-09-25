@@ -8774,6 +8774,200 @@ describe("admin access controls", () => {
     }
   });
 
+  test("notifies task creators once when their creator and assignee roles overlap", async () => {
+    const creator = await createTestSession("task_overlap_creator");
+    const editor = await createTestSession("task_overlap_editor");
+    const previous = await createTestSession("task_overlap_previous");
+    const next = await createTestSession("task_overlap_next");
+    const unrelated = await createTestSession("task_overlap_unrelated");
+    const sessions = [creator, editor, previous, next, unrelated];
+    const sockets: WebSocket[] = [];
+    let communityId: number | null = null;
+    type Notice = {
+      id: number;
+      userId: string;
+      type: string;
+      body: string;
+      communityId: number;
+      entityType: string;
+      entityId: string;
+      actionUrl: string;
+    };
+    const noticeFields = (notice: Notice): Notice => ({
+      id: notice.id,
+      userId: notice.userId,
+      type: notice.type,
+      body: notice.body,
+      communityId: notice.communityId,
+      entityType: notice.entityType,
+      entityId: notice.entityId,
+      actionUrl: notice.actionUrl,
+    });
+    const byId = (a: Notice, b: Notice) => a.id - b.id;
+
+    try {
+      for (const session of sessions) {
+        const profile = await apiRequest(session, "/me");
+        assert.equal(profile.status, 200, JSON.stringify(profile));
+      }
+      const community = await apiRequest(creator, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Task creator overlap ${randomUUID().slice(0, 8)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      communityId = (community.body as { id: number }).id;
+      assert.equal(typeof communityId, "number");
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member'), ($1, $3, 'member'), ($1, $4, 'member'), ($1, $5, 'member')`,
+        [communityId, editor.userId, previous.userId, next.userId, unrelated.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+         VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+        [editor.userId, communityId, creator.userId],
+      );
+      for (const session of sessions) sockets.push(await openWebSocket(session));
+      await Promise.all(sessions.map((session) => waitForProfileStatus(session.userId, "online")));
+
+      for (const scenario of [
+        {
+          label: "creator is the new assignee",
+          initialAssignee: previous,
+          newAssignee: creator,
+          status: "waiting",
+          statusLabel: "Waiting",
+        },
+        {
+          label: "creator is the removed assignee",
+          initialAssignee: creator,
+          newAssignee: next,
+          status: "completed",
+          statusLabel: "Completed",
+        },
+      ] as const) {
+        const title = `Task ${scenario.label} ${randomUUID().slice(0, 8)}`;
+        const created = await apiRequest(creator, `/communities/${communityId}/tasks`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, assignedTo: scenario.initialAssignee.userId }),
+        });
+        assert.equal(created.status, 201, JSON.stringify(created));
+        const taskId = (created.body as { id: number }).id;
+        const baseline = await pool.query<{ id: number }>(
+          `SELECT id FROM irc_notifications
+           WHERE entity_type = 'workspace_task' AND entity_id = $1`,
+          [String(taskId)],
+        );
+        const baselineIds = new Set(baseline.rows.map(({ id }) => id));
+        const live = sockets.map((socket) => collectWebSocketEvents(
+          socket,
+          (event) => {
+            const notification = event.notification as Notice | undefined;
+            return event.type === "notification"
+              && notification?.communityId === communityId
+              && notification.entityType === "workspace_task"
+              && notification.entityId === String(taskId);
+          },
+          1_000,
+        ));
+        const changed = await apiRequest(editor, `/communities/${communityId}/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ assignedTo: scenario.newAssignee.userId, status: scenario.status }),
+        });
+        assert.equal(changed.status, 200, JSON.stringify(changed));
+        const events = await Promise.all(live);
+        const persisted: { rows: Notice[] } = await pool.query<Notice>(
+          `SELECT id, user_id AS "userId", type, body, community_id AS "communityId",
+                  entity_type AS "entityType", entity_id AS "entityId", action_url AS "actionUrl"
+           FROM irc_notifications
+           WHERE community_id = $1 AND entity_type = 'workspace_task' AND entity_id = $2
+           ORDER BY id`,
+          [communityId, String(taskId)],
+        );
+        const added: Notice[] = persisted.rows.filter(({ id }) => !baselineIds.has(id));
+        const expected = [
+          {
+            userId: scenario.initialAssignee.userId,
+            type: "task_updated",
+            body: `You are no longer assigned the task “${title}”.`,
+          },
+          {
+            userId: scenario.newAssignee.userId,
+            type: "task_assigned",
+            body: `You were assigned the task “${title}”.`,
+          },
+          {
+            userId: creator.userId,
+            type: "task_updated",
+            body: `Task “${title}” moved to ${scenario.statusLabel}.`,
+          },
+          ...(scenario.newAssignee.userId === creator.userId
+            ? []
+            : [{
+              userId: scenario.newAssignee.userId,
+              type: "task_updated",
+              body: `Task “${title}” moved to ${scenario.statusLabel}.`,
+            }]),
+        ];
+        const sortRecipient = (a: { userId: string; body: string }, b: { userId: string; body: string }) =>
+          a.userId.localeCompare(b.userId) || a.body.localeCompare(b.body);
+        assert.deepEqual(
+          added.map(({ userId, type, body }) => ({ userId, type, body })).sort(sortRecipient),
+          expected.sort(sortRecipient),
+          `${scenario.label}: creator and assignee overlap must not duplicate the status notice`,
+        );
+        assert.equal(
+          added.filter(({ userId, body }) =>
+            userId === creator.userId && body === `Task “${title}” moved to ${scenario.statusLabel}.`
+          ).length,
+          1,
+          `${scenario.label}: creator must receive exactly one status notice`,
+        );
+
+        for (const [index, session] of sessions.entries()) {
+          const delivered = events[index]
+            .map((event) => noticeFields(event.notification as Notice))
+            .sort(byId);
+          const saved = added.filter(({ userId }) => userId === session.userId).sort(byId);
+          assert.deepEqual(delivered, saved, `${scenario.label}: live delivery must match persistence`);
+
+          const inbox = await apiRequest(session, "/notifications");
+          assert.equal(inbox.status, 200, JSON.stringify(inbox));
+          assert.ok(Array.isArray(inbox.body));
+          const taskInbox = (inbox.body as Notice[])
+            .filter((notice) => notice.entityType === "workspace_task" && notice.entityId === String(taskId))
+            .map(noticeFields)
+            .sort(byId);
+          assert.deepEqual(
+            taskInbox,
+            persisted.rows.filter((notice) =>
+              notice.userId === session.userId
+              && notice.entityType === "workspace_task"
+              && notice.entityId === String(taskId)
+            ).sort(byId),
+            `${scenario.label}: inbox must match persisted task notices`,
+          );
+        }
+        assert.equal(
+          added.filter(({ userId }) => userId === unrelated.userId).length,
+          0,
+          `${scenario.label}: unrelated members must not receive notices`,
+        );
+      }
+    } finally {
+      for (const socket of sockets) closeWebSocket(socket);
+      if (communityId !== null) {
+        await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+      }
+    }
+  });
+
   test("prevents tasks from using another workspace's department or location", async () => {
     const workspaceIds: number[] = [];
     try {
