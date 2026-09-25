@@ -468,13 +468,14 @@ export async function hasPermission(
   rawScope: PermissionScope = {},
   database: PermissionDatabase = db,
   lockAuthorizationRows = false,
+  userLockMode: "update" | "no key update" = "update",
 ): Promise<boolean> {
   const userQuery = database
     .select({ role: usersTable.role })
     .from(usersTable)
     .where(eq(usersTable.clerkId, userId));
   const [user] = lockAuthorizationRows
-    ? await userQuery.for("update")
+    ? await userQuery.for(userLockMode)
     : await userQuery;
   if (!user) return false;
   if (user.role === "admin") return true;

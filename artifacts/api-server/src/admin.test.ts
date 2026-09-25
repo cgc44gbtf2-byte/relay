@@ -6313,6 +6313,95 @@ describe("admin access controls", () => {
     }
   });
 
+  test("rejects policy publication after concurrent manager authority revocation without side effects", async () => {
+    const owner = await createTestSession("policy_race_owner");
+    const actor = await createTestSession("policy_race_actor");
+    const revocation = await pool.connect();
+    let communityId: number | null = null;
+    try {
+      await Promise.all([apiRequest(owner, "/me"), apiRequest(actor, "/me")]);
+      const community = await apiRequest(owner, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `Policy race ${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(community.status, 201, JSON.stringify(community));
+      communityId = (community.body as { id: number }).id;
+      await pool.query(
+        "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+        [communityId, actor.userId],
+      );
+      const publish = () => apiRequest(actor, `/communities/${communityId}/policies`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Concurrent policy", body: "Must not survive revocation." }),
+      });
+      const snapshot = async () => (await pool.query(
+        `SELECT
+          (SELECT count(*)::int FROM irc_workspace_policies WHERE community_id = $1) AS policies,
+          (SELECT count(*)::int FROM irc_admin_audit_logs WHERE community_id = $1) AS audits,
+          (SELECT count(*)::int FROM irc_notifications WHERE community_id = $1) AS notifications`,
+        [communityId],
+      )).rows;
+
+      for (const scenario of ["primary", "assignment", "membership"] as const) {
+        await pool.query("UPDATE irc_users SET role = $2 WHERE clerk_id = $1", [
+          actor.userId, scenario === "primary" ? "admin" : "member",
+        ]);
+        if (scenario !== "primary") {
+          await pool.query(
+            `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
+             VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
+            [actor.userId, communityId, owner.userId],
+          );
+        }
+        assert.equal(await hasPermission(actor.userId, "manage_community", { communityId }), true);
+        const before = await snapshot();
+        await revocation.query("BEGIN");
+        // Match the authorization-locking convention used by role changes and offboarding.
+        await revocation.query("SELECT clerk_id FROM irc_users WHERE clerk_id = $1 FOR UPDATE", [actor.userId]);
+        const pending = publish();
+        try {
+          let blocked = false;
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            await revocation.query("SELECT pg_stat_clear_snapshot()");
+            const waiting = await revocation.query(
+              `SELECT 1 FROM pg_stat_activity
+               WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+                 AND query ILIKE '%irc_users%' AND query ILIKE '%for no key update%'`,
+            );
+            if (waiting.rowCount) { blocked = true; break; }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.equal(blocked, true, `${scenario}: publisher must wait at its transactional authority check`);
+          await revocation.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [actor.userId]);
+          await revocation.query("DELETE FROM irc_user_roles WHERE user_id = $1 AND community_id = $2", [actor.userId, communityId]);
+          if (scenario === "membership") {
+            await revocation.query("DELETE FROM irc_community_members WHERE user_id = $1 AND community_id = $2", [actor.userId, communityId]);
+          }
+        } finally {
+          await revocation.query("COMMIT");
+          const rejected = await pending;
+          assert.equal(rejected.status, 403, JSON.stringify(rejected));
+          assert.deepEqual(rejected.body, { error: "You cannot manage policies in this workspace." });
+        }
+        assert.deepEqual(await snapshot(), before, `${scenario}: no policy, audit, or notification may be written`);
+      }
+      // A valid manager can still publish, with version allocation starting at one.
+      const success = await apiRequest(owner, `/communities/${communityId}/policies`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Authorized policy", body: "Published by the owner." }),
+      });
+      assert.equal(success.status, 201, JSON.stringify(success));
+      assert.equal((success.body as { version: number }).version, 1);
+    } finally {
+      await revocation.query("ROLLBACK").catch(() => undefined);
+      revocation.release();
+      if (communityId !== null) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
+    }
+  });
+
   test("does not let a revoked role win a concurrent promotion race", async () => {
     const ownerSession = await createTestSession("role_race_owner");
     const actorSession = await createTestSession("role_race_actor");

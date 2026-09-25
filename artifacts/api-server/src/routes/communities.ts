@@ -2969,7 +2969,12 @@ router.post("/communities/:communityId/policies", requireAuth, async (req: Authe
     res.status(400).json({ error: "A policy title and body are required." });
     return;
   }
-  const { policy, notifications } = await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
+    // Recheck and hold authority before locking the workspace or writing anything.
+    // NO KEY UPDATE blocks revocation but allows other publishers' notification FKs.
+    if (!(await hasPermission(userId, "manage_community", { communityId }, tx, true, "no key update"))) {
+      return null;
+    }
     // Lock the stable workspace row, including when no policy exists yet.
     // The following statement then sees the preceding publisher's committed version.
     await tx.select({ id: communitiesTable.id }).from(communitiesTable)
@@ -2994,6 +2999,11 @@ router.post("/communities/:communityId/policies", requireAuth, async (req: Authe
     notifications.push(...await insertCommunityAuditNotifications(tx, userId, "published_workspace_policy", communityId, { details: title }));
     return { policy, notifications };
   });
+  if (!result) {
+    res.status(403).json({ error: "You cannot manage policies in this workspace." });
+    return;
+  }
+  const { policy, notifications } = result;
   broadcastNotifications(notifications);
   res.status(201).json(policy);
 });
