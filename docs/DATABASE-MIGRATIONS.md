@@ -1,5 +1,15 @@
 # Database migrations and rollback
 
+> **First-Publish readiness (2026-09-25):** No active published deployment or
+> production database history was available for inspection. Replit-managed
+> Publish can apply the development schema before the API starts, while this
+> application's production command also runs a separate migration ledger.
+> If tables arrive without that ledger, the runner refuses to guess their
+> history and the API will not start. Confirm the intended database target and
+> reconcile who applies schema changes **before** using the production commands
+> below. Do not set confirmation flags or baseline an uninspected database to
+> bypass this guard. See `RELEASE-1-SECURITY-READINESS.md`.
+
 ## Migration model
 
 Relay uses two related schema workflows:

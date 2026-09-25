@@ -82,6 +82,13 @@ production-readiness sign-off.
   cluster. Hosted job logs require repository admin rights, so the precise
   database-job failure cause could not be verified; no current hosted rerun,
   PostgreSQL 14/15 rerun or authenticated API rerun was performed here.
+- The deployment service reports no active published deployment. Production
+  migration catalog, ledger, backup and restore readiness therefore remain
+  unverified. The API startup command runs a separate migration chain, while
+  managed Publish can apply the development schema first; a new database
+  with Relay tables but no migration ledger would be rejected by the runner.
+  The 8/8 local runner guard tests passed, but the migration owner for first
+  Publish must be reconciled before release. No production SQL was run.
 
 ## Implemented safeguards and evidence locations
 

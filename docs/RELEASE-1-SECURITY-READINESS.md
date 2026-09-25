@@ -53,6 +53,46 @@ and scheduled cleanup checked independently. Do not rerun the old revision
 and call the current tree verified. No workflow was dispatched or pushed
 during this investigation.
 
+### Production migration readiness audit (2026-09-25)
+
+The deployment service reports **no active published deployment**. There is
+therefore no deployed database target, production catalog or migration ledger,
+confirmed current backup, or restore rehearsal to inspect. No production SQL
+was queried or changed. Local validation of 28 ordered migration files and
+the passing PostgreSQL 16 rehearsal do **not** substitute for these checks.
+The migration-runner guard tests passed 8/8 locally, including refusal to
+guess history when an application table exists without a ledger.
+
+There is also an unresolved **migration-ownership risk before first Publish**:
+the API artifact's production run command invokes `pnpm run release:start`,
+which runs the custom SQL migration chain before starting the API and requires
+a current backup confirmation. Replit's managed-database Publish flow can
+apply the development schema to production during publishing. If that flow
+creates Relay tables without `irc_schema_migrations`, the startup runner
+intentionally refuses to infer a baseline and the API will not start.
+Setting the backup flags alone cannot fix that mismatch; arbitrarily
+baselining the new database would also risk skipping unapplied SQL. The
+deployment has not been published, so this is a **conditional but credible
+failure path**, not an observed production error. An external production
+database would require a different, explicitly confirmed migration owner.
+
+Before approval, the deployment/database owner must:
+
+1. Confirm whether production will use Replit-managed PostgreSQL or an
+   external database, and document **one** authoritative schema-change
+   procedure that reconciles Publish behavior with the existing runner.
+2. Inspect the actual target catalog, migration ledger and production-shaped
+   data after a production target exists. Do not assume the example baseline
+   in `docs/DATABASE-MIGRATIONS.md` applies to it.
+3. Verify a current backup/snapshot and restore path, rehearse the selected
+   procedure on a disposable production-shaped database, and check that the
+   API starts after schema preparation without retrying applied SQL.
+4. Record the outcome of first Publish and subsequent no-op/forward releases
+   before calling production migration readiness verified.
+
+This audit made no deployment-setting, environment-variable, database or
+migration-runner changes.
+
 ## Original audit areas: fix, evidence and residual risk
 
 “Verified” means the **named local or focused check** passed; it never means
@@ -66,7 +106,7 @@ below are relative to `artifacts/api-server`.
 | WebSocket privacy and delivery — **focused verified** | `docs/RELEASE-1-WEBSOCKET-AUDIT.md` records post-commit offboarding and subscription-end fixes, subscriber-only events, reconnect contract and focused authenticated recipient/non-recipient tests in `src/admin.test.ts` and `src/lib/ws.test.ts`. | Not an exhaustive event-class or authorization-race matrix; the focused change did not receive a full authenticated-suite rerun at the time (API/security engineering). |
 | Storage and uploads — **application boundary verified, provider boundary unverified** | `docs/RELEASE-1-STORAGE-AUDIT.md`, `src/routes/storage.test.ts`, `src/admin.test.ts` and the web upload-context test cover scoped claims, cross-workspace substitution, parent-scoped reads and cleanup. | Signed direct PUTs lack demonstrated provider-enforced byte/type/size limits and single-use enforcement; abandoned uploads lack automatic collection. Storage owner must validate provider controls and cleanup before claiming end-to-end enforcement. |
 | Abuse controls — **single-process checks verified; deployment topology unverified** | `docs/RELEASE-1-ABUSE-CONTROL-AUDIT.md` inventories high-risk routes and process-local budgets; `src/lib/fixed-window-limiter.test.ts`, `src/lib/ws.test.ts` and focused authenticated checks exercise limits. | Operations must verify one continuously available API/WebSocket process, or add shared counters/tickets/routing before multi-instance deployment. No load or multi-instance guarantee. |
-| Database integrity and migration runner — **local verified; production unverified** | `docs/DATABASE-MIGRATIONS.md` specifies ordered checksummed SQL, advisory locking, rehearsal and fail-closed baseline behavior; local validation checked all 28 migrations. | Operations must inspect the production catalog and ledger, confirm a current backup and reviewed baseline where needed, rehearse recovery, then document production checks. No baseline or production migration was run here. |
+| Database integrity and migration runner — **local verified; production unverified** | `docs/DATABASE-MIGRATIONS.md` specifies ordered checksummed SQL, advisory locking, rehearsal and fail-closed baseline behavior; local validation checked all 28 migrations and 8/8 runner guards passed. | No published deployment exists. Operations must reconcile managed Publish schema application with the startup migration runner (or confirm an external target), then inspect the actual catalog/ledger, verify backup and restore, and rehearse the selected path. No baseline or production migration was run here. |
 | Audit record preservation — **focused verified** | Actor snapshot/preservation migrations and authenticated tests are summarized in `docs/RELEASE-1-AUDIT-STATUS.md`. | No blanket test of every future audit producer (API/security engineering). |
 | Frontend accessibility and recovery — **automated verified; manual unverified** | `docs/RELEASE-1-AUDIT-STATUS.md` records dialog keyboard behavior, alerts/retries, retained failed-send draft, 81 App UI tests and signed-out desktop/narrow screenshots. | QA/accessibility owner must verify signed-in layouts and native keyboard/screen-reader behavior; DOM tests do not certify conformance. |
 | Collection pagination and query indexes — **focused verified** | Inventory and tests in `docs/RELEASE-1-AUDIT-STATUS.md` and `docs/RELEASE-1-QUERY-INDEX-JUSTIFICATION.md` cover bounded reads, continuation and index rationale. | Offset pages are not a snapshot under concurrent inserts/deletes; monitor real query plans before speculative indexing (API/database engineering). |
@@ -83,10 +123,12 @@ below are relative to `artifacts/api-server`.
    Historical passing local tests or a passing workflow-format job do not
    override the failed run.
 2. **Blocker — production migration readiness is not established.** Operations
-   and database owner: review production schema/ledger and backup, decide
-   whether a verified baseline is required, rehearse rollback and record the
-   approved rollout checks. Never infer the production baseline from the
-   development database.
+   and database owner: first reconcile managed Publish schema changes with
+   the startup migration runner, or confirm an external production target.
+   Then review the actual production catalog/ledger and backup, decide
+   whether a verified baseline is required, rehearse recovery and record
+   approved rollout checks. There is no published target yet; never infer
+   its baseline from the development database.
 3. **Blocker for distribution — notices and human license decisions.** Release
    engineering and legal owner: package and inspect the actual release
    archive's third-party notices and source-availability information; approve
