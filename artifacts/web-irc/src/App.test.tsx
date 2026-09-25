@@ -2076,14 +2076,23 @@ describe("admin channel and category deletion permissions", () => {
     expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith("/with-channels"))).toBe(false);
   });
 
+  it("opens and focuses the channel named by an activity destination", async () => {
+    installAdminApi("user-1");
+    window.history.pushState({}, "", "/admin?section=channels&channelId=12");
+    render(<App />);
+
+    expect(await screen.findByTestId("activity-target-channel-12")).toBeTruthy();
+  });
+
   it("adds newer activity without losing older pages or duplicating an existing event", async () => {
-    const activityItem = (id: string, details: string) => ({
+    const activityItem = (id: string, details: string, targetHref?: string) => ({
       id,
       actorId: "user-1",
       actor: "Manager",
       action: "changed_role",
       targetId: `target-${id}`,
       targetLabel: `Account ${id}`,
+      targetHref,
       details,
       createdAt: "2026-09-21T12:00:00.000Z",
     });
@@ -2134,7 +2143,10 @@ describe("admin channel and category deletion permissions", () => {
           ));
         }
         return jsonResponse(overview(
-          [activityItem("latest", "already newest"), activityItem("middle", "middle page retained")],
+          [
+            activityItem("latest", "already newest", "/communities/7?taskId=9"),
+            activityItem("middle", "middle page retained", "//outside.example/path"),
+          ],
           { hasMore: true, nextCursor: "older-page", newestCursor: "head-cursor", newerHasMore: false },
         ));
       }
@@ -2147,6 +2159,8 @@ describe("admin channel and category deletion permissions", () => {
     render(<App />);
     fireEvent.click(await screen.findByTestId("button-admin-nav-activity"));
     expect(await screen.findByText("already newest")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open Account latest" }).getAttribute("href")).toBe("/communities/7?taskId=9");
+    expect(screen.getByText("Account middle").closest("a")).toBeNull();
 
     fireEvent.change(screen.getByTestId("input-activity-actor"), { target: { value: "Manager" } });
     fireEvent.change(screen.getByTestId("input-activity-action"), { target: { value: "changed" } });

@@ -6,6 +6,7 @@ import {
   channelMembersTable,
   channelsTable,
   communitiesTable,
+  communityUpgradeRequestsTable,
   customRolesTable,
   db,
   departmentsTable,
@@ -15,9 +16,11 @@ import {
   serverAnnouncementsTable,
   userRolesTable,
   usersTable,
+  workspaceTasksTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
 import { AccountDeletionPendingError, assertDeletionEligibleUser } from "../lib/account-deletion";
+import { isPublicCommunityAvailable } from "../lib/community-subscription";
 import { createNotifications } from "../lib/notifications";
 import { channelNotFoundError } from "./errors";
 import { CUSTOM_ROLE_PERMISSIONS, ensurePermissionCatalog, PERMISSION_DESCRIPTIONS, PERMISSIONS, PRIMARY_ROLES } from "../lib/permissions";
@@ -294,6 +297,152 @@ async function writeAudit(
   });
 }
 
+type AdminActivityRecord = {
+  id: number;
+  action: string;
+  targetId: string | null;
+  targetLabel: string | null;
+  communityId?: number | null;
+  resourceType?: string | null;
+  resourceId?: string | null;
+};
+
+function positiveActivityId(value: string | null | undefined): number | null {
+  if (!value || !/^[1-9]\d*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+async function adminActivityTargetHrefs(entries: AdminActivityRecord[]): Promise<Map<number, string>> {
+  const hrefs = new Map<number, string>();
+  const userActions = new Set(["promoted_user", "demoted_user", "suspended_user", "restored_user", "granted_scoped_role", "revoked_scoped_role"]);
+  const roleActions = new Set(["created_custom_role", "updated_custom_role", "retired_custom_role"]);
+  const upgradeActions = new Set(["approved_community_upgrade", "declined_community_upgrade", "ended_community_subscription"]);
+  const channelActions = new Set(["updated_channel_topic", "cleared_channel_history", "moved_channel_room"]);
+  const taskActions = new Set(["created_workspace_task", "updated_workspace_task", "commented_on_workspace_task"]);
+
+  const userIds = [...new Set(entries
+    .filter((entry) => userActions.has(entry.action) && entry.targetId)
+    .map((entry) => entry.targetId!))];
+  const roleKeys = [...new Set(entries
+    .filter((entry) => roleActions.has(entry.action) && entry.targetId && /^custom_[a-z0-9_]+$/.test(entry.targetId))
+    .map((entry) => entry.targetId!))];
+  const channelIds = [...new Set(entries.flatMap((entry) => {
+    const rawId = entry.action === "moved_community_channel_category" && entry.resourceType === "channel"
+      ? entry.resourceId
+      : channelActions.has(entry.action) ? entry.targetId : null;
+    const id = positiveActivityId(rawId);
+    return id === null ? [] : [id];
+  }))];
+  const upgradeIds = [...new Set(entries
+    .filter((entry) => upgradeActions.has(entry.action))
+    .map((entry) => positiveActivityId(entry.targetId))
+    .filter((id): id is number => id !== null))];
+  const communityIds = [...new Set(entries.flatMap((entry) => {
+    const isWorkspace = entry.resourceType === "workspace" && entry.communityId !== null && entry.communityId !== undefined;
+    const isTask = taskActions.has(entry.action)
+      && entry.resourceType === "task"
+      && positiveActivityId(entry.resourceId) !== null
+      && entry.communityId !== null
+      && entry.communityId !== undefined;
+    return isWorkspace || isTask ? [entry.communityId!] : [];
+  }))];
+  const taskIds = [...new Set(entries.flatMap((entry) => {
+    if (!taskActions.has(entry.action) || entry.resourceType !== "task") return [];
+    const id = positiveActivityId(entry.resourceId);
+    return id === null ? [] : [id];
+  }))];
+
+  const [users, roles, channels, upgrades, communities, tasks] = await Promise.all([
+    userIds.length
+      ? db.select({ id: usersTable.clerkId }).from(usersTable).where(inArray(usersTable.clerkId, userIds))
+      : Promise.resolve([]),
+    roleKeys.length
+      ? db.select({ key: customRolesTable.key, isActive: customRolesTable.isActive })
+        .from(customRolesTable).where(inArray(customRolesTable.key, roleKeys))
+      : Promise.resolve([] as Array<{ key: string; isActive: boolean }>),
+    channelIds.length
+      ? db.select({ id: channelsTable.id }).from(channelsTable).where(inArray(channelsTable.id, channelIds))
+      : Promise.resolve([]),
+    upgradeIds.length
+      ? db.select({ id: communityUpgradeRequestsTable.id }).from(communityUpgradeRequestsTable)
+        .where(inArray(communityUpgradeRequestsTable.id, upgradeIds))
+      : Promise.resolve([]),
+    communityIds.length
+      ? db.select({
+        id: communitiesTable.id,
+        plan: communitiesTable.plan,
+        ownerId: communitiesTable.ownerId,
+      }).from(communitiesTable).where(inArray(communitiesTable.id, communityIds))
+      : Promise.resolve([]),
+    taskIds.length
+      ? db.select({
+        id: workspaceTasksTable.id,
+        communityId: workspaceTasksTable.communityId,
+      }).from(workspaceTasksTable).where(inArray(workspaceTasksTable.id, taskIds))
+      : Promise.resolve([] as Array<{ id: number; communityId: number }>),
+  ]);
+
+  const existingUsers = new Set(users.map((row) => row.id));
+  const existingRoles = new Set(roles.filter((row) => row.isActive).map((row) => row.key));
+  const existingChannels = new Set(channels.map((row) => row.id));
+  const existingUpgrades = new Set(upgrades.map((row) => row.id));
+  const accessibleCommunities = new Set<number>();
+  await Promise.all(communities.map(async (community) => {
+    if (await isPublicCommunityAvailable(community)) accessibleCommunities.add(community.id);
+  }));
+
+  for (const entry of entries) {
+    if (entry.targetId && userActions.has(entry.action) && existingUsers.has(entry.targetId)) {
+      const query = new URLSearchParams({ section: "accounts", accountId: entry.targetId });
+      hrefs.set(entry.id, `/admin?${query.toString()}`);
+      continue;
+    }
+    if (entry.targetId && roleActions.has(entry.action) && existingRoles.has(entry.targetId)) {
+      const query = new URLSearchParams({ section: "roles", roleKey: entry.targetId });
+      hrefs.set(entry.id, `/admin?${query.toString()}`);
+      continue;
+    }
+    const channelId = entry.action === "moved_community_channel_category" && entry.resourceType === "channel"
+      ? positiveActivityId(entry.resourceId)
+      : channelActions.has(entry.action) ? positiveActivityId(entry.targetId) : null;
+    if (channelId !== null && existingChannels.has(channelId)) {
+      const query = new URLSearchParams({ section: "channels", channelId: String(channelId) });
+      hrefs.set(entry.id, `/admin?${query.toString()}`);
+      continue;
+    }
+    const upgradeId = upgradeActions.has(entry.action) ? positiveActivityId(entry.targetId) : null;
+    if (upgradeId !== null && existingUpgrades.has(upgradeId)) {
+      const query = new URLSearchParams({ section: "upgrades", requestId: String(upgradeId) });
+      hrefs.set(entry.id, `/admin?${query.toString()}`);
+      continue;
+    }
+    if (
+      entry.resourceType === "task"
+      && taskActions.has(entry.action)
+      && entry.communityId !== null
+      && entry.communityId !== undefined
+      && accessibleCommunities.has(entry.communityId)
+    ) {
+      const taskId = positiveActivityId(entry.resourceId);
+      if (taskId !== null && tasks.some((task) => task.id === taskId && task.communityId === entry.communityId)) {
+        const query = new URLSearchParams({ taskId: String(taskId) });
+        hrefs.set(entry.id, `/communities/${entry.communityId}?${query.toString()}`);
+        continue;
+      }
+    }
+    if (
+      entry.resourceType === "workspace"
+      && entry.communityId !== null
+      && entry.communityId !== undefined
+      && accessibleCommunities.has(entry.communityId)
+    ) {
+      hrefs.set(entry.id, `/communities/${entry.communityId}`);
+    }
+  }
+  return hrefs;
+}
+
 router.get("/admin/status", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const profile = await ensureProfile(getUserId(req));
   res.json({
@@ -499,6 +648,9 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
         action: adminAuditLogsTable.action,
         targetId: adminAuditLogsTable.targetId,
         targetLabel: adminAuditLogsTable.targetLabel,
+        communityId: adminAuditLogsTable.communityId,
+        resourceType: adminAuditLogsTable.resourceType,
+        resourceId: adminAuditLogsTable.resourceId,
         details: adminAuditLogsTable.details,
         createdAt: adminAuditLogsTable.createdAt,
         actor: adminAuditLogsTable.actorDisplayName,
@@ -534,6 +686,16 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
     ? activity.slice(0, activityLimit).reverse()
     : activity.slice(0, activityLimit))
     .map(({ cursorCreatedAt: _cursorCreatedAt, ...entry }) => entry);
+  const activityTargetHrefs = await adminActivityTargetHrefs(visibleActivity);
+  const linkedActivity = visibleActivity.map(({
+    communityId: _communityId,
+    resourceType: _resourceType,
+    resourceId: _resourceId,
+    ...entry
+  }) => ({
+    ...entry,
+    targetHref: activityTargetHrefs.get(entry.id) ?? null,
+  }));
   const lastActivity = activity[Math.min(activity.length, activityLimit) - 1];
   const newestActivity = activityAfterCursor
     ? activity[Math.min(activity.length, activityLimit) - 1]
@@ -569,7 +731,7 @@ router.get("/admin/overview", requireAuth, async (req: AuthenticatedRequest, res
       },
     },
     recentMessages,
-    activity: visibleActivity,
+    activity: linkedActivity,
     activityPagination: {
       limit: activityLimit,
       offset: effectiveActivityOffset,
@@ -755,6 +917,7 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
   const filters = [
     query
       ? or(
+          ilike(usersTable.clerkId, `%${query}%`),
           ilike(usersTable.username, `%${query}%`),
           ilike(usersTable.displayName, `%${query}%`),
         )

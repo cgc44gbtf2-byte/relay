@@ -1766,7 +1766,13 @@ router.post("/communities/:communityId/tasks", requireAuth, async (req: Authenti
   const [task] = await db.insert(workspaceTasksTable).values({
     communityId, title, description, assignedTo, departmentId, locationId, priority, dueDate, createdBy: userId,
   }).returning();
-  await writeCommunityAudit(userId, "created_workspace_task", communityId, title, { notifyActor: false });
+  await writeCommunityAudit(userId, "created_workspace_task", communityId, {
+    resourceType: "task",
+    resourceId: task.id,
+    targetId: String(task.id),
+    targetLabel: task.title,
+    details: title,
+  }, { notifyActor: false });
   if (assignedTo && assignedTo !== userId) {
     await createNotification({
       userId: assignedTo,
@@ -1866,7 +1872,13 @@ router.patch("/communities/:communityId/tasks/:taskId", requireAuth, async (req:
     userId,
     "updated_workspace_task",
     communityId,
-    `${taskId}${status ? ` → ${status}` : ""}`,
+    {
+      resourceType: "task",
+      resourceId: updated.id,
+      targetId: String(updated.id),
+      targetLabel: updated.title,
+      details: `${taskId}${status ? ` → ${status}` : ""}`,
+    },
     { notifyActor: false },
   );
   if (updated.assignedTo && assignmentChanged) {
@@ -1929,7 +1941,7 @@ router.post("/communities/:communityId/tasks/:taskId/comments", requireAuth, asy
   const communityId = Number(param(req, "communityId"));
   const taskId = Number(param(req, "taskId"));
   const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 5000) : "";
-  const [task] = await db.select({ id: workspaceTasksTable.id }).from(workspaceTasksTable)
+  const [task] = await db.select({ id: workspaceTasksTable.id, title: workspaceTasksTable.title }).from(workspaceTasksTable)
     .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, workspaceTasksTable.communityId), eq(communityMembersTable.userId, userId)))
     .where(and(eq(workspaceTasksTable.id, taskId), eq(workspaceTasksTable.communityId, communityId)));
   if (!task) {
@@ -1941,7 +1953,13 @@ router.post("/communities/:communityId/tasks/:taskId/comments", requireAuth, asy
     return;
   }
   const [comment] = await db.insert(workspaceTaskCommentsTable).values({ taskId, authorId: userId, body }).returning();
-  await writeCommunityAudit(userId, "commented_on_workspace_task", communityId, String(taskId));
+  await writeCommunityAudit(userId, "commented_on_workspace_task", communityId, {
+    resourceType: "task",
+    resourceId: task.id,
+    targetId: String(task.id),
+    targetLabel: task.title,
+    details: "Task comment added",
+  });
   res.status(201).json(comment);
 });
 

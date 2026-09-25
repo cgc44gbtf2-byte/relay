@@ -2090,6 +2090,41 @@ describe("admin access controls", () => {
     });
   });
 
+  test("leaves a supported activity target unlinked after its account is deleted", async () => {
+    const actorLabel = `Missing target ${randomUUID()}`;
+    const targetId = `deleted-user-${randomUUID()}`;
+    let auditId: number | undefined;
+
+    try {
+      const inserted = await pool.query<{ id: number }>(
+        `INSERT INTO irc_admin_audit_logs
+           (actor_id, actor_display_name, action, target_id, target_label, details)
+         VALUES ($1, $2, 'demoted_user', $3, 'Deleted account', 'Role changed to member')
+         RETURNING id`,
+        [adminSession.userId, actorLabel, targetId],
+      );
+      auditId = inserted.rows[0]?.id;
+
+      const response = await apiRequest(
+        adminSession,
+        `/admin/overview?activityAction=demoted_user&activityActor=${encodeURIComponent(actorLabel)}`,
+      );
+      assert.equal(response.status, 200, JSON.stringify(response));
+      const activity = (response.body as {
+        activity?: Array<{ id: number; targetLabel: string | null; targetHref: string | null }>;
+      }).activity;
+      assert.deepEqual(activity?.find((entry) => entry.id === auditId), {
+        id: auditId,
+        targetLabel: "Deleted account",
+        targetHref: null,
+      });
+    } finally {
+      if (auditId !== undefined) {
+        await pool.query("DELETE FROM irc_admin_audit_logs WHERE id = $1", [auditId]);
+      }
+    }
+  });
+
   test("publishes one announcement notification for every current user", async () => {
     const body = `Operations update ${randomUUID()}`;
     let announcementId: number | null = null;
@@ -2623,6 +2658,7 @@ describe("admin access controls", () => {
           actorId: string;
           action: string;
           targetId: string | null;
+          targetHref: string | null;
           details: string | null;
           actor: string | null;
         } =>
@@ -2635,12 +2671,14 @@ describe("admin access controls", () => {
         actorId: matchingActivity.actorId,
         action: matchingActivity.action,
         targetId: matchingActivity.targetId,
+        targetHref: matchingActivity.targetHref,
         details: matchingActivity.details,
         actor: matchingActivity.actor,
       }, {
         actorId: adminSession.userId,
         action: "demoted_user",
         targetId: memberSession.userId,
+        targetHref: `/admin?section=accounts&accountId=${memberSession.userId}`,
         details: "Role changed to member",
         actor: originalDisplayName,
       });
@@ -3538,6 +3576,7 @@ describe("admin access controls", () => {
           actor: string | null;
           action: string;
           targetLabel: string | null;
+          targetHref: string | null;
         }>;
       }).activity;
       assert.deepEqual(activity?.find((entry) => entry.action === "audit_actor_deleted"), {
@@ -3547,6 +3586,7 @@ describe("admin access controls", () => {
         action: "audit_actor_deleted",
         targetId: "preserved-target",
         targetLabel: "Preserved target",
+        targetHref: null,
         details: "Preserved details",
         createdAt: inserted.rows[0].created_at.toISOString(),
       });
@@ -8110,6 +8150,23 @@ describe("admin access controls", () => {
       assert.ok(created.body && typeof created.body === "object");
       const taskId = (created.body as { id?: unknown }).id as number;
       assert.equal(typeof taskId, "number");
+      const taskActivityResponse = await apiRequest(
+        adminSession,
+        "/admin/overview?activityAction=created_workspace_task",
+      );
+      assert.equal(taskActivityResponse.status, 200, JSON.stringify(taskActivityResponse));
+      const taskActivity = (taskActivityResponse.body as {
+        activity?: Array<{ action: string; targetId: string | null; targetLabel: string | null; targetHref: string | null }>;
+      }).activity;
+      const createdTaskActivity = taskActivity?.find((entry) =>
+        entry.action === "created_workspace_task" && entry.targetId === String(taskId));
+      assert.deepEqual(createdTaskActivity && {
+        targetLabel: createdTaskActivity.targetLabel,
+        targetHref: createdTaskActivity.targetHref,
+      }, {
+        targetLabel: "Prepare onboarding",
+        targetHref: `/communities/${communityId}?taskId=${taskId}`,
+      });
 
       const initialNotifications = await pool.query<{
         type: string;
