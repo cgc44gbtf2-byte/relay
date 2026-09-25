@@ -722,6 +722,88 @@ after(async () => {
   }
 });
 
+describe("abuse control boundaries", () => {
+  test("bounds invitations, provisioning, messages, and tickets without crossing actors or workspaces", async () => {
+    const owner = await createTestSession("abuse_budget_owner");
+    const other = await createTestSession("abuse_budget_other");
+    assert.equal((await apiRequest(owner, "/me")).status, 200);
+    assert.equal((await apiRequest(other, "/me")).status, 200);
+
+    async function workspaceFor(session: TestSession) {
+      const response = await apiRequest(session, "/communities", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Abuse budget ${randomUUID().slice(0, 8)}`,
+          slug: `abuse-budget-${randomUUID().slice(0, 12)}`,
+          isPrivate: true,
+        }),
+      });
+      assert.equal(response.status, 201, JSON.stringify(response));
+      return (response.body as { id: number }).id;
+    }
+    const primary = await workspaceFor(owner);
+    const secondWorkspace = await workspaceFor(owner);
+    const otherWorkspace = await workspaceFor(other);
+    const invalidInvite = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "not-an-email" }),
+    };
+
+    for (let i = 0; i < 19; i += 1) {
+      assert.equal((await apiRequest(owner, `/communities/${primary}/invitations`, invalidInvite)).status, 400);
+    }
+    assert.equal((await apiRequest(owner, `/communities/${primary}/invitations/99999999/resend`, { method: "POST" })).status, 404);
+    const limitedInvite = await apiRequest(owner, `/communities/${primary}/invitations`, invalidInvite);
+    assert.equal(limitedInvite.status, 429);
+    assert.ok(Number(limitedInvite.headers.get("retry-after")) > 0);
+    assert.equal((await apiRequest(owner, `/communities/${primary}/invitations/99999999/resend`, { method: "POST" })).status, 429);
+    assert.equal((await apiRequest(owner, `/communities/${secondWorkspace}/invitations`, invalidInvite)).status, 400);
+    assert.equal((await apiRequest(other, `/communities/${otherWorkspace}/invitations`, invalidInvite)).status, 400);
+    assert.equal((await apiRequest(other, `/communities/${primary}/invitations`, invalidInvite)).status, 403);
+    const invitations = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM irc_workspace_invitations WHERE community_id = ANY($1::int[])",
+      [[primary, secondWorkspace, otherWorkspace]],
+    );
+    assert.equal(Number(invitations.rows[0].count), 0);
+
+    const nonexistentWorkspace = 99999999;
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal((await apiRequest(owner, `/communities/${nonexistentWorkspace}/test-accounts/provision`, { method: "POST" })).status, 404);
+    }
+    const limitedProvision = await apiRequest(owner, `/communities/${nonexistentWorkspace}/test-accounts/provision`, { method: "POST" });
+    assert.equal(limitedProvision.status, 429);
+    assert.ok(Number(limitedProvision.headers.get("retry-after")) > 0);
+    assert.equal((await apiRequest(owner, `/communities/${nonexistentWorkspace + 1}/test-accounts/provision`, { method: "POST" })).status, 404);
+    assert.equal((await apiRequest(other, `/communities/${nonexistentWorkspace}/test-accounts/provision`, { method: "POST" })).status, 404);
+
+    for (let i = 0; i < 60; i += 1) {
+      assert.equal((await apiRequest(owner, "/channels/99999999/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "Invalid channel" }),
+      })).status, 404);
+    }
+    const limitedMessage = await apiRequest(owner, `/dm/${other.userId}/messages`, { method: "POST" });
+    assert.equal(limitedMessage.status, 429);
+    assert.ok(Number(limitedMessage.headers.get("retry-after")) > 0);
+    assert.equal((await apiRequest(other, "/channels/99999999/messages", { method: "POST" })).status, 404);
+
+    const issued = new Set<string>();
+    for (let i = 0; i < 10; i += 1) {
+      const response = await apiRequest(owner, "/ws-ticket");
+      assert.equal(response.status, 200, JSON.stringify(response));
+      issued.add((response.body as { ticket: string }).ticket);
+    }
+    assert.equal(issued.size, 10);
+    const limitedTicket = await apiRequest(owner, "/ws-ticket");
+    assert.equal(limitedTicket.status, 429);
+    assert.ok(Number(limitedTicket.headers.get("retry-after")) > 0);
+    assert.equal((await apiRequest(other, "/ws-ticket")).status, 200);
+  });
+});
+
 describe("free community onboarding", () => {
   test("keeps repeated onboarding retries to one free community and separates paid workspaces", async () => {
     const owner = await createTestSession("free_community_onboarding");

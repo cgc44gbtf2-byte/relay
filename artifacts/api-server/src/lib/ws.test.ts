@@ -188,6 +188,24 @@ describe("websocket channel removal", () => {
 });
 
 describe("websocket ticket cleanup", () => {
+  test("issues unpredictable tickets and consumes each one only once", () => {
+    const hub = new Hub();
+    try {
+      const issuedAt = Date.now();
+      const ticket = hub.issueTicket("first-user", "first-session");
+      assert.match(ticket, /^[0-9a-f-]{36}$/i);
+      const consumed = hub.consumeTicket(ticket);
+      assert.ok(consumed);
+      assert.equal(consumed.userId, "first-user");
+      assert.equal(consumed.sessionId, "first-session");
+      assert.ok(consumed.expiresAt >= issuedAt + 60_000 && consumed.expiresAt <= Date.now() + 60_000);
+      assert.equal(hub.consumeTicket(ticket), null);
+      assert.equal(hub.consumeTicket("unknown"), null);
+    } finally {
+      hub.dispose();
+    }
+  });
+
   test("rejects tickets at their expiration boundary", () => {
     const hub = new Hub();
     const internals = hub as any;

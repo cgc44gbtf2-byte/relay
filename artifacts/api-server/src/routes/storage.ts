@@ -15,7 +15,7 @@ import {
   workspaceTasksTable,
 } from "@workspace/db";
 import { getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
-import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
+import { FixedWindowLimiter } from "../lib/fixed-window-limiter";
 import { hasPermission } from "../lib/permissions";
 
 const router: IRouter = Router();
@@ -248,7 +248,7 @@ export async function isAvailableUnscopedObjectPath(value: unknown, userId: stri
 }
 
 router.post("/storage/uploads/request-url", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
-  const result = uploadUrlLimiter.check(rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"));
+  const result = uploadUrlLimiter.check(getUserId(req));
   if (!result.allowed) {
     res.set("Retry-After", String(result.retryAfterSeconds)).status(429).json({ error: "Too many upload URL requests." });
     return;

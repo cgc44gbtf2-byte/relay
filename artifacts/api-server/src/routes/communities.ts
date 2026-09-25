@@ -66,6 +66,7 @@ import { canGrantWorkspaceRole } from "../lib/role-grant-policy";
 import { wsHub } from "../lib/ws";
 import { isPublicCommunityAvailable } from "../lib/community-subscription";
 import { validateUploadMetadata } from "./storage";
+import { FixedWindowLimiter, workspaceRateLimitKey } from "../lib/fixed-window-limiter";
 import { enqueueObjectDeletionJobs } from "../lib/object-cleanup";
 import { AccountDeletionPendingError, assertDeletionEligibleUser, finalizePendingAccountDeletion } from "../lib/account-deletion";
 import {
@@ -78,6 +79,7 @@ import {
 } from "../lib/destructive-policy";
 
 const router: IRouter = Router();
+const workspaceInvitationLimiter = new FixedWindowLimiter(20, 60_000);
 // Subscriber communities are retained on downgrade but are unavailable to all
 // members until the externally verified subscription is renewed.
 router.use("/communities/:communityId", requireAuth, async (req: AuthenticatedRequest, res, next): Promise<void> => {
@@ -2521,6 +2523,11 @@ router.post("/communities/:communityId/invitations", requireAuth, async (req: Au
     res.status(403).json({ error: "You cannot invite employees to this workspace." });
     return;
   }
+  const invitationBudget = workspaceInvitationLimiter.check(workspaceRateLimitKey(userId, communityId));
+  if (!invitationBudget.allowed) {
+    res.set("Retry-After", String(invitationBudget.retryAfterSeconds)).status(429).json({ error: "Too many workspace invitation requests." });
+    return;
+  }
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase().slice(0, 320) : "";
   const role = typeof req.body?.role === "string" ? req.body.role.trim().slice(0, 60) : "member";
   const [community] = await db.select({ plan: communitiesTable.plan })
@@ -2884,6 +2891,11 @@ router.post("/communities/:communityId/invitations/:invitationId/resend", requir
   const invitationId = Number(param(req, "invitationId"));
   if (!Number.isInteger(communityId) || !Number.isInteger(invitationId) || !(await requireWorkspaceManager(userId, communityId))) {
     res.status(403).json({ error: "You cannot resend invitations in this workspace." });
+    return;
+  }
+  const invitationBudget = workspaceInvitationLimiter.check(workspaceRateLimitKey(userId, communityId));
+  if (!invitationBudget.allowed) {
+    res.set("Retry-After", String(invitationBudget.retryAfterSeconds)).status(429).json({ error: "Too many workspace invitation requests." });
     return;
   }
   const rawToken = randomUUID();

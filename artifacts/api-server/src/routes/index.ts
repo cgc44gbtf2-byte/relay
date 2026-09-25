@@ -10,7 +10,7 @@ import testAccountsRouter from "./test-accounts";
 import communityUpgradesRouter from "./community-upgrades";
 import { requireAuth, getUserId, type AuthenticatedRequest } from "../lib/auth";
 import { wsHub } from "../lib/ws";
-import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
+import { FixedWindowLimiter } from "../lib/fixed-window-limiter";
 
 const router: IRouter = Router();
 const wsTicketLimiter = new FixedWindowLimiter(10, 60_000);
@@ -29,7 +29,7 @@ router.get("/ws-ticket", requireAuth, (req: AuthenticatedRequest, res) => {
     res.status(401).json({ error: "Sign in to continue" });
     return;
   }
-  const result = wsTicketLimiter.check(rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"));
+  const result = wsTicketLimiter.check(getUserId(req));
   if (!result.allowed) {
     res.set("Retry-After", String(result.retryAfterSeconds)).status(429).json({ error: "Too many WebSocket ticket requests." });
     return;

@@ -66,3 +66,7 @@ export class FixedWindowLimiter {
 export function rateLimitKey(userId: string, ip: string): string {
   return `${userId}\u0000${ip}`;
 }
+
+export function workspaceRateLimitKey(userId: string, workspaceId: number): string {
+  return `${userId}\u0000workspace:${workspaceId}`;
+}

@@ -80,6 +80,7 @@ const channelJoinLimiter = new FixedWindowLimiter(20, 60_000);
 const channelInviteLimiter = new FixedWindowLimiter(30, 60_000);
 const userSearchLimiter = new FixedWindowLimiter(60, 60_000);
 const messageSearchLimiter = new FixedWindowLimiter(60, 60_000);
+const messageSendLimiter = new FixedWindowLimiter(60, 60_000);
 const MAX_LIST_PAGE_SIZE = 100;
 
 function isUsernameUniqueViolation(error: unknown): boolean {
@@ -261,10 +262,9 @@ function enforceRateLimit(
   res: Response,
   limiter: FixedWindowLimiter,
   message: string,
+  key = rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"),
 ): boolean {
-  const result = limiter.check(
-    rateLimitKey(getUserId(req), req.ip ?? req.socket.remoteAddress ?? "unknown"),
-  );
+  const result = limiter.check(key);
   if (result.allowed) return true;
   res
     .set("Retry-After", String(result.retryAfterSeconds))
@@ -1332,6 +1332,7 @@ router.get("/channels/:channelId/messages", requireAuth, async (req: Authenticat
 
 router.post("/channels/:channelId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  if (!enforceRateLimit(req, res, messageSendLimiter, "Too many message requests.", userId)) return;
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
     res.status(404).json(channelNotFoundError);
@@ -1380,6 +1381,7 @@ router.post("/channels/:channelId/messages", requireAuth, async (req: Authentica
 
 router.post("/channels/:channelId/file-messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  if (!enforceRateLimit(req, res, messageSendLimiter, "Too many message requests.", userId)) return;
   const channel = await channelFor(param(req, "channelId"));
   if (!channel) {
     res.status(404).json(channelNotFoundError);
@@ -1766,6 +1768,7 @@ router.delete("/messages/:messageId", requireAuth, async (req: AuthenticatedRequ
 
 router.post("/messages/:messageId/attachments", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const userId = getUserId(req);
+  if (!enforceRateLimit(req, res, messageSendLimiter, "Too many message requests.", userId)) return;
   const messageId = param(req, "messageId");
   const [message] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId));
   if (!message) {
@@ -2306,6 +2309,7 @@ router.get("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest
 
 router.post("/dm/:userId/messages", requireAuth, async (req: AuthenticatedRequest, res): Promise<void> => {
   const senderId = getUserId(req);
+  if (!enforceRateLimit(req, res, messageSendLimiter, "Too many message requests.", senderId)) return;
   const recipientId = param(req, "userId");
   if (!(await sharesBusiness(senderId, recipientId))) {
     res.status(403).json({ error: "Direct messages are limited to people in a shared business workspace." });

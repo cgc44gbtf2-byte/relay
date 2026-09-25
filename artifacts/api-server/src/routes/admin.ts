@@ -19,6 +19,7 @@ import {
   workspaceTasksTable,
 } from "@workspace/db";
 import { ensureProfile, getUserId, requireAuth, type AuthenticatedRequest } from "../lib/auth";
+import { FixedWindowLimiter } from "../lib/fixed-window-limiter";
 import { AccountDeletionPendingError, assertDeletionEligibleUser } from "../lib/account-deletion";
 import { isPublicCommunityAvailable } from "../lib/community-subscription";
 import { createNotifications } from "../lib/notifications";
@@ -35,6 +36,8 @@ import {
 } from "@workspace/api-zod";
 
 const router: IRouter = Router();
+const activityExportLimiter = new FixedWindowLimiter(3, 5 * 60_000);
+const adminUserSearchLimiter = new FixedWindowLimiter(60, 60_000);
 const startedAt = Date.now();
 const DEFAULT_ACTIVITY_LIMIT = 20;
 const MAX_ACTIVITY_LIMIT = 50;
@@ -754,6 +757,11 @@ router.get("/admin/activity/export", requireAuth, async (req: AuthenticatedReque
     res.status(400).json({ error: parsedFilters.error });
     return;
   }
+  const exportBudget = activityExportLimiter.check(getUserId(req));
+  if (!exportBudget.allowed) {
+    res.set("Retry-After", String(exportBudget.retryAfterSeconds)).status(429).json({ error: "Too many activity export requests." });
+    return;
+  }
 
   const columns = ["id", "actor_id", "actor", "action", "target_id", "target_label", "details", "created_at"];
   const batchSize = 500;
@@ -894,6 +902,13 @@ router.get("/admin/users", requireAuth, async (req: AuthenticatedRequest, res): 
   if (typeof rawQuery === "string" && !isValidQuery(rawQuery)) {
     res.status(400).json({ error: "User search must be 200 characters or fewer." });
     return;
+  }
+  if (query) {
+    const searchBudget = adminUserSearchLimiter.check(getUserId(req));
+    if (!searchBudget.allowed) {
+      res.set("Retry-After", String(searchBudget.retryAfterSeconds)).status(429).json({ error: "Too many admin user searches." });
+      return;
+    }
   }
   const role = typeof req.query.role === "string" ? req.query.role : "";
   const status = req.query.status === "online" || req.query.status === "offline" ? req.query.status : "";

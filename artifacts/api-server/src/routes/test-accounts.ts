@@ -11,7 +11,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { requireAuth, getUserId, type AuthenticatedRequest } from "../lib/auth";
-import { FixedWindowLimiter, rateLimitKey } from "../lib/fixed-window-limiter";
+import { FixedWindowLimiter, rateLimitKey, workspaceRateLimitKey } from "../lib/fixed-window-limiter";
 import {
   isMarkedTestAccount,
   testAccountExternalId,
@@ -24,6 +24,7 @@ import {
 const router: IRouter = Router();
 const loginTicketLimiter = new FixedWindowLimiter(10, 60_000);
 const returnTicketLimiter = new FixedWindowLimiter(10, 60_000);
+const provisioningLimiter = new FixedWindowLimiter(3, 5 * 60_000);
 
 function communityId(req: AuthenticatedRequest): number {
   const raw = req.params.communityId;
@@ -72,6 +73,12 @@ router.post("/communities/:communityId/test-accounts/provision", async (req: Aut
   if (!testAccountsAvailable(process.env)) { res.status(404).json({ error: "Development test accounts are unavailable." }); return; }
   const creatorId = getUserId(req);
   const id = communityId(req);
+  if (!Number.isSafeInteger(id) || id <= 0) { res.status(404).json({ error: "Workspace not found." }); return; }
+  const provisionBudget = provisioningLimiter.check(workspaceRateLimitKey(creatorId, id));
+  if (!provisionBudget.allowed) {
+    res.set("Retry-After", String(provisionBudget.retryAfterSeconds)).status(429).json({ error: "Too many test account provisioning requests." });
+    return;
+  }
   const workspace = await ownedWorkspace(creatorId, id);
   if (!workspace) { res.status(404).json({ error: "Workspace not found." }); return; }
   const allUsers = await clerkClient.users.getUserList({

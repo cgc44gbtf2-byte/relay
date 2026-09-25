@@ -1,6 +1,6 @@
 # Release 1 audit status
 
-Reviewed: 2026-09-24. This is a reconciliation of the original audit-fix
+Reviewed: 2026-09-25. This is a reconciliation of the original audit-fix
 checklist, not a production-readiness sign-off.
 
 ## Verification evidence
@@ -53,6 +53,12 @@ checklist, not a production-readiness sign-off.
 - After review, a second focused regression on the disposable database passed
   for inactive team membership and removed workspace membership, including
   activation through both announcement routes; API typechecking passed again.
+- Abuse-control coverage and deployment assumptions are inventoried in
+  `RELEASE-1-ABUSE-CONTROL-AUDIT.md`. Shared invitation, message-send, test
+  provisioning, admin search/export, upload URL, and WebSocket ticket budgets
+  are process-local; focused isolation and ticket-lifecycle verification was
+  run against synthetic attempts on a disposable database. No production
+  traffic, email, or stored user objects were used.
 
 ## Implemented safeguards and evidence locations
 
@@ -64,7 +70,7 @@ checklist, not a production-readiness sign-off.
 | Database integrity and migrations | `lib/db/migrations`, `docs/DATABASE-MIGRATIONS.md`, rehearsal/bootstrap tests | Production baseline/application and recovery remain an operational verification step. |
 | Audit preservation | Actor snapshot/preservation migrations and integration tests | No blanket sign-off on every audit producer. |
 | Storage | `docs/RELEASE-1-STORAGE-AUDIT.md`: upload-to-reference and read/cleanup chain; storage unit tests, two-workspace path/ID substitution and legacy unscoped reuse checks, web upload-context test | Direct signed PUTs do not have established provider-level size/type/byte enforcement; abandoned uploads are not automatically collected. Do not claim provider-boundary enforcement. |
-| Abuse protection | Fixed-window limiter and ticket-cleanup tests; route-specific limits | Full route inventory and multi-instance behavior remain unverified. |
+| Abuse protection | Route-by-route high-risk inventory in `docs/RELEASE-1-ABUSE-CONTROL-AUDIT.md`; actor/workspace attempt budgets; fixed-window, ticket-cleanup, and focused authenticated boundary checks | Counters and WebSocket tickets/clients are process-local; deployment must use one continuous API process or add shared enforcement and routing before scaling out. No multi-instance guarantee. |
 | Data retention | `docs/DATA-RETENTION.md` | Strategy documented; no destructive retention job added. |
 | Frontend recovery | `artifacts/web-irc/src/App.test.tsx`: room retry, reconnect, DM preservation, username conflicts, developer denial | Comprehensive keyboard/focus/accessibility and error-state review is still outstanding. |
 | WebSocket event delivery | Employee-offboarding revocation, post-commit subscription-end notice, live recipient/non-recipient checks, and server/client reconnect contract; see `RELEASE-1-WEBSOCKET-AUDIT.md` | The named delivery families are verified; this is not an exhaustive event-class matrix or production release sign-off. |
@@ -86,7 +92,9 @@ API source paths in the table are relative to `artifacts/api-server`.
    focused authenticated recipient/non-recipient checks are recorded in
     `RELEASE-1-WEBSOCKET-AUDIT.md`. Storage application enforcement and
     provider-boundary limits are recorded in `RELEASE-1-STORAGE-AUDIT.md`;
-    abuse-control inventory and accessibility verification are still open.
+     abuse-control inventory and single-process deployment assumptions are
+     recorded in `RELEASE-1-ABUSE-CONTROL-AUDIT.md`; accessibility verification
+     is still open.
 4. Run/document the available security/static-analysis checks and reconcile
    their findings; do not equate license checking with security analysis.
 5. Resolve the separately queued unclassified dependency-license review.
