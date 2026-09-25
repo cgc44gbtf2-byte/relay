@@ -1,0 +1,94 @@
+Paste this directly into Replit:
+
+Create and commit the GitHub Actions CI workflow needed for Relay Release 1.
+OBJECTIVE
+Create `.github/workflows/ci.yml` in the repository so GitHub Actions can run the required CI checks on the `development` branch.
+IMPORTANT
+- Do NOT modify `main`.
+- Do NOT add new product features.
+- Do NOT change application behavior unless required to make the CI workflow function.
+- Do NOT expose or commit secrets, API keys, tokens, or credentials.
+- Inspect the existing package.json, pnpm-workspace.yaml, lockfile, TypeScript configs, API package, web package, database/test configuration, and existing scripts before creating the workflow.
+- Reuse the project's existing commands rather than inventing replacement commands.
+- The workflow must work with the current monorepo structure.
+WORKFLOW REQUIREMENTS
+Create:
+`.github/workflows/ci.yml`
+The workflow should:
+1. Run on:
+   - pushes to `development`
+   - pull requests targeting `development`
+2. Use a supported Node.js version compatible with the current project.
+3. Enable Corepack and use the project's existing pnpm version/configuration.
+4. Install dependencies using the frozen lockfile.
+5. Run the repository's existing validation commands, including where available:
+   - TypeScript/type checking
+   - API tests
+   - Web/frontend tests
+   - Database regression/integration tests that can run safely in CI
+   - Production/build validation
+   - Root/monorepo build
+6. If PostgreSQL is required by the existing tests:
+   - Configure a PostgreSQL service using a supported PostgreSQL version.
+   - Ensure the database is initialized appropriately.
+   - Run the existing migration/schema setup process required by the project.
+   - Do not replace the project's actual database validation with a superficial command.
+7. Make the CI fail when a required check fails.
+8. Keep the workflow deterministic and suitable as a Release 1 gate.
+9. Cache pnpm dependencies if practical without introducing complexity.
+10. Use least-privilege GitHub Actions permissions.
+BEFORE WRITING THE FILE
+Inspect the repository and determine:
+- package manager/version
+- Node version
+- available package scripts
+- workspace structure
+- API test commands
+- frontend test commands
+- database test commands
+- build commands
+- migration/schema commands
+- environment variables required by tests
+- whether any existing CI workflow already exists
+Do not duplicate or conflict with an existing workflow.
+DATABASE SAFETY
+The CI database must be isolated from any development/production database.
+Never use production credentials.
+If the existing database tests require secrets or external services that cannot safely run in GitHub Actions, do not fake the test. Clearly document the limitation and keep the workflow valid.
+VALIDATION
+After creating the workflow:
+1. Validate the YAML syntax.
+2. Run the same commands locally in Replit that the workflow will run, where possible.
+3. Fix any workflow/configuration issues discovered.
+4. Confirm the repository still typechecks and builds.
+5. Confirm the API regression suite remains passing.
+6. Confirm the PostgreSQL regression/migration validation remains passing.
+7. Do not modify `main`.
+GIT
+If Git operations are available:
+- Make the changes on the current `development` branch.
+- Commit ONLY the CI workflow/configuration changes needed for this task.
+- Use a clear commit message such as:
+  `Add Release 1 CI workflow`
+If you cannot push to GitHub because the connected GitHub authorization does not have workflow-write permission, do NOT work around the restriction and do NOT modify main.
+Instead, leave the completed `.github/workflows/ci.yml` in the Replit project and report:
+- exact file path
+- exact commit created, if any
+- branch used
+- commands included in CI
+- any commands that could not be executed
+- why GitHub push was blocked, if applicable
+- any manual GitHub step I need to perform
+FINAL REPORT
+Return a concise verification report containing:
+CI workflow: PASS/FAIL
+YAML validation: PASS/FAIL
+Typecheck: PASS/FAIL
+API tests: PASS/FAIL
+Frontend tests: PASS/FAIL
+Database/PostgreSQL tests: PASS/FAIL/UNAVAILABLE
+Build: PASS/FAIL
+Git commit: PASS/FAIL/NOT AVAILABLE
+GitHub push: PASS/FAIL/NOT AVAILABLE
+Also list the exact contents/path of the new workflow and any remaining action required from me.
+Do not proceed to Release 2 feature development. This task is strictly for establishing the Release 1 CI gate.
