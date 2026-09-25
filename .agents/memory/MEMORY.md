@@ -13,6 +13,7 @@
 - [Document version allocation](document-version-allocation.md) — serialize version allocation and enforce document/version uniqueness in PostgreSQL.
 - [Clerk environment isolation](clerk-environment-isolation.md) — share CI concurrency only when Clerk-using jobs mutate the same external tenant.
 - [GitHub connector imports](github-connector-imports.md) — initialize empty repos through Contents API and expect separate workflow-write permission for CI files.
+- [GitHub Actions log access](github-actions-log-access.md) — job metadata can be readable while downloading the same run's logs requires repository admin rights.
 - [Dependency audit platform entries](dependency-audit-platform-entries.md) — pnpm’s graph can include optional packages absent from node_modules on the current platform.
 - [Community product separation](community-product-separation.md) — signup auto-provisions one free community; paid workspaces use a separate path.
 - [Authorization locking](authorization-locking.md) — privileged writes must lock authority-granting rows; serializable isolation alone does not stop stale revocation races.

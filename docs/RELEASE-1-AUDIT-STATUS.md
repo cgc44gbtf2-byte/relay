@@ -75,6 +75,13 @@ production-readiness sign-off.
   its database compatibility, authenticated API and scheduled-cleanup
   validation jobs, although its release-validation job passed. See
   `RELEASE-1-SECURITY-READINESS.md` for run links and release blockers.
+- Investigation of that older hosted failure reproduced the old Clerk
+  concurrency-validator error and confirmed the corrected validator passes
+  locally. Subsequent fresh-schema prerequisites passed the full 34/34
+  database-script compatibility checks against a disposable PostgreSQL 16
+  cluster. Hosted job logs require repository admin rights, so the precise
+  database-job failure cause could not be verified; no current hosted rerun,
+  PostgreSQL 14/15 rerun or authenticated API rerun was performed here.
 
 ## Implemented safeguards and evidence locations
 

@@ -14,11 +14,44 @@ Statuses distinguish local evidence from hosted and production evidence.
 | Privacy/security dataflow scan | PASS — 0 findings | This does not verify provider configuration, live data handling or every data path. |
 | Local `pnpm run release:validate` | PASS — 28 reviewed migrations validated, library/API/web typechecks, 60/60 API unit tests, 113/113 web tests, API/web builds and dependency license gate | No authenticated API integration tests, production database, release archive or hosted runner are included in this local command. The web build still warns about a large JavaScript chunk. |
 | License policy regressions | PASS — 3/3 tests in `scripts/dependency-license-policy.test.mjs`; installed graph passes `pnpm run audit:licenses` | This is a technical allowlist, **not** legal clearance or a notice bundle. |
-| Latest hosted GitHub CI, `development` push of 2026-09-24 22:59 UTC | **FAIL** — [CI run](https://github.com/cgc44gbtf2-byte/relay/actions/runs/36070400685) | `release-validation` passed, but PostgreSQL 14/15/16 database-runner compatibility and authenticated API jobs failed, `validate-scheduled-cleanup` failed its Clerk concurrency step, and abandoned-test-user cleanup was skipped. The separately triggered [workflow validation run](https://github.com/cgc44gbtf2-byte/relay/actions/runs/36070400732) passed. These hosted runs predate the current local checkout and do not certify it. |
+| Latest hosted GitHub CI, `development` push of 2026-09-24 22:59 UTC | **FAIL** — [CI run](https://github.com/cgc44gbtf2-byte/relay/actions/runs/36070400685) | `release-validation` passed, but PostgreSQL 14/15/16 database-runner compatibility and authenticated API jobs failed, `validate-scheduled-cleanup` failed its Clerk concurrency step, and abandoned-test-user cleanup was skipped. The separately triggered [workflow validation run](https://github.com/cgc44gbtf2-byte/relay/actions/runs/36070400732) passed. These hosted runs predate the current local checkout and do not certify it. See investigation below. |
 
 The security scanners returned no findings to fix in this reconciliation. Scan
 counts are not a substitute for the targeted authorization and failure-path
 tests below. No production data was accessed or changed for this report.
+
+### Hosted CI failure investigation (2026-09-25)
+
+The failed run used revision `1e09ca9`, whereas the investigated local checkout
+was `a7b1ab8`. GitHub job metadata identifies the failing steps but **not their
+full error output**: downloading the job logs returned HTTP 403 ("Must have
+admin rights to Repository"). Public job annotations say only that the steps
+exited 1. This limits any claim about the database jobs' exact failure cause.
+
+- **Clerk concurrency validation — reproduced and corrected in the current
+  tree.** Running the validator from the failed revision against the unchanged
+  CI workflow exits 1 with “Expected at least two Clerk-using jobs, found 1:
+  api-tests.” It missed credentials declared on a step rather than at job
+  level. The current `scripts/ci/validate_clerk_concurrency.py` recognizes
+  both forms. Its 12 local CI-policy tests and workflow validation pass. This
+  explains the failing validation step, but it has not passed in a later
+  hosted run.
+- **Database compatibility and authenticated API jobs — plausible fresh-schema
+  cause, not proven from hosted logs.** Subsequent changes in
+  `lib/db/scripts/run-ci-tests.mjs` provision `pg_trgm` before a fresh
+  current-schema push; migration 0017 already provisions it for the ordered
+  migration path. The two paths use separate disposable databases, so the
+  old runner could fail the fresh push even when the migration rehearsal
+  passed. Current compatibility scripts passed **34/34** against a new,
+  disposable local PostgreSQL 16 cluster, including real migration rehearsal,
+  fresh schema setup, no-op check and database cleanup. PostgreSQL 14/15 and
+  authenticated API execution were **not** rerun in this investigation.
+
+The next proof is a **new hosted run on the current release revision**, with
+all three PostgreSQL compatibility and authenticated jobs, policy validation
+and scheduled cleanup checked independently. Do not rerun the old revision
+and call the current tree verified. No workflow was dispatched or pushed
+during this investigation.
 
 ## Original audit areas: fix, evidence and residual risk
 
