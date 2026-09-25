@@ -81,8 +81,25 @@ The fixture is `lib/db/scripts/fixtures/pre-migration-schema.ts`; its pinned
 SHA-256 digest is stored beside it and verified before the rehearsal changes the
 database. The rehearsal's CI checkout is intentionally shallow, so this check
 also ensures it cannot rely on an ancestor commit being available.
+The upgrade-request table was already defined in the application schema before
+the `0001` fixture was recorded (see the earlier community-upgrade schema
+change in repository history). It belongs in that starting fixture, with its
+original columns and indexes, but without `expires_at` or `reminder_sent_at`.
+Those columns are added by reviewed migrations `0019` and `0023`. The rehearsal
+checks this before/after shape explicitly; do not alter those applied migration
+files to compensate for a missing fixture table. If baselining an existing
+installation, inspect its actual catalog first rather than treating the fixture
+as evidence that every installed database has the same shape.
 The child process receives only `TEST_DATABASE_URL`; persistent
 `DATABASE_URL` and admin connection variables are removed before it starts.
+The separate current-schema test database installs `pg_trgm` before pushing
+the Drizzle schema, matching the extension prerequisite supplied by reviewed
+migration `0017` in the rehearsal database.
+The pinned Drizzle Kit patch also preserves PostgreSQL's `ARRAY[]::text[]`
+default during introspection: the unpatched PostgreSQL parser mistakes that
+empty expression for a nonempty array and repeatedly proposes an ALTER on an
+unchanged `notification_recipient_ids` column. The strict read-only no-op
+check remains enabled across all three supported PostgreSQL versions.
 
 ### Updating the rehearsal starting schema
 

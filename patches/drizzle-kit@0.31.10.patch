@@ -33,6 +33,22 @@ index 07274ea6f53fd54a129b3d338892feda6e995cff..f81f682cb187f6b9cb61379924d61921
              );
              foreignKeysCount += tableForeignKeys.length;
              if (progressCallback) {
+@@ -18310,11 +18312,15 @@ var import_drizzle_orm4, import_pg_core, indexName3, trimChar, fromDatabase2,
+     defaultForColumn = (column11, internals, tableName) => {
+       var _a2, _b;
+       const columnName = column11.column_name;
+       const isArray = ((_b = (_a2 = internals == null ? void 0 : internals.tables[tableName]) == null ? void 0 : _a2.columns[columnName]) == null ? void 0 : _b.isArray) ?? false;
+       if (column11.column_default === null || column11.column_default === void 0 || column11.data_type === "serial" || column11.data_type === "smallserial" || column11.data_type === "bigserial") {
+         return void 0;
+       }
++      // An empty ARRAY[] expression is not a PostgreSQL array literal.
++      if (isArray && column11.column_default === "ARRAY[]::text[]") {
++        return column11.column_default;
++      }
+       if (column11.column_default.endsWith("[]")) {
+         column11.column_default = column11.column_default.slice(0, -2);
+       }
+       column11.column_default = column11.column_default.replace(/::(.*?)(?<![^\w"])(?=$)/, "");
 @@ -83403,16 +83407,18 @@ WHERE
  					    pg_catalog.pg_constraint con
  					    JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid

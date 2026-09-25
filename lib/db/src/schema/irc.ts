@@ -324,9 +324,9 @@ export const businessDocumentsTable = pgTable("irc_business_documents", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("irc_business_documents_community_updated_idx").on(table.communityId, table.updatedAt, table.id),
-  index("irc_business_documents_title_trgm_idx").using("gin", sql`${table.title} gin_trgm_ops`),
-  index("irc_business_documents_description_trgm_idx").using("gin", sql`${table.description} gin_trgm_ops`),
-  index("irc_business_documents_category_trgm_idx").using("gin", sql`${table.category} gin_trgm_ops`),
+  index("irc_business_documents_title_trgm_idx").using("gin", table.title.op("gin_trgm_ops")),
+  index("irc_business_documents_description_trgm_idx").using("gin", table.description.op("gin_trgm_ops")),
+  index("irc_business_documents_category_trgm_idx").using("gin", table.category.op("gin_trgm_ops")),
 ]);
 
 export const documentVersionsTable = pgTable("irc_document_versions", {
@@ -342,7 +342,7 @@ export const documentVersionsTable = pgTable("irc_document_versions", {
 }, (table) => [
   uniqueIndex("irc_document_versions_document_version_uidx").on(table.documentId, table.version),
   unique("irc_document_versions_id_document_id_uidx").on(table.id, table.documentId),
-  index("irc_document_versions_filename_trgm_idx").using("gin", sql`${table.fileName} gin_trgm_ops`),
+  index("irc_document_versions_filename_trgm_idx").using("gin", table.fileName.op("gin_trgm_ops")),
 ]);
 
 export const documentPermissionsTable = pgTable("irc_document_permissions", {
