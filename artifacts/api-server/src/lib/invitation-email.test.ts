@@ -1,9 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sendInvitationEmail } from "./invitation-email";
+import {
+  sendCommunitySubscriptionReminderEmail,
+  sendInvitationEmail,
+} from "./invitation-email";
 
 const invitation = { email: "employee@example.com", communityId: 42, token: "private-test-token" };
 const config = { INVITATION_EMAIL_FROM: "Relay <invites@example.com>", INVITATION_APP_URL: "https://example.com/workspace/", RESEND_API_KEY: "test-only-key" };
+const reminder = {
+  email: "owner@example.com",
+  termId: 73,
+  expiresAt: new Date("2026-10-02T12:30:00.000Z"),
+};
 
 test("unconfigured delivery preserves link fallback without calling provider", async () => {
   const result = await sendInvitationEmail(invitation, {}, async () => { throw new Error("Must not send"); });
@@ -86,4 +94,36 @@ test("resend content uses the newly rotated token", async () => {
   await sendInvitationEmail({ ...invitation, token: "replacement-token" }, config, send);
   assert.match(messages[1]!, /replacement-token/);
   assert.ok(!messages[1]!.includes(invitation.token));
+});
+
+test("subscription reminder targets the renewal page with a stable per-term key", async () => {
+  let idempotencyKey: string | undefined;
+  const result = await sendCommunitySubscriptionReminderEmail(reminder, config, async (body, _key, options) => {
+    idempotencyKey = options?.idempotencyKey;
+    assert.deepEqual(body.to, [reminder.email]);
+    assert.equal(body.from, config.INVITATION_EMAIL_FROM);
+    assert.equal(body.subject, "Your Relay public community subscription ends soon");
+    assert.match(String(body.text), /https:\/\/example\.com\/workspace\/community-upgrades/);
+    assert.match(String(body.text), /2026-10-02T12:30:00\.000Z/);
+    return new Response('{"id":"reminder-sent"}', { status: 200 });
+  });
+  assert.equal(result.status, "sent");
+  assert.equal(idempotencyKey, "community-subscription-reminder-73");
+});
+
+test("default subscription reminder sender sets the provider idempotency header", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(input, "https://api.resend.com/emails");
+    assert.equal(new Headers(init?.headers).get("Idempotency-Key"), "community-subscription-reminder-73");
+    const payload = JSON.parse(String(init?.body));
+    assert.deepEqual(payload.to, [reminder.email]);
+    assert.match(payload.text, /\/workspace\/community-upgrades/);
+    return new Response('{"id":"reminder-sent"}', { status: 200 });
+  };
+  try {
+    assert.equal((await sendCommunitySubscriptionReminderEmail(reminder, config)).status, "sent");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -11,6 +11,7 @@ import { SESSION_STATUS_CACHE_TTL_MS, setTestSessionStatus } from "./lib/auth";
 import { processMessageNotificationDeliveries } from "./lib/message-notification-delivery";
 import { sendCommunitySubscriptionReminders } from "./lib/community-subscription-reminders";
 import { finishInvitationSend } from "./lib/invitation-delivery";
+import type { CommunitySubscriptionReminderEmail } from "./lib/invitation-email";
 import {
   ensurePermissionCatalog,
   evaluateCommunityPermissions,
@@ -1943,9 +1944,11 @@ describe("admin access controls", () => {
       const expired = await seed("approved", new Date(now.getTime() - 86400_000));
       const superseded = await seed("approved", new Date(now.getTime() + 2 * 86400_000));
       const latest = await seed("approved", new Date(now.getTime() + 4 * 86400_000));
-      assert.equal((await Promise.all([
-        sendCommunitySubscriptionReminders(now), sendCommunitySubscriptionReminders(now),
-      ])).reduce((sum, count) => sum + count, 0), 1);
+      const noVerifiedEmail = await sendCommunitySubscriptionReminders(now, {
+        getVerifiedEmails: async () => [],
+        sendEmail: async () => { throw new Error("Must not send to an unverified address"); },
+      });
+      assert.equal(noVerifiedEmail, 1);
       const alerts = await pool.query<{ user_id: string; entity_id: string }>(
         `SELECT user_id, entity_id FROM irc_notifications
          WHERE entity_type = 'community_subscription_reminder' AND entity_id = ANY($1::text[])`,
@@ -1955,9 +1958,60 @@ describe("admin access controls", () => {
       assert.deepEqual(new Set(alerts.rows.map((row) => row.user_id)),
         new Set([memberSession.userId, adminSession.userId]));
       assert.ok(alerts.rows.every((row) => row.entity_id === String(latest)));
-      assert.equal(await sendCommunitySubscriptionReminders(now), 0);
+
+      const emailAttempts: CommunitySubscriptionReminderEmail[] = [];
+      let failEmail = true;
+      const dependencies = {
+        getVerifiedEmails: async () => ["owner@example.invalid"],
+        sendEmail: async (email: CommunitySubscriptionReminderEmail) => {
+          emailAttempts.push(email);
+          return failEmail
+            ? { status: "failed" as const, message: "test failure" }
+            : { status: "sent" as const, message: "test success" };
+        },
+      };
+      await Promise.all([
+        sendCommunitySubscriptionReminders(now, dependencies),
+        sendCommunitySubscriptionReminders(now, dependencies),
+      ]);
+      assert.equal(emailAttempts.length, 1);
+      assert.equal(emailAttempts[0]?.termId, latest);
+      assert.equal(emailAttempts[0]?.email, "owner@example.invalid");
+      const alertsAfterEmailFailure = await pool.query<{ user_id: string }>(
+        `SELECT user_id FROM irc_notifications
+         WHERE entity_type = 'community_subscription_reminder' AND entity_id = $1`,
+        [String(latest)],
+      );
+      assert.equal(alertsAfterEmailFailure.rows.length, 2);
+      const emailState = await pool.query<{
+        reminder_email_attempted_at: Date | null;
+        reminder_email_sent_at: Date | null;
+      }>(
+        `SELECT reminder_email_attempted_at, reminder_email_sent_at
+         FROM irc_community_upgrade_requests WHERE id = $1`,
+        [latest],
+      );
+      assert.ok(emailState.rows[0]?.reminder_email_attempted_at);
+      assert.equal(emailState.rows[0]?.reminder_email_sent_at, null);
+
+      await pool.query(
+        "UPDATE irc_community_upgrade_requests SET reminder_email_attempted_at = $2 WHERE id = $1",
+        [latest, new Date(now.getTime() - 2 * 60 * 60_000)],
+      );
+      failEmail = false;
+      assert.equal(await sendCommunitySubscriptionReminders(now, dependencies), 1);
+      assert.equal(emailAttempts.length, 2);
+      const deliveredEmailState = await pool.query<{ reminder_email_sent_at: Date | null }>(
+        "SELECT reminder_email_sent_at FROM irc_community_upgrade_requests WHERE id = $1",
+        [latest],
+      );
+      assert.ok(deliveredEmailState.rows[0]?.reminder_email_sent_at);
+      assert.equal(await sendCommunitySubscriptionReminders(now, dependencies), 0);
+      assert.equal(emailAttempts.length, 2);
       const renewed = await seed("approved", new Date(now.getTime() + 6 * 86400_000));
-      assert.equal(await sendCommunitySubscriptionReminders(now), 1);
+      assert.equal(await sendCommunitySubscriptionReminders(now, dependencies), 1);
+      assert.equal(emailAttempts.length, 3);
+      assert.equal(emailAttempts[2]?.termId, renewed);
       const refreshed = await pool.query<{ entity_id: string }>(
         `SELECT entity_id FROM irc_notifications WHERE entity_type = 'community_subscription_reminder'
          AND entity_id = ANY($1::text[])`, [ids.map(String)],

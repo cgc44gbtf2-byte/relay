@@ -84,6 +84,8 @@ export const communityUpgradeRequestsTable = pgTable("irc_community_upgrade_requ
   paymentReference: text("payment_reference"),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   reminderSentAt: timestamp("reminder_sent_at", { withTimezone: true }),
+  reminderEmailAttemptedAt: timestamp("reminder_email_attempted_at", { withTimezone: true }),
+  reminderEmailSentAt: timestamp("reminder_email_sent_at", { withTimezone: true }),
   reviewedBy: text("reviewed_by").references(() => usersTable.clerkId, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
