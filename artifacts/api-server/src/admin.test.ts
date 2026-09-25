@@ -1803,7 +1803,7 @@ describe("admin access controls", () => {
       assert.equal((duplicate.body as { id: number }).id, requestId);
       const messages = await pool.query<{ body: string }>(
         "SELECT body FROM irc_messages WHERE sender_id = $1 AND recipient_id = $2 AND body LIKE $3",
-        [memberSession.userId, adminSession.userId, `Public community upgrade #${requestId} pending.%`],
+        [memberSession.userId, adminSession.userId, `Public community subscription #${requestId} pending.%`],
       );
       assert.equal(messages.rows.length, 1);
       assert.match(messages.rows[0].body, /confirmed@example\.invalid/);
@@ -1815,7 +1815,7 @@ describe("admin access controls", () => {
       const status = await apiRequest(memberSession, "/community-upgrades/status");
       assert.equal((status.body as { approvedSlots: number }).approvedSlots, 0);
       assert.equal((await apiRequest(memberSession, "/public-communities", {
-        method: "POST", headers: { "content-type": "application/json" }, body: '{"name":"Too early"}',
+        method: "POST", headers: { "content-type": "application/json" }, body: '{"name":"too-early"}',
       })).status, 403);
     } finally {
       getUserMock.mock.restore();
@@ -1823,7 +1823,7 @@ describe("admin access controls", () => {
         await pool.query("DELETE FROM irc_notifications WHERE entity_type = 'community_upgrade_request' AND entity_id = $1", [String(requestId)]);
         await pool.query(
           "DELETE FROM irc_messages WHERE sender_id = $1 AND recipient_id = $2 AND body LIKE $3",
-          [memberSession.userId, adminSession.userId, `Public community upgrade #${requestId} pending.%`],
+          [memberSession.userId, adminSession.userId, `Public community subscription #${requestId} pending.%`],
         );
         await pool.query("DELETE FROM irc_community_upgrade_requests WHERE id = $1", [requestId]);
       }
@@ -1849,8 +1849,12 @@ describe("admin access controls", () => {
       assert.equal(status.status, 200);
       assert.equal((status.body as { pendingRequest?: { id: number } }).pendingRequest?.id, requestId);
       assert.equal((status.body as { approvedSlots?: number }).approvedSlots, 0);
-      assert.equal((await post(memberSession, "/public-communities", { name: "Too early" })).status, 403);
-      assert.equal((await post(memberSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "paid-1234" })).status, 403);
+      assert.equal((await post(memberSession, "/public-communities", { name: "too-early" })).status, 403);
+      const validPaidThrough = new Date(Date.now() + 30 * 86400_000).toISOString();
+      assert.equal((await post(memberSession, `/admin/community-upgrades/${requestId}/approve`, {
+        paymentReference: "paid-1234",
+        paidThrough: validPaidThrough,
+      })).status, 403);
       assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, { paymentReference: "" })).status, 400);
       assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
         paymentReference: "paid-1234", paidThrough: new Date(Date.now() - 1000).toISOString(),
@@ -1862,6 +1866,7 @@ describe("admin access controls", () => {
       assert.equal(approved.status, 200, JSON.stringify(approved));
       assert.equal((await post(adminSession, `/admin/community-upgrades/${requestId}/approve`, {
         paymentReference: `test-${randomUUID()}`,
+        paidThrough,
       })).status, 409);
       const attempts = await Promise.all([
         post(memberSession, "/public-communities", { name: "Extra community A" }),
@@ -2113,7 +2118,13 @@ describe("admin access controls", () => {
       const activity = (response.body as {
         activity?: Array<{ id: number; targetLabel: string | null; targetHref: string | null }>;
       }).activity;
-      assert.deepEqual(activity?.find((entry) => entry.id === auditId), {
+      const entry = activity?.find((item) => item.id === auditId);
+      assert.ok(entry);
+      assert.deepEqual({
+        id: entry.id,
+        targetLabel: entry.targetLabel,
+        targetHref: entry.targetHref,
+      }, {
         id: auditId,
         targetLabel: "Deleted account",
         targetHref: null,
@@ -2743,6 +2754,8 @@ describe("admin access controls", () => {
               hasMore: boolean;
               nextOffset: number | null;
               nextCursor: string | null;
+              newestCursor: string | null;
+              newerHasMore: boolean;
             };
           },
         );
@@ -2753,7 +2766,14 @@ describe("admin access controls", () => {
         [8, 8, 7],
       );
       assert.deepEqual(
-        pageResponses.map(({ activityPagination: { nextCursor: _nextCursor, ...pagination } }) => pagination),
+        pageResponses.map(({
+          activityPagination: {
+            nextCursor: _nextCursor,
+            newestCursor: _newestCursor,
+            newerHasMore: _newerHasMore,
+            ...pagination
+          },
+        }) => pagination),
         [
           { limit: 8, offset: 0, hasMore: true, nextOffset: 8 },
           { limit: 8, offset: 8, hasMore: true, nextOffset: 16 },
@@ -3180,30 +3200,36 @@ describe("admin access controls", () => {
         createdAt: new Date(Date.UTC(2099, 0, 1, 0, 0, 14)),
       },
     ];
-    const values: string[] = [];
-    const parameters: unknown[] = [];
-    for (const [index, entry] of entries.entries()) {
-      const parameterOffset = parameters.length;
-      values.push(
-        `($${parameterOffset + 1}, $${parameterOffset + 2}, $${parameterOffset + 3}, $${parameterOffset + 4}, $${parameterOffset + 5}, $${parameterOffset + 6}, $${parameterOffset + 7})`,
-      );
-      parameters.push(
-        adminSession.userId,
-        entry.actor,
-        entry.action,
-        `${marker}_target_${index}`,
-        `${marker} label ${index}`,
-        `Event ${index}`,
-        entry.createdAt,
-      );
-    }
+    const insertEntries = async (batch: typeof entries): Promise<void> => {
+      const values: string[] = [];
+      const parameters: unknown[] = [];
+      for (const entry of batch) {
+        const parameterOffset = parameters.length;
+        values.push(
+          `($${parameterOffset + 1}, $${parameterOffset + 2}, $${parameterOffset + 3}, $${parameterOffset + 4}, $${parameterOffset + 5}, $${parameterOffset + 6}, $${parameterOffset + 7})`,
+        );
+        const index = entries.indexOf(entry);
+        parameters.push(
+          adminSession.userId,
+          entry.actor,
+          entry.action,
+          `${marker}_target_${index}`,
+          `${marker} label ${index}`,
+          `Event ${index}`,
+          entry.createdAt,
+        );
+      }
 
-    await pool.query(
-      `INSERT INTO irc_admin_audit_logs
-       (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
-       VALUES ${values.join(", ")}`,
-      parameters,
-    );
+      if (values.length === 0) return;
+      await pool.query(
+        `INSERT INTO irc_admin_audit_logs
+         (actor_id, actor_display_name, action, target_id, target_label, details, created_at)
+         VALUES ${values.join(", ")}`,
+        parameters,
+      );
+    };
+
+    await insertEntries(entries.slice(0, 6));
 
     try {
       const filters = `activityActor=${encodeURIComponent(`${marker} Manager`)}&activityAction=${encodeURIComponent(action)}`;
@@ -3225,6 +3251,10 @@ describe("admin access controls", () => {
       assert.ok(firstPage.activityPagination.hasMore);
       assert.ok(firstPage.activityPagination.nextCursor);
       assert.ok(firstPage.activityPagination.newestCursor);
+
+      // Newer matching events arrive after the first page is loaded. They must
+      // appear through the newer-activity path without altering older pages.
+      await insertEntries(entries.slice(6));
 
       const activityCheck = await apiRequest(
         adminSession,
@@ -3597,11 +3627,11 @@ describe("admin access controls", () => {
       if (moderationId !== undefined) {
         await pool.query("DELETE FROM irc_moderation_actions WHERE id = $1", [moderationId]);
       }
+      if (channelId !== undefined) {
+        await removeTestChannels([channelId]);
+      }
       if (communityId !== undefined) {
         await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
-      }
-      if (channelId !== undefined) {
-        await pool.query("DELETE FROM irc_channels WHERE id = $1", [channelId]);
       }
       await pool.query("DELETE FROM irc_users WHERE clerk_id = $1", [actorId]);
     }
@@ -5615,7 +5645,7 @@ describe("admin access controls", () => {
 
   test("keeps private workspace list query counts bounded as communities and scoped roles grow", async (t) => {
     const session = await createTestSession("workspace_scale");
-    const adminSession = await createTestSession("workspace_scale_admin");
+    const scaleAdminSession = await createTestSession("workspace_scale_admin");
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const communityIds: number[] = [];
     const customRoles: string[] = [];
@@ -5624,8 +5654,10 @@ describe("admin access controls", () => {
     try {
       assert.equal((await apiRequest(session, "/me")).status, 200);
       assert.equal((await apiRequest(adminSession, "/me")).status, 200);
-      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId]);
-      assert.equal((await apiRequest(adminSession, "/permissions/catalog")).status, 200);
+      assert.equal((await apiRequest(scaleAdminSession, "/me")).status, 200);
+      await pool.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [adminSession.userId]);
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [scaleAdminSession.userId]);
+      assert.equal((await apiRequest(scaleAdminSession, "/permissions/catalog")).status, 200);
 
       const growTo = async (size: number): Promise<void> => {
         while (communityIds.length < size) {
@@ -5635,7 +5667,7 @@ describe("admin access controls", () => {
           const { rows: [community] } = await pool.query<{ id: number }>(
             `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
              VALUES ($1, $2, $3, 'paid_workspace', true) RETURNING id`,
-            [`Scale ${suffix} ${index}`, `scale-${suffix}-${index}`, adminSession.userId],
+            [`Scale ${suffix} ${index}`, `scale-${suffix}-${index}`, scaleAdminSession.userId],
           );
           communityIds.push(community.id);
           if (kind === 1) {
@@ -5653,7 +5685,7 @@ describe("admin access controls", () => {
               await pool.query(
                 `INSERT INTO irc_custom_roles (key, label, scope_type, created_by)
                  VALUES ($1, $1, 'community', $2)`,
-                [role, adminSession.userId],
+                [role, scaleAdminSession.userId],
               );
               const inserted = await pool.query(
                 `INSERT INTO irc_role_permissions (role, permission_id)
@@ -5665,7 +5697,7 @@ describe("admin access controls", () => {
             await pool.query(
               `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
                VALUES ($1, $2, 'community', $3, $4)`,
-              [session.userId, role, community.id, adminSession.userId],
+              [session.userId, role, community.id, scaleAdminSession.userId],
             );
           }
           if (kind !== 0) {
@@ -5679,27 +5711,43 @@ describe("admin access controls", () => {
       };
 
       const measureList = async (): Promise<number> => {
-        // Call through to PostgreSQL; count only the request, never fixture SQL.
-        const querySpy = mock.method(pool, "query");
-        let listed: ApiResponse;
-        let count: number;
-        try {
-          listed = await apiRequest(session, "/communities");
-          count = querySpy.mock.callCount();
-        } finally {
-          querySpy.mock.restore();
+        // Compare per-page query work while collecting every visible workspace.
+        // Earlier tests may leave enough public rows to push this fixture past one page.
+        const actual: typeof expected = [];
+        let countPerPage: number | null = null;
+        let offset = 0;
+        while (true) {
+          const querySpy = mock.method(pool, "query");
+          let listed: ApiResponse;
+          let count: number;
+          try {
+            listed = await apiRequest(session, `/communities?limit=100&offset=${offset}`);
+            count = querySpy.mock.callCount();
+          } finally {
+            querySpy.mock.restore();
+          }
+          assert.equal(listed.status, 200, JSON.stringify(listed));
+          assert.ok(Array.isArray(listed.body));
+          assert.ok(count > 0, "The query counter must observe real database queries.");
+          assert.ok(count <= 12, `Workspace list exceeded its fixed query budget: ${count}`);
+          if (countPerPage === null) countPerPage = count;
+          else assert.equal(count, countPerPage, "Each page should use the same fixed query budget.");
+
+          const page = listed.body as typeof expected;
+          actual.push(
+            ...page
+              .filter(({ id }) => communityIds.includes(id))
+              .map(({ id, joined, canManage }) => ({ id, joined, canManage })),
+          );
+          if (listed.headers.get("x-has-more") !== "true") break;
+          const nextOffset = Number(listed.headers.get("x-next-offset"));
+          assert.ok(Number.isInteger(nextOffset) && nextOffset > offset, "The next page offset must advance.");
+          offset = nextOffset;
         }
-        assert.equal(listed.status, 200, JSON.stringify(listed));
-        assert.ok(Array.isArray(listed.body));
-        const actual = (listed.body as typeof expected)
-          .filter(({ id }) => communityIds.includes(id))
-          .map(({ id, joined, canManage }) => ({ id, joined, canManage }))
-          .sort((a, b) => a.id - b.id);
+        actual.sort((a, b) => a.id - b.id);
         assert.deepEqual(actual, [...expected].sort((a, b) => a.id - b.id));
-        assert.ok(count > 0, "The query counter must observe real database queries.");
-        // Allows fixed authentication/profile overhead, but not even one query per workspace.
-        assert.ok(count <= 12, `Workspace list exceeded its fixed query budget: ${count}`);
-        return count;
+        assert.ok(countPerPage !== null, "At least one workspace page must be measured.");
+        return countPerPage;
       };
 
       await growTo(12);
@@ -5708,9 +5756,11 @@ describe("admin access controls", () => {
       const smallCount = await measureList();
       await growTo(120);
       const largeCount = await measureList();
-      assert.equal(largeCount, smallCount, "Ten times as many workspaces and scoped roles must not add queries.");
-      t.diagnostic(`Workspace list queries: 12 workspaces=${smallCount}, 120 workspaces=${largeCount}`);
+      assert.equal(largeCount, smallCount, "Ten times as many workspaces and scoped roles must not add per-page queries.");
+      t.diagnostic(`Workspace list queries per page: 12 workspaces=${smallCount}, 120 workspaces=${largeCount}`);
     } finally {
+      await pool.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [scaleAdminSession.userId]);
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId]);
       await pool.query("DELETE FROM irc_user_roles WHERE user_id = $1", [session.userId]);
       await pool.query("DELETE FROM irc_role_permissions WHERE role = ANY($1::text[])", [customRoles]);
       await pool.query("DELETE FROM irc_custom_roles WHERE key = ANY($1::text[])", [customRoles]);
@@ -6371,11 +6421,6 @@ describe("admin access controls", () => {
         "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
         [communityId, actor.userId],
       );
-      const publish = () => apiRequest(actor, `/communities/${communityId}/policies`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "Concurrent policy", body: "Must not survive revocation." }),
-      });
       const snapshot = async () => (await pool.query(
         `SELECT
           (SELECT count(*)::int FROM irc_workspace_policies WHERE community_id = $1) AS policies,
@@ -6385,21 +6430,27 @@ describe("admin access controls", () => {
       )).rows;
 
       for (const scenario of ["primary", "assignment", "membership"] as const) {
+        const scenarioActor = scenario === "primary" ? adminSession : actor;
         await pool.query("UPDATE irc_users SET role = $2 WHERE clerk_id = $1", [
-          actor.userId, scenario === "primary" ? "admin" : "member",
+          scenarioActor.userId, scenario === "primary" ? "admin" : "member",
         ]);
         if (scenario !== "primary") {
           await pool.query(
             `INSERT INTO irc_user_roles (user_id, role, scope_type, community_id, granted_by)
              VALUES ($1, 'workspace_admin', 'community', $2, $3)`,
-            [actor.userId, communityId, owner.userId],
+            [scenarioActor.userId, communityId, owner.userId],
           );
         }
-        assert.equal(await hasPermission(actor.userId, "manage_community", { communityId }), true);
+        assert.equal(await hasPermission(scenarioActor.userId, "manage_community", { communityId }), true);
         const before = await snapshot();
+        const publish = () => apiRequest(scenarioActor, `/communities/${communityId}/policies`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Concurrent policy", body: "Must not survive revocation." }),
+        });
         await revocation.query("BEGIN");
         // Match the authorization-locking convention used by role changes and offboarding.
-        await revocation.query("SELECT clerk_id FROM irc_users WHERE clerk_id = $1 FOR UPDATE", [actor.userId]);
+        await revocation.query("SELECT clerk_id FROM irc_users WHERE clerk_id = $1 FOR UPDATE", [scenarioActor.userId]);
         const pending = publish();
         try {
           let blocked = false;
@@ -6414,10 +6465,10 @@ describe("admin access controls", () => {
             await new Promise((resolve) => setTimeout(resolve, 20));
           }
           assert.equal(blocked, true, `${scenario}: publisher must wait at its transactional authority check`);
-          await revocation.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [actor.userId]);
-          await revocation.query("DELETE FROM irc_user_roles WHERE user_id = $1 AND community_id = $2", [actor.userId, communityId]);
+          await revocation.query("UPDATE irc_users SET role = 'member' WHERE clerk_id = $1", [scenarioActor.userId]);
+          await revocation.query("DELETE FROM irc_user_roles WHERE user_id = $1 AND community_id = $2", [scenarioActor.userId, communityId]);
           if (scenario === "membership") {
-            await revocation.query("DELETE FROM irc_community_members WHERE user_id = $1 AND community_id = $2", [actor.userId, communityId]);
+            await revocation.query("DELETE FROM irc_community_members WHERE user_id = $1 AND community_id = $2", [scenarioActor.userId, communityId]);
           }
         } finally {
           await revocation.query("COMMIT");
@@ -6438,6 +6489,8 @@ describe("admin access controls", () => {
     } finally {
       await revocation.query("ROLLBACK").catch(() => undefined);
       revocation.release();
+      await pool.query("UPDATE irc_users SET role = 'admin' WHERE clerk_id = $1", [adminSession.userId])
+        .catch(() => undefined);
       if (communityId !== null) await pool.query("DELETE FROM irc_communities WHERE id = $1", [communityId]);
     }
   });
@@ -7333,6 +7386,7 @@ describe("admin access controls", () => {
       }
       const [targetChannelId, unrelatedChannelId] = channelIds;
 
+      assert.equal((await apiRequest(moderatorSession, "/me")).status, 200);
       await pool.query(
         `INSERT INTO irc_channel_members (channel_id, user_id, role)
          VALUES ($1, $2, 'moderator')`,
@@ -11587,7 +11641,7 @@ describe("admin access controls", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            name: `moderation-handoff-${action}-${randomUUID().replaceAll("-", "").slice(0, 10)}`,
+            name: `handoff-${action}-${randomUUID().replaceAll("-", "").slice(0, 10)}`,
             isPrivate: true,
           }),
         });
@@ -13422,11 +13476,11 @@ describe("admin access controls", () => {
       const insertedDocuments = await pool.query<{ id: number; title: string }>(
         `INSERT INTO irc_business_documents
            (community_id, title, description, category, visibility, owner_id, created_at, updated_at)
-         SELECT $1, 'Noise document ' || series, '', 'company', 'company', $2,
+         SELECT $1::int, 'Noise document ' || series, '', 'company', 'company', $2,
                 now() - interval '1 minute', now() - interval '1 minute'
          FROM generate_series(1, 150) AS series
          UNION ALL
-         SELECT $1, 'Needle document ' || series, '', 'company', 'company', $2,
+         SELECT $1::int, 'Needle document ' || series, '', 'company', 'company', $2,
                 now() - interval '2 hours', now() - interval '2 hours'
          FROM generate_series(1, 101) AS series
          RETURNING id, title`,
