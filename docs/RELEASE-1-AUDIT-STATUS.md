@@ -28,12 +28,24 @@ checklist, not a production-readiness sign-off.
   checks passed locally. Local checks do not establish a green hosted CI run.
 - Temporary test databases and regression users were cleaned up. No production
   data was modified or production migrations applied.
+- Local tenant-access reconciliation used an isolated PostgreSQL 16 database:
+  the two-workspace read/write substitution test and the targeted/scheduled
+  announcement test passed. The full `admin.test.ts` run passed 107/114 tests
+  before the final attachment audience guard was added; its focused regression
+  was rerun and passed after the guard. Seven other tests failed (upgrade
+  alerts, subscription status, two activity
+  pagination assertions, private workspace list setup, private-room naming,
+  and document pagination fixture). This is **not** a green full-suite result.
+  API typechecking passed.
+- After review, a second focused regression on the disposable database passed
+  for inactive team membership and removed workspace membership, including
+  activation through both announcement routes; API typechecking passed again.
 
 ## Implemented safeguards and evidence locations
 
 | Area | Evidence | Remaining qualification |
 | --- | --- | --- |
-| Tenant authorization | Scoped helpers and negative integration tests in `artifacts/api-server/src/admin.test.ts` and `src/lib/channel-access.ts` | Endpoint-by-endpoint coverage of every resource in the original checklist is not yet established. |
+| Tenant authorization | Endpoint/access-chain matrix in `docs/RELEASE-1-TENANT-ACCESS-MATRIX.md`; two-workspace positive/negative integration matrix and same-workspace announcement audience regression in `artifacts/api-server/src/admin.test.ts`; scoped channel helper in `src/lib/channel-access.ts` | Does not establish exhaustive realtime event-class or storage-provider isolation. |
 | WebSocket event privacy | `src/lib/ws.ts`, `src/lib/ws.test.ts`: subscriber-only deletion; access-checked channel-list invalidation; bounded, per-user authorization checks | Complete event-class and real multi-workspace delivery matrix is not yet established. Invalidation unit tests inject access decisions. |
 | Roles and destructive operations | Integration tests for revocation races, denied-operation audit absence, moderation records, and forced audit-write rollback | Does not prove every mutation and failure path. |
 | Database integrity and migrations | `lib/db/migrations`, `docs/DATABASE-MIGRATIONS.md`, rehearsal/bootstrap tests | Production baseline/application and recovery remain an operational verification step. |
@@ -48,9 +60,11 @@ API source paths in the table are relative to `artifacts/api-server`.
 
 ## Outstanding audit scope
 
-1. Complete the resource-by-resource tenant authorization inventory and close
-   missing negative read/write tests. An ID-only lookup is a review candidate,
-   not by itself proof of an exploitable authorization defect.
+1. Tenant HTTP resource inventory and negative read/write matrix are recorded
+   in `RELEASE-1-TENANT-ACCESS-MATRIX.md`. ID-only lookups were evaluated with
+   their downstream checks; a same-workspace announcement audience gap was
+   fixed in the global feed, announcement read/acknowledgement/attachment
+   routes, and scheduled notification path.
 2. Collection pagination inventory is recorded below. Continue to distinguish
    navigable collections from intentionally recent dashboard snapshots when
    adding endpoints; do not introduce a cap without a continuation path.

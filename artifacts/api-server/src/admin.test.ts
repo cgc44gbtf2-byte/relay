@@ -8651,6 +8651,7 @@ describe("admin access controls", () => {
     const resources: Array<{
       task: number; attachment: number; document: number; version: number;
       department: number; location: number; team: number; invitation: number;
+      invitationToken: string;
       category: number; announcement: number; announcementAttachment: number;
       folder: number; channel: number; policy: number;
     }> = [];
@@ -8739,14 +8740,15 @@ describe("admin access controls", () => {
            VALUES ($1, 1, $2, $3, $4, $5, $6) RETURNING id`,
           [document, file.objectPath, file.fileName, file.contentType, file.fileSize, owner],
         );
+        const invitationToken = randomUUID();
         const invitation = await insertId(
           `INSERT INTO irc_workspace_invitations
            (community_id, email, invited_by, token_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 day') RETURNING id`,
-          [workspace, `${randomUUID()}@example.test`, owner, createHash("sha256").update(randomUUID()).digest("hex")],
+          [workspace, `${randomUUID()}@example.test`, owner, createHash("sha256").update(invitationToken).digest("hex")],
         );
         const announcement = await insertId(
-          "INSERT INTO irc_server_announcements (community_id, author_id, title, body) VALUES ($1, $2, $3, 'Scope fixture') RETURNING id",
+          "INSERT INTO irc_server_announcements (community_id, author_id, title, body, requires_acknowledgement) VALUES ($1, $2, $3, 'Scope fixture', true) RETURNING id",
           [workspace, owner, `${label} announcement`],
         );
         const announcementAttachment = await insertId(
@@ -8761,7 +8763,7 @@ describe("admin access controls", () => {
         );
         resources.push({
           task, attachment, document, version, department, location, team,
-          invitation, category, announcement, announcementAttachment, folder, channel, policy,
+          invitation, invitationToken, category, announcement, announcementAttachment, folder, channel, policy,
         });
       }
       const [home, foreign] = workspaces;
@@ -8814,6 +8816,7 @@ describe("admin access controls", () => {
         ["task comment", `${homePath}/tasks/${own.task}/comments`, json({ body: "Home comment" }), 201],
         ["task attachment", `${homePath}/tasks/${own.task}/attachments`, json(file), 201],
         ["announcement read", `${homePath}/announcements/${own.announcement}/read`, { method: "POST" }, 200],
+        ["announcement acknowledgement", `${homePath}/announcements/${own.announcement}/acknowledge`, { method: "POST" }, 200],
         ["announcement attachment", `${homePath}/announcements/${own.announcement}/attachments`, json(file), 201],
         ["document acknowledgement", `${homePath}/documents/${own.document}/acknowledge`, { method: "POST" }, 200],
         ["policy acknowledgement", `${homePath}/policies/${own.policy}/acknowledge`, { method: "POST" }, 200],
@@ -8848,25 +8851,47 @@ describe("admin access controls", () => {
         ["document version write", `${homePath}/documents/${other.document}/versions`, json(file), 404],
         ["document acknowledgement", `${homePath}/documents/${other.document}/acknowledge`, { method: "POST" }, 404],
         ["document permission", `${homePath}/documents/${other.document}/permissions`, json({ userId: employee, permission: "viewer" }), 400],
+        ["foreign document permission recipient", `${homePath}/documents/${own.document}/permissions`, json({ userId: foreignEmployee.userId, permission: "viewer" }), 400],
         ["foreign document folder", `${homePath}/documents`, json({ ...file, title: "Invalid folder", folderId: other.folder }), 400],
+        ["foreign document recipient", `${homePath}/documents`, json({
+          ...file, title: "Invalid recipient", visibility: "employee", targetUserId: foreignEmployee.userId,
+        }), 400],
         ["employee update", `${homePath}/employees/${employee}/organization`, json({ departmentId: other.department }, "PATCH"), 400],
+        ["employee foreign location", `${homePath}/employees/${employee}/organization`, json({ locationId: other.location }, "PATCH"), 400],
+        ["employee foreign manager", `${homePath}/employees/${employee}/organization`, json({ managerId: foreignEmployee.userId }, "PATCH"), 400],
         ["foreign employee update", `${homePath}/employees/${foreignEmployee.userId}`, json({ jobTitle: "Wrong workspace" }, "PATCH"), 404],
         ["foreign employee assignment", `${homePath}/employees/${foreignEmployee.userId}/organization`, json({ departmentId: own.department }, "PATCH"), 404],
         ["foreign department manager", `${homePath}/departments/${other.department}/manager`, json({ managerId: employee }, "PATCH"), 404],
+        ["foreign manager for home department", `${homePath}/departments/${own.department}/manager`, json({ managerId: foreignEmployee.userId }, "PATCH"), 400],
         ["foreign team manager", `${homePath}/teams/${other.team}/manager`, json({ managerId: employee }, "PATCH"), 404],
+        ["foreign manager for home team", `${homePath}/teams/${own.team}/manager`, json({ managerId: foreignEmployee.userId }, "PATCH"), 400],
         ["foreign team member", `${homePath}/teams/${other.team}/members/${employee}`, json({ role: "member" }, "PUT"), 404],
+        ["foreign employee team member", `${homePath}/teams/${own.team}/members/${foreignEmployee.userId}`, json({ role: "member" }, "PUT"), 404],
+        ["foreign team membership removal", `${homePath}/teams/${other.team}/members/${employee}`, { method: "DELETE" }, 404],
         ["foreign department team", `${homePath}/teams`, json({ name: "Wrong department", departmentId: other.department }), 400],
         ["foreign location team", `${homePath}/teams`, json({ name: "Wrong location", locationId: other.location }), 400],
+        ["foreign invitation assignments", `${homePath}/invitations`, json({
+          email: `${randomUUID()}@example.test`,
+          departmentId: other.department,
+          locationId: other.location,
+          teamId: other.team,
+        }), 400],
+        ["foreign invitation acceptance", `${homePath}/invitations/accept`, json({ token: other.invitationToken }), 404],
+        ["foreign invitation decline", `${homePath}/invitations/decline`, json({ token: other.invitationToken }), 404],
         ["foreign invitation", `${homePath}/invitations/${other.invitation}/revoke`, { method: "POST" }, 404],
         ["foreign invitation resend", `${homePath}/invitations/${other.invitation}/resend`, { method: "POST" }, 404],
         ["foreign category", `${homePath}/categories/${other.category}`, { method: "DELETE" }, 404],
         ["foreign category update", `${homePath}/categories/${other.category}`, json({ name: "wrong-workspace" }, "PATCH"), 404],
         ["foreign announcement read", `${homePath}/announcements/${other.announcement}/read`, { method: "POST" }, 404],
+        ["foreign announcement acknowledgement", `${homePath}/announcements/${other.announcement}/acknowledge`, { method: "POST" }, 404],
         ["foreign announcement delete", `${homePath}/announcements/${other.announcement}`, { method: "DELETE" }, 404],
         ["foreign announcement attachment", `${homePath}/announcements/${other.announcement}/attachments/${other.announcementAttachment}`, undefined, 404],
         ["mismatched announcement attachment", `${homePath}/announcements/${own.announcement}/attachments/${other.announcementAttachment}`, undefined, 404],
         ["foreign announcement attachment write", `${homePath}/announcements/${other.announcement}/attachments`, json(file), 404],
+        ["foreign announcement department", `${homePath}/announcements`, json({ body: "Wrong audience", audienceType: "department", departmentId: other.department }), 400],
+        ["foreign announcement location", `${homePath}/announcements`, json({ body: "Wrong audience", audienceType: "location", locationId: other.location }), 400],
         ["foreign announcement audience", `${homePath}/announcements`, json({ body: "Wrong audience", audienceType: "team", teamId: other.team }), 400],
+        ["foreign announcement recipient", `${homePath}/announcements`, json({ body: "Wrong audience", audienceType: "individual", recipientId: foreignEmployee.userId }), 400],
         ["foreign policy", `${homePath}/policies/${other.policy}/acknowledge`, { method: "POST" }, 404],
         ["foreign role category", "/admin/role-assignments", json({
           userId: employee, role: "department_admin", scopeType: "category",
@@ -8876,6 +8901,13 @@ describe("admin access controls", () => {
           userId: employee, role: "moderator", scopeType: "channel",
           communityId: home, categoryId: own.category, channelId: other.channel,
         }), 400],
+        ["foreign role department", "/admin/role-assignments", json({
+          userId: employee, role: "department_admin", scopeType: "department",
+          communityId: home, departmentId: other.department,
+        }), 400],
+        ["foreign workspace member role", `${homePath}/members/${foreignEmployee.userId}/role`, json({
+          role: "manager",
+        }, "PATCH"), 404],
       ];
       for (const [label, path, init, expected] of cases) {
         const response = await apiRequest(adminSession, path, init);
@@ -8892,6 +8924,21 @@ describe("admin access controls", () => {
       assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_user_roles WHERE user_id = $1 AND community_id = $2 AND category_id = $3", [employee, home, other.category])).rows[0].count, 0);
       assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_document_versions WHERE document_id = $1", [other.document])).rows[0].count, 1);
       assert.equal((await pool.query("SELECT count(*)::int AS count FROM irc_team_members WHERE team_id = $1", [other.team])).rows[0].count, 0);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_document_permissions WHERE document_id = $1 AND user_id = $2",
+        [own.document, foreignEmployee.userId],
+      )).rows[0].count, 0);
+      assert.equal((await pool.query(
+        "SELECT count(*)::int AS count FROM irc_user_roles WHERE user_id = $1 AND community_id = $2",
+        [foreignEmployee.userId, home],
+      )).rows[0].count, 0);
+      assert.deepEqual(
+        (await pool.query(
+          "SELECT department_id, location_id, manager_id FROM irc_employee_profiles WHERE community_id = $1 AND user_id = $2",
+          [home, employee],
+        )).rows,
+        [{ department_id: null, location_id: null, manager_id: null }],
+      );
       const validRole = await apiRequest(adminSession, "/admin/role-assignments", json({
         userId: employee, role: "moderator", scopeType: "channel",
         communityId: home, categoryId: own.category, channelId: own.channel,
@@ -8902,6 +8949,128 @@ describe("admin access controls", () => {
       if (workspaces.length) {
         await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [workspaces]);
       }
+    }
+  });
+
+  test("keeps targeted and scheduled announcements out of other members' feeds and notifications", async () => {
+    const owner = await createTestSession("announcement_owner");
+    const target = await createTestSession("announcement_target");
+    const bystander = await createTestSession("announcement_bystander");
+    let workspace: number | undefined;
+    try {
+      for (const user of [owner, target, bystander]) {
+        await apiRequest(user, "/me");
+      }
+      const created = await pool.query<{ id: number }>(
+        `INSERT INTO irc_communities (name, slug, owner_id, plan, is_private)
+         VALUES ('Audience isolation', $1, $2, 'paid_workspace', true) RETURNING id`,
+        [`audience-${randomUUID()}`, owner.userId],
+      );
+      workspace = created.rows[0].id;
+      for (const user of [owner, target, bystander]) {
+        await pool.query(
+          "INSERT INTO irc_community_members (community_id, user_id, status) VALUES ($1, $2, 'member')",
+          [workspace, user.userId],
+        );
+      }
+      const title = `Targeted ${randomUUID()}`;
+      const announcement = await pool.query<{ id: number }>(
+        `INSERT INTO irc_server_announcements
+         (community_id, author_id, title, body, audience_type, recipient_id, status, scheduled_at)
+         VALUES ($1, $2, $3, 'private audience', 'individual', $4, 'scheduled', now() - interval '1 minute')
+         RETURNING id`,
+        [workspace, owner.userId, title, target.userId],
+      );
+      const id = announcement.rows[0].id;
+      const attachment = await pool.query<{ id: number }>(
+        `INSERT INTO irc_announcement_attachments
+         (announcement_id, uploader_id, object_path, file_name, content_type, file_size)
+         VALUES ($1, $2, $3, 'audience.txt', 'text/plain', 1) RETURNING id`,
+        [id, owner.userId, `/objects/uploads/${randomUUID()}`],
+      );
+      const feed = await apiRequest(bystander, "/announcements");
+      assert.equal(feed.status, 200, JSON.stringify(feed));
+      assert.ok(!(feed.body as Array<{ id: number }>).some((item) => item.id === id));
+      const targetFeed = await apiRequest(target, "/announcements");
+      assert.equal(targetFeed.status, 200, JSON.stringify(targetFeed));
+      assert.ok((targetFeed.body as Array<{ id: number }>).some((item) => item.id === id));
+      for (const [path, init] of [
+        [`/communities/${workspace}/announcements/${id}/read`, { method: "POST" }],
+        [`/communities/${workspace}/announcements/${id}/acknowledge`, { method: "POST" }],
+        [`/communities/${workspace}/announcements/${id}/attachments/${attachment.rows[0].id}`, { redirect: "manual" as const }],
+      ] as const) {
+        const denied = await apiRequest(bystander, path, init);
+        assert.equal(denied.status, 404, `${path}: ${JSON.stringify(denied)}`);
+      }
+      const notices = await pool.query<{ user_id: string }>(
+        "SELECT user_id FROM irc_notifications WHERE entity_type = 'announcement' AND entity_id = $1",
+        [String(id)],
+      );
+      assert.deepEqual(notices.rows, [{ user_id: target.userId }]);
+      await pool.query("UPDATE irc_server_announcements SET expires_at = now() - interval '1 second' WHERE id = $1", [id]);
+      const expired = await apiRequest(target, "/announcements");
+      assert.ok(!(expired.body as Array<{ id: number }>).some((item) => item.id === id));
+
+      const team = await pool.query<{ id: number }>(
+        "INSERT INTO irc_teams (community_id, name) VALUES ($1, $2) RETURNING id",
+        [workspace, `audience-team-${randomUUID()}`],
+      );
+      await pool.query(
+        "INSERT INTO irc_team_members (team_id, user_id, status) VALUES ($1, $2, 'inactive')",
+        [team.rows[0].id, target.userId],
+      );
+      const scheduled = async (audience: "team" | "individual"): Promise<number> => {
+        const row = await pool.query<{ id: number }>(
+          `INSERT INTO irc_server_announcements
+           (community_id, author_id, title, body, audience_type, team_id, recipient_id, status, scheduled_at)
+           VALUES ($1, $2, $3, 'revoked audience', $4, $5, $6, 'scheduled', now() - interval '1 minute') RETURNING id`,
+          [workspace, owner.userId, `Revoked ${randomUUID()}`, audience, audience === "team" ? team.rows[0].id : null,
+            audience === "individual" ? target.userId : null],
+        );
+        return row.rows[0].id;
+      };
+      const noNotice = async (announcementId: number) => {
+        const rows = await pool.query(
+          "SELECT user_id FROM irc_notifications WHERE entity_type = 'announcement' AND entity_id = $1",
+          [String(announcementId)],
+        );
+        assert.equal(rows.rowCount, 0, `revoked target received announcement ${announcementId}`);
+        const state = await pool.query<{ status: string }>(
+          "SELECT status FROM irc_server_announcements WHERE id = $1", [announcementId],
+        );
+        assert.equal(state.rows[0].status, "published", "activation path must actually execute");
+      };
+      const inactiveTeamFeedId = await scheduled("team");
+      const inactiveFeed = await apiRequest(target, "/announcements");
+      assert.ok(!(inactiveFeed.body as Array<{ id: number }>).some((item) => item.id === inactiveTeamFeedId));
+      await noNotice(inactiveTeamFeedId);
+      const inactiveTeamDetailId = await scheduled("team");
+      const detail = await apiRequest(owner, `/communities/${workspace}`);
+      assert.equal(detail.status, 200, JSON.stringify(detail));
+      await noNotice(inactiveTeamDetailId);
+      const deniedTeam = await apiRequest(target, `/communities/${workspace}/announcements/${inactiveTeamDetailId}/read`, { method: "POST" });
+      assert.equal(deniedTeam.status, 404);
+      const teamAttachment = await pool.query<{ id: number }>(
+        `INSERT INTO irc_announcement_attachments
+         (announcement_id, uploader_id, object_path, file_name, content_type, file_size)
+         VALUES ($1, $2, $3, 'team.txt', 'text/plain', 1) RETURNING id`,
+        [inactiveTeamDetailId, owner.userId, `/objects/uploads/${randomUUID()}`],
+      );
+      const deniedDownload = await apiRequest(target,
+        `/communities/${workspace}/announcements/${inactiveTeamDetailId}/attachments/${teamAttachment.rows[0].id}`,
+        { redirect: "manual" });
+      assert.equal(deniedDownload.status, 404);
+
+      await pool.query("DELETE FROM irc_community_members WHERE community_id = $1 AND user_id = $2", [workspace, target.userId]);
+      const formerFeedId = await scheduled("individual");
+      await apiRequest(bystander, "/announcements");
+      await noNotice(formerFeedId);
+      const formerDetailId = await scheduled("individual");
+      const refreshedDetail = await apiRequest(owner, `/communities/${workspace}`);
+      assert.equal(refreshedDetail.status, 200, JSON.stringify(refreshedDetail));
+      await noNotice(formerDetailId);
+    } finally {
+      if (workspace) await pool.query("DELETE FROM irc_communities WHERE id = $1", [workspace]);
     }
   });
 

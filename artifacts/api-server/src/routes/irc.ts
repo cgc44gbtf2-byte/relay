@@ -7,6 +7,7 @@ import {
   count,
   desc,
   eq,
+  exists,
   gt,
   ilike,
   inArray,
@@ -29,12 +30,15 @@ import {
   communitiesTable,
   communityMembersTable,
   db,
+  employeeProfilesTable,
   messageAttachmentsTable,
   messageReactionsTable,
   messagesTable,
   moderationActionsTable,
   notificationsTable,
   serverAnnouncementsTable,
+  teamMembersTable,
+  teamsTable,
   workspaceTasksTable,
   usersTable,
 } from "@workspace/db";
@@ -2425,14 +2429,32 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
       eq(serverAnnouncementsTable.communityId, communityId),
       eq(serverAnnouncementsTable.status, "scheduled"),
       lte(serverAnnouncementsTable.scheduledAt, new Date()),
+      or(isNull(serverAnnouncementsTable.expiresAt), gt(serverAnnouncementsTable.expiresAt, new Date())),
     ));
     for (const announcement of due) {
       const [activated] = await db.update(serverAnnouncementsTable).set({ status: "published" })
         .where(and(eq(serverAnnouncementsTable.id, announcement.id), eq(serverAnnouncementsTable.status, "scheduled"))).returning();
       if (!activated) continue;
       const recipients = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
-        .where(eq(communityMembersTable.communityId, communityId));
-      if (recipients.length) await db.insert(notificationsTable).values(recipients.map((recipient) => ({ userId: recipient.userId, type: "community_announcement", body: `${announcement.title}: ${announcement.body}` })));
+        .where(and(
+          eq(communityMembersTable.communityId, communityId),
+          announcement.audienceType === "individual" ? eq(communityMembersTable.userId, announcement.recipientId!) :
+          announcement.audienceType === "department" ? exists(db.select({ id: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(
+              eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, communityMembersTable.userId),
+              eq(employeeProfilesTable.departmentId, announcement.departmentId!),
+            ))) :
+          announcement.audienceType === "location" ? exists(db.select({ id: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(
+              eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, communityMembersTable.userId),
+              eq(employeeProfilesTable.locationId, announcement.locationId!),
+            ))) :
+          announcement.audienceType === "team" ? exists(db.select({ id: teamMembersTable.userId }).from(teamMembersTable)
+              .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+              .where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, announcement.teamId!), eq(teamMembersTable.userId, communityMembersTable.userId), eq(teamMembersTable.status, "active")))) : undefined,
+        ));
+      if (recipients.length) await createNotifications(recipients.map((recipient) => recipient.userId), {
+        type: "community_announcement", category: "announcement", body: `${announcement.title}: ${announcement.body}`,
+        communityId, entityType: "announcement", entityId: announcement.id, actionUrl: `/communities/${communityId}`,
+      });
     }
   }));
   const isPlatformAdmin = await hasPermission(userId, "manage_any_community");
@@ -2456,6 +2478,30 @@ router.get("/announcements", requireAuth, async (req: AuthenticatedRequest, res)
     .where(and(
       eq(serverAnnouncementsTable.status, "published"),
       visibility,
+      or(isNull(serverAnnouncementsTable.scheduledAt), lte(serverAnnouncementsTable.scheduledAt, new Date())),
+      or(isNull(serverAnnouncementsTable.expiresAt), gt(serverAnnouncementsTable.expiresAt, new Date())),
+      isPlatformAdmin ? undefined : or(
+        isNull(serverAnnouncementsTable.communityId),
+        eq(serverAnnouncementsTable.audienceType, "company"),
+        eq(serverAnnouncementsTable.recipientId, userId),
+        exists(db.select({ id: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(
+          eq(employeeProfilesTable.communityId, serverAnnouncementsTable.communityId),
+          eq(employeeProfilesTable.userId, userId),
+          or(
+            and(eq(serverAnnouncementsTable.audienceType, "department"), eq(employeeProfilesTable.departmentId, serverAnnouncementsTable.departmentId)),
+            and(eq(serverAnnouncementsTable.audienceType, "location"), eq(employeeProfilesTable.locationId, serverAnnouncementsTable.locationId)),
+          ),
+        ))),
+        exists(db.select({ id: teamMembersTable.userId }).from(teamMembersTable)
+          .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+          .where(and(
+            eq(teamsTable.communityId, serverAnnouncementsTable.communityId),
+            eq(teamMembersTable.userId, userId),
+            eq(teamMembersTable.status, "active"),
+            eq(serverAnnouncementsTable.audienceType, "team"),
+            eq(teamMembersTable.teamId, serverAnnouncementsTable.teamId),
+          ))),
+      ),
     ))
     .orderBy(desc(serverAnnouncementsTable.createdAt), desc(serverAnnouncementsTable.id))
     .limit(page.limit + 1).offset(page.offset);

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { clerkClient } from "@clerk/express";
-import { and, asc, count, desc, eq, exists, gt, gte, ilike, inArray, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gt, gte, ilike, inArray, isNull, lte, notInArray, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { sendInvitationEmail } from "../lib/invitation-email";
 import { finishInvitationSend } from "../lib/invitation-delivery";
@@ -470,20 +470,24 @@ async function canAccessBusiness(userId: string, communityId: number): Promise<b
 
 async function announcementRecipients(announcement: typeof serverAnnouncementsTable.$inferSelect, communityId: number): Promise<Array<{ userId: string }>> {
   if (announcement.audienceType === "department" && announcement.departmentId) {
-    return db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable)
+    return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .innerJoin(employeeProfilesTable, and(eq(employeeProfilesTable.userId, communityMembersTable.userId), eq(employeeProfilesTable.communityId, communityMembersTable.communityId)))
       .where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, announcement.departmentId)));
   }
   if (announcement.audienceType === "location" && announcement.locationId) {
-    return db.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable)
+    return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .innerJoin(employeeProfilesTable, and(eq(employeeProfilesTable.userId, communityMembersTable.userId), eq(employeeProfilesTable.communityId, communityMembersTable.communityId)))
       .where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, announcement.locationId)));
   }
   if (announcement.audienceType === "team" && announcement.teamId) {
-    return db.select({ userId: teamMembersTable.userId }).from(teamMembersTable)
+    return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .innerJoin(teamMembersTable, eq(teamMembersTable.userId, communityMembersTable.userId))
       .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
-      .where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, announcement.teamId)));
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, announcement.teamId), eq(teamMembersTable.status, "active")));
   }
   if (announcement.audienceType === "individual" && announcement.recipientId) {
-    return [{ userId: announcement.recipientId }];
+    return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+      .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, announcement.recipientId)));
   }
   return db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
     .where(eq(communityMembersTable.communityId, communityId));
@@ -494,6 +498,7 @@ async function activateDueAnnouncements(communityId: number): Promise<void> {
     eq(serverAnnouncementsTable.communityId, communityId),
     eq(serverAnnouncementsTable.status, "scheduled"),
     lte(serverAnnouncementsTable.scheduledAt, new Date()),
+    or(isNull(serverAnnouncementsTable.expiresAt), gt(serverAnnouncementsTable.expiresAt, new Date())),
   ));
   for (const announcement of due) {
     const [activated] = await db.update(serverAnnouncementsTable).set({ status: "published" })
@@ -510,6 +515,34 @@ async function activateDueAnnouncements(communityId: number): Promise<void> {
       actionUrl: `/communities/${communityId}`,
     });
   }
+}
+
+async function canSeeAnnouncement(userId: string, communityId: number, announcementId: number): Promise<boolean> {
+  const [membership] = await db.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+    .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, userId))).limit(1);
+  if (!membership) return false;
+  const [announcement] = await db.select().from(serverAnnouncementsTable).where(and(
+    eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId),
+  )).limit(1);
+  if (!announcement) return false;
+  if (announcement.authorId === userId || await communityPermission(userId, communityId, "manage_community")) return true;
+  const now = new Date();
+  if (announcement.status !== "published" || (announcement.scheduledAt && announcement.scheduledAt > now)
+    || (announcement.expiresAt && announcement.expiresAt <= now)) return false;
+  if (announcement.audienceType === "company") return true;
+  if (announcement.audienceType === "individual") return announcement.recipientId === userId;
+  if (announcement.audienceType === "team") {
+    const [member] = await db.select({ userId: teamMembersTable.userId }).from(teamMembersTable)
+      .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+      .where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, announcement.teamId!), eq(teamMembersTable.userId, userId), eq(teamMembersTable.status, "active")))
+      .limit(1);
+    return Boolean(member);
+  }
+  const [profile] = await db.select({ departmentId: employeeProfilesTable.departmentId, locationId: employeeProfilesTable.locationId })
+    .from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, userId))).limit(1);
+  return announcement.audienceType === "department"
+    ? Boolean(announcement.departmentId && profile?.departmentId === announcement.departmentId)
+    : Boolean(announcement.locationId && profile?.locationId === announcement.locationId);
 }
 
 const documentCategories = ["policies", "procedures", "training", "forms", "employee", "company"] as const;
@@ -4131,12 +4164,20 @@ router.post("/communities/:communityId/announcements", requireAuth, async (req: 
     const recipients = audienceType === "company"
       ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable).where(eq(communityMembersTable.communityId, communityId))
       : audienceType === "department"
-        ? await tx.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.departmentId, departmentId!)))
+        ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+          .innerJoin(employeeProfilesTable, and(eq(employeeProfilesTable.userId, communityMembersTable.userId), eq(employeeProfilesTable.communityId, communityMembersTable.communityId)))
+          .where(and(eq(communityMembersTable.communityId, communityId), eq(employeeProfilesTable.departmentId, departmentId!)))
         : audienceType === "location"
-          ? await tx.select({ userId: employeeProfilesTable.userId }).from(employeeProfilesTable).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.locationId, locationId!)))
+          ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+            .innerJoin(employeeProfilesTable, and(eq(employeeProfilesTable.userId, communityMembersTable.userId), eq(employeeProfilesTable.communityId, communityMembersTable.communityId)))
+            .where(and(eq(communityMembersTable.communityId, communityId), eq(employeeProfilesTable.locationId, locationId!)))
           : audienceType === "team"
-            ? await tx.select({ userId: teamMembersTable.userId }).from(teamMembersTable).innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId)).where(and(eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!)))
-            : recipientId ? [{ userId: recipientId }] : [];
+            ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+              .innerJoin(teamMembersTable, eq(teamMembersTable.userId, communityMembersTable.userId))
+              .innerJoin(teamsTable, eq(teamsTable.id, teamMembersTable.teamId))
+              .where(and(eq(communityMembersTable.communityId, communityId), eq(teamsTable.communityId, communityId), eq(teamMembersTable.teamId, teamId!), eq(teamMembersTable.status, "active")))
+            : recipientId ? await tx.select({ userId: communityMembersTable.userId }).from(communityMembersTable)
+              .where(and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, recipientId))) : [];
     const notificationRecipients = isScheduled ? [] : [...new Set(recipients.map((recipient) => recipient.userId))];
     const announcementNotifications = notificationRecipients.length
       ? await tx.insert(notificationsTable).values(notificationRecipients.map((recipientUserId) => ({
@@ -4220,7 +4261,7 @@ router.post("/communities/:communityId/announcements/:announcementId/read", requ
   const [announcement] = await db.select({ id: serverAnnouncementsTable.id }).from(serverAnnouncementsTable)
     .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, serverAnnouncementsTable.communityId), eq(communityMembersTable.userId, userId)))
     .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
-  if (!announcement) {
+  if (!announcement || !(await canSeeAnnouncement(userId, communityId, announcementId))) {
     res.status(404).json({ error: "Announcement not found." });
     return;
   }
@@ -4236,7 +4277,7 @@ router.post("/communities/:communityId/announcements/:announcementId/acknowledge
   const [announcement] = await db.select({ id: serverAnnouncementsTable.id, requiresAcknowledgement: serverAnnouncementsTable.requiresAcknowledgement }).from(serverAnnouncementsTable)
     .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, serverAnnouncementsTable.communityId), eq(communityMembersTable.userId, userId)))
     .where(and(eq(serverAnnouncementsTable.id, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
-  if (!announcement) {
+  if (!announcement || !(await canSeeAnnouncement(userId, communityId, announcementId))) {
     res.status(404).json({ error: "Announcement not found." });
     return;
   }
@@ -4282,7 +4323,7 @@ router.get("/communities/:communityId/announcements/:announcementId/attachments/
     .innerJoin(serverAnnouncementsTable, eq(serverAnnouncementsTable.id, announcementAttachmentsTable.announcementId))
     .innerJoin(communityMembersTable, and(eq(communityMembersTable.communityId, communityId), eq(communityMembersTable.userId, userId)))
     .where(and(eq(announcementAttachmentsTable.id, attachmentId), eq(announcementAttachmentsTable.announcementId, announcementId), eq(serverAnnouncementsTable.communityId, communityId)));
-  if (!attachment) {
+  if (!attachment || !(await canSeeAnnouncement(userId, communityId, announcementId))) {
     res.status(404).json({ error: "Attachment not found." });
     return;
   }
