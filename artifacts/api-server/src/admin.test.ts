@@ -2908,14 +2908,14 @@ describe("admin access controls", () => {
 
   test("exports every event matching the validated activity filters", async () => {
     const marker = `audit_export_${randomUUID().replaceAll("-", "")}`;
-    const matchingCount = 55;
+    const matchingCount = 501;
     const fixtures = Array.from({ length: matchingCount }, (_, index) => ({
       actor: `${marker} Alpha`,
       action: `${marker}_change`,
       target: `${marker}_target_${index}`,
       label: `${marker} target ${index}`,
       details: index === 0 ? "=1+1" : index === 1 ? 'quoted, detail "with quotes"' : `detail ${index}`,
-      createdAt: `2026-04-02T12:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      createdAt: "2026-04-02T12:00:00.000Z",
     }));
     fixtures.push(
       {
@@ -2979,11 +2979,16 @@ describe("admin access controls", () => {
       assert.equal(response.status, 200, JSON.stringify(response));
       assert.equal(typeof response.body, "string");
       const csv = response.body as string;
-      const rows = csv.split("\r\n");
+      const rows = csv.replace(/\r\n$/, "").split("\r\n");
       assert.equal(rows.length, matchingCount + 1);
       assert.equal(rows[0], '"id","actor_id","actor","action","target_id","target_label","details","created_at"');
       const exportedIds = rows.slice(1).map((row) => row.slice(1, row.indexOf('","')));
-      assert.deepEqual(new Set(exportedIds), new Set(matchingIds));
+      assert.equal(new Set(exportedIds).size, matchingCount, "every matching event should appear exactly once");
+      assert.deepEqual(
+        exportedIds,
+        [...matchingIds].sort((left, right) => Number(right) - Number(left)),
+        "same-timestamp events should continue across the batch boundary in ID order",
+      );
       assert.ok(csv.includes('"\'=1+1"'), "formula-like details should be safe to open in a spreadsheet");
       assert.ok(csv.includes('"quoted, detail ""with quotes"""'), "CSV values should escape commas and quotes");
 
