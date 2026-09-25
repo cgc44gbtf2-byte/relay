@@ -25,10 +25,7 @@ const jobEnv = extractJobEnv(job);
 const envEntries = parseEnvEntries(jobEnv);
 
 const expectedEnv = new Map([
-  [
-    "TEST_DATABASE_URL",
-    "postgresql://postgres@127.0.0.1:5432/web_irc_cleanup",
-  ],
+  ["TEST_DATABASE_URL", "postgresql://postgres@127.0.0.1:5432/web_irc_cleanup"],
 ]);
 
 assert.match(
@@ -153,6 +150,20 @@ function extractJob(source, jobName) {
 
 function extractJobEnv(job) {
   const lines = job.split("\n");
+  const envHeaders = lines.filter((line) =>
+    /^ {4}(?:env|["']env["'])\s*:/.test(line),
+  );
+  assert.equal(
+    envHeaders.length,
+    1,
+    "scheduled cleanup must define exactly one job-level env block",
+  );
+  assert.equal(
+    envHeaders[0],
+    "    env:",
+    "scheduled cleanup job-level env must use the canonical block mapping",
+  );
+
   const envIndex = lines.findIndex((line) => line === "    env:");
   assert.notEqual(
     envIndex,

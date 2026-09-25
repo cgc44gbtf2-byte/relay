@@ -61,9 +61,11 @@ test("accepts the existing scheduled cleanup workflow", async () => {
   assert.equal(result.code, 0, result.output);
 });
 
-for (const key of ["env", '"env"']) {
+for (const key of ["env", '"env"', "'env'"]) {
   test(`rejects cleanup credentials inherited from workflow-level ${key}`, async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "cleanup-workflow-"));
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "cleanup-workflow-"),
+    );
     try {
       const source = await readFile(ciWorkflowPath, "utf8");
       const mutated = source.replace(
@@ -79,6 +81,19 @@ for (const key of ["env", '"env"']) {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+}
+
+for (const key of ["env", '"env"', "'env'"]) {
+  test(`rejects a duplicate job-level ${key} mapping`, async () => {
+    await assertRejectedMutation(
+      (job) =>
+        job.replace(
+          "    env:\n      TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/web_irc_cleanup\n",
+          `    env:\n      TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/web_irc_cleanup\n    ${key}:\n      CLERK_SECRET_KEY: \${{ secrets.CLERK_TEST_SECRET_KEY }}\n`,
+        ),
+      /must define exactly one job-level env block/,
+    );
   });
 }
 
@@ -98,7 +113,10 @@ test("rejects unrelated commands disguised with an approved step name", async ()
     const workflowPath = path.join(directory, "ci.yml");
     await writeFile(
       workflowPath,
-      source.replace("name: Unrelated diagnostics", "name: Install dependencies"),
+      source.replace(
+        "name: Unrelated diagnostics",
+        "name: Install dependencies",
+      ),
     );
     const result = await runValidator(workflowPath);
     assert.notEqual(result.code, 0, result.output);
@@ -159,10 +177,11 @@ for (const [key, secret] of cleanupCredentials) {
   for (const stepName of setupStepNames) {
     test(`rejects ${key} exposed to ${stepName}`, async () => {
       await assertRejectedMutation(
-        (job) => job.replace(
-          `      - name: ${stepName}\n`,
-          `      - name: ${stepName}\n        env:\n          ${entry}\n`,
-        ),
+        (job) =>
+          job.replace(
+            `      - name: ${stepName}\n`,
+            `      - name: ${stepName}\n        env:\n          ${entry}\n`,
+          ),
         /unapproved credential-bearing step/,
       );
     });
@@ -185,10 +204,11 @@ for (const [key, secret] of cleanupCredentials) {
 
 test("rejects arbitrary secrets aliased into job env", async () => {
   await assertRejectedMutation(
-    (job) => job.replace(
-      /^    env:\n/m,
-      "    env:\n      OTHER_TOKEN: ${{ secrets.OTHER_TOKEN }}\n",
-    ),
+    (job) =>
+      job.replace(
+        /^    env:\n/m,
+        "    env:\n      OTHER_TOKEN: ${{ secrets.OTHER_TOKEN }}\n",
+      ),
     /job-level env must contain only the disposable database/,
   );
 });
