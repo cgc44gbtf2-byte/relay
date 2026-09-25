@@ -1,15 +1,15 @@
 # Relay
 
-**Relay is a business communication and operations platform that brings conversations, people, work, files, and administrative controls into one shared workspace.**
+**Relay is an Internet Relay Chat (IRC) application built for community and business communication.**
 
-It combines real-time team communication with employee operations, task coordination, structured permissions, audit-ready activity, and release management. Relay is designed for organizations that want communication and operational context to live together instead of being split across disconnected tools.
+Channels, direct messages, presence, and moderation make real-time conversation the core of Relay. People can connect in communities around shared interests, while organizations can bring their teams together in private business workspaces. Business tools for tasks, announcements, files, permissions, and audit history add context to those conversations without replacing them.
 
-## Business Communication
+## Internet Relay Chat
 
-### Channels and communities
+### Channels and rooms
 
 - Create persistent public, private, and invite-only channels
-- Organize communication around teams, departments, projects, or business functions
+- Organize rooms around shared interests, teams, departments, projects, or events
 - Add channel topics and descriptions to keep discussions focused
 - Browse, search, join, and manage accessible channels
 - Request access to restricted spaces and review membership requests
@@ -19,9 +19,9 @@ It combines real-time team communication with employee operations, task coordina
 ### Real-time collaboration
 
 - Send and receive channel messages over WebSockets
-- Start direct-message conversations with coworkers in the same workspace
+- Start direct-message conversations with other members where access permits
 - See online presence and typing indicators
-- React to messages and mention teammates
+- React to messages and mention members
 - Receive live channel, membership, presence, and message updates
 - Automatically revoke live subscriptions when access is removed
 
@@ -41,11 +41,23 @@ It combines real-time team communication with employee operations, task coordina
 - Restrict downloads to users who can access the related channel or direct message
 - Deliver files through short-lived signed URLs
 
-## Business Operations
+## Community Communication
+
+Relay gives communities a place to gather and keep conversations going:
+
+- Join public channels and discover conversations across the network
+- Create a free community with starter rooms, then invite members to take part
+- Give rooms clear topics, descriptions, and access settings
+- Keep discussion history available to members who can access a room
+- Use moderators and member controls to keep conversations welcoming
+
+Community spaces are separate from private business workspaces; joining Relay does not automatically create a business workspace.
+
+## Business Communication and Operations
 
 ### Organization workspaces
 
-- Create private business communities with organization profile information
+- Create private business workspaces with organization profile information
 - Maintain workspace membership and employee profiles
 - Organize people by department, category, location, and role
 - Provide default spaces for announcements, HR, management, and general communication
@@ -171,7 +183,7 @@ PostgreSQL
 
 ```text
 artifacts/
-  web-irc/        React business communication interface
+  web-irc/        React IRC interface for communities and businesses
   api-server/     REST API, authorization, and WebSocket server
 lib/
   db/             PostgreSQL schema and database tooling
@@ -271,7 +283,8 @@ Authenticated API tests require a separate disposable `TEST_DATABASE_URL`. Test 
 
 ## Design Principles
 
-- **Communication with context:** messages, tasks, files, people, and operational records belong in the same workspace.
+- **Conversation first:** channels, direct messages, and presence are the foundation for both communities and businesses.
+- **Communication with context:** business messages, tasks, files, people, and operational records belong in the same workspace.
 - **Least-privilege access:** permissions are explicit and evaluated at the correct organizational scope.
 - **Workspace isolation:** business data must never leak across organizations.
 - **Real-time correctness:** access changes take effect across active connections, not only after refresh.
@@ -280,4 +293,4 @@ Authenticated API tests require a separate disposable `TEST_DATABASE_URL`. Test 
 
 ## Project Status
 
-Relay is under active development. The current release includes the core communication, workspace operations, administration, security, file-sharing, and release-management foundations needed for a business communication and operations platform.
+Relay is under active development. Its IRC experience serves community conversations and business teams, with workspace operations, administration, security, file sharing, and release-management foundations supporting the business side.
