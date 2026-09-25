@@ -2237,7 +2237,7 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
       return;
     }
   }
-  const updated = await db.transaction(async (tx) => {
+  const { updated, channelIds } = await db.transaction(async (tx) => {
     const [next] = await tx.update(employeeProfilesTable).set({
       ...(employmentStatus === undefined ? {} : { employmentStatus }),
       ...(employmentStatus === "onboarding" ? { onboardingStartedAt: now } : {}),
@@ -2246,15 +2246,17 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
       ...(employmentStatus === "terminated" ? { offboardedAt: now } : {}),
     }).where(and(eq(employeeProfilesTable.communityId, communityId), eq(employeeProfilesTable.userId, employeeId))).returning();
     if (!next) throw new Error("Employee profile update failed.");
+    let channelIds: number[] = [];
     if (employmentStatus === "terminated") {
       const workspaceChannels = await tx.select({ id: channelsTable.id }).from(channelsTable)
         .where(eq(channelsTable.communityId, communityId));
+      channelIds = workspaceChannels.map((channel) => channel.id);
       const workspaceTeams = await tx.select({ id: teamsTable.id }).from(teamsTable)
         .where(eq(teamsTable.communityId, communityId));
       if (workspaceChannels.length) {
         await tx.delete(channelMembersTable).where(and(
           eq(channelMembersTable.userId, employeeId),
-          inArray(channelMembersTable.channelId, workspaceChannels.map((channel) => channel.id)),
+          inArray(channelMembersTable.channelId, channelIds),
         ));
       }
       if (workspaceTeams.length) {
@@ -2295,8 +2297,14 @@ router.patch("/communities/:communityId/employees/:employeeId", requireAuth, asy
         grantedBy: userId,
       }).onConflictDoNothing();
     }
-    return next;
+    return { updated: next, channelIds };
   });
+  if (employmentStatus === "terminated") {
+    wsHub.revokeUserChannelAccess(channelIds, employeeId, communityId);
+    for (const channelId of channelIds) {
+      wsHub.broadcastChannel(channelId, { type: "presence", action: "leave", channelId, userId: employeeId });
+    }
+  }
   await writeCommunityAudit(userId, employmentStatus === "terminated" ? "offboarded_employee" : "updated_employee_status", communityId, {
     resourceType: "employee",
     resourceId: employeeId,
@@ -3943,9 +3951,8 @@ router.delete("/communities/:communityId/members/:memberId", requireAuth, async 
   });
   if (!removed) { res.status(404).json({ error: "Member is not in this workspace." }); return; }
   const channelIds = (await db.select({ id: channelsTable.id }).from(channelsTable).where(eq(channelsTable.communityId, communityId))).map((row) => row.id);
-  wsHub.revokeUserChannelAccess(channelIds, memberId);
+  wsHub.revokeUserChannelAccess(channelIds, memberId, communityId);
   for (const channelId of channelIds) wsHub.broadcastChannel(channelId, { type: "presence", action: "leave", channelId, userId: memberId });
-  wsHub.broadcastUser(memberId, { type: "workspace_membership_removed", communityId });
   await writeCommunityAudit(actorId, "removed_workspace_member", communityId, {
     resourceType: "member", resourceId: memberId, targetId: memberId, targetLabel: target.displayName,
   });

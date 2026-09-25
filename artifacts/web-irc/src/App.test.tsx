@@ -1434,6 +1434,25 @@ describe("deleted room recovery", () => {
     expect(screen.queryByText(/Orion typing/)).toBeNull();
   });
 
+  it("removes workspace channels when membership is revoked", async () => {
+    await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
+    await waitFor(() => expect(latestWebSocket?.onmessage).toBeTruthy());
+    const socket = latestWebSocket;
+    act(() => socket?.onopen?.());
+    webSocketFrames = [];
+
+    act(() => socket?.onmessage?.({
+      data: JSON.stringify({ type: "workspace_membership_removed", communityId: 1, channelIds: [1] }),
+    } as MessageEvent));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "#fallback-room" })).toBeTruthy());
+    await waitFor(() => {
+      const frames = webSocketFrames.map((frame) => JSON.parse(frame) as { type?: string; channelId?: number });
+      expect(frames).toContainEqual({ type: "subscribe", channelId: 2 });
+      expect(frames).not.toContainEqual({ type: "subscribe", channelId: 1 });
+    });
+  });
+
   it("limits outbound typing frames and clears them after idle or draft removal", async () => {
     await renderChat({ missingRequest: "event", fallbackChannels: [room(2, "#fallback-room")] });
     await waitFor(() => expect(latestWebSocket?.onopen).toBeTruthy());

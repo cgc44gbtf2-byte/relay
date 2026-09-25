@@ -10069,6 +10069,7 @@ describe("admin access controls", () => {
     const employeeSession = await createTestSession("organization_employee");
     const foreignManagerSession = await createTestSession("organization_foreign_manager");
     const communityIds: number[] = [];
+    const sockets: WebSocket[] = [];
 
     try {
       for (const session of [managerSession, employeeSession, foreignManagerSession]) {
@@ -10110,6 +10111,16 @@ describe("admin access controls", () => {
         `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
          VALUES ($1, $2, 'active')`,
         [foreignCommunityId, foreignManagerSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_community_members (community_id, user_id, status)
+         VALUES ($1, $2, 'member')`,
+        [foreignCommunityId, managerSession.userId],
+      );
+      await pool.query(
+        `INSERT INTO irc_employee_profiles (community_id, user_id, employment_status)
+         VALUES ($1, $2, 'active')`,
+        [foreignCommunityId, managerSession.userId],
       );
       await pool.query(
         `INSERT INTO irc_user_roles
@@ -10264,12 +10275,100 @@ describe("admin access controls", () => {
         { method: "DELETE" },
       );
       assert.equal(removeFromTeam.status, 200, JSON.stringify(removeFromTeam));
+
+      const channelResponse = await apiRequest(ownerSession, `/communities/${communityId}/channels`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `private-${randomUUID().slice(0, 8)}`, isPrivate: true }),
+      });
+      assert.equal(channelResponse.status, 201, JSON.stringify(channelResponse));
+      assert.ok(channelResponse.body && typeof channelResponse.body === "object");
+      const channelId = (channelResponse.body as { id?: unknown }).id as number;
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [channelId, managerSession.userId],
+      );
+      const foreignChannelResponse = await apiRequest(
+        ownerSession,
+        `/communities/${foreignCommunityId}/channels`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `private-${randomUUID().slice(0, 8)}`, isPrivate: true }),
+        },
+      );
+      assert.equal(foreignChannelResponse.status, 201, JSON.stringify(foreignChannelResponse));
+      assert.ok(foreignChannelResponse.body && typeof foreignChannelResponse.body === "object");
+      const foreignChannelId = (foreignChannelResponse.body as { id?: unknown }).id as number;
+      await pool.query(
+        `INSERT INTO irc_channel_members (channel_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [foreignChannelId, managerSession.userId],
+      );
+
+      const managerSockets = await Promise.all([
+        openWebSocket(managerSession),
+        openWebSocket(managerSession),
+      ]);
+      sockets.push(...managerSockets);
+      const ownerSocket = await openWebSocket(ownerSession);
+      sockets.push(ownerSocket);
+      for (const socket of [...managerSockets, ownerSocket]) {
+        socket.send(JSON.stringify({ type: "subscribe", channelId }));
+      }
+      for (const socket of managerSockets) {
+        socket.send(JSON.stringify({ type: "subscribe", channelId: foreignChannelId }));
+      }
+      await Promise.all([
+        ...managerSockets.flatMap((socket) => [
+          waitForChannelSubscription(socket, channelId),
+          waitForChannelSubscription(socket, foreignChannelId),
+        ]),
+        waitForChannelSubscription(ownerSocket, channelId),
+      ]);
+
+      const membershipRemovedEvents = managerSockets.map((socket) =>
+        waitForWebSocketEvent(
+          socket,
+          (event) => event.type === "workspace_membership_removed" && event.communityId === communityId,
+        ),
+      );
+      const ownerPresenceEvent = waitForWebSocketEvent(
+        ownerSocket,
+        (event) => event.type === "presence"
+          && event.action === "leave"
+          && event.channelId === channelId
+          && event.userId === managerSession.userId,
+      );
       const offboardManager = await apiRequest(ownerSession, `/communities/${communityId}/employees/${managerSession.userId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ employmentStatus: "terminated" }),
       });
       assert.equal(offboardManager.status, 200, JSON.stringify(offboardManager));
+      const removalEvents = await Promise.all(membershipRemovedEvents);
+      for (const event of removalEvents) {
+        assert.ok(Array.isArray(event.channelIds));
+        assert.ok((event.channelIds as number[]).includes(channelId));
+        assert.ok(!(event.channelIds as number[]).includes(foreignChannelId));
+      }
+      await ownerPresenceEvent;
+      const foreignEvents = managerSockets.map((socket) =>
+        waitForWebSocketEvent(
+          socket,
+          (event) => event.type === "unaffected_foreign_probe" && event.channelId === foreignChannelId,
+        ),
+      );
+      wsHub.broadcastChannel(foreignChannelId, { type: "unaffected_foreign_probe", channelId: foreignChannelId });
+      await Promise.all(foreignEvents);
+      wsHub.broadcastChannel(channelId, { type: "post_termination_probe", channelId });
+      await Promise.all(managerSockets.map((socket) =>
+        expectNoWebSocketEvent(
+          socket,
+          (event) => event.type === "post_termination_probe" && event.channelId === channelId,
+        ),
+      ));
       const updatedDirectory = await apiRequest(ownerSession, `/communities/${communityId}`);
       assert.equal(updatedDirectory.status, 200, JSON.stringify(updatedDirectory));
       const updatedDirectoryBody = updatedDirectory.body as {
@@ -10281,6 +10380,14 @@ describe("admin access controls", () => {
       assert.equal(updatedDirectoryBody.teams?.find((team) => team.id === teamId)?.managerId, null);
       assert.equal(updatedDirectoryBody.employees?.find((employee) => employee.userId === employeeSession.userId)?.managerId, null);
     } finally {
+      await Promise.all(sockets.map((socket) => new Promise<void>((resolve) => {
+        if (socket.readyState === WebSocket.CLOSED) {
+          resolve();
+          return;
+        }
+        socket.once("close", () => resolve());
+        socket.close();
+      })));
       if (communityIds.length) {
         await pool.query("DELETE FROM irc_communities WHERE id = ANY($1::int[])", [communityIds]);
       }

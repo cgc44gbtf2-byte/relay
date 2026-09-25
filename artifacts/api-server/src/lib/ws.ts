@@ -161,9 +161,13 @@ export class Hub {
     }
   }
 
-  revokeUserChannelAccess(channelIds: readonly number[], userId: string): void {
+  revokeUserChannelAccess(channelIds: readonly number[], userId: string, communityId?: number): void {
     for (const channelId of channelIds) this.revokeChannelAccess(channelId, userId);
-    this.broadcastUser(userId, { type: "workspace_membership_removed", channelIds: [...channelIds] });
+    this.broadcastUser(userId, {
+      type: "workspace_membership_removed",
+      channelIds: [...channelIds],
+      ...(communityId === undefined ? {} : { communityId }),
+    });
   }
 
   async revokeExpiredCommunitySubscriptions(ownerId?: string): Promise<void> {

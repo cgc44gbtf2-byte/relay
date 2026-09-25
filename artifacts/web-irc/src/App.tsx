@@ -687,7 +687,7 @@ function ChatApp() {
   };
   refreshChannelOrganizationRef.current = refreshChannelOrganization;
 
-  const recoverFromUnavailableChannel = async (channelId: number) => {
+  const recoverFromUnavailableChannel = async (channelId: number, availableChannels?: Channel[]) => {
     if (currentChannelIdRef.current !== channelId || activeDmIdRef.current) return;
     currentChannelIdRef.current = null;
     setCurrentChannelId(null);
@@ -696,6 +696,10 @@ function ChatApp() {
     setJoinRequests([]);
     setShowRequests(false);
     setTypingUsers({});
+    if (availableChannels) {
+      selectPreferredChannel(availableChannels);
+      return;
+    }
     try {
       const list = await refreshChannels();
       if (currentChannelIdRef.current !== null || activeDmIdRef.current) return;
@@ -760,7 +764,7 @@ function ChatApp() {
       currentChannelIdRef.current === socketChannelId
       && activeDmIdRef.current === socketDmId;
         try {
-           const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; notificationIds?: number[]; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
+            const data = JSON.parse(event.data) as { type: string; eventId?: string; occurredAt?: string; channelId?: number; channelIds?: number[]; communityId?: number; message?: ChatMessage; channel?: Channel; action?: string; user?: Profile; userId?: string; messageId?: string; notificationId?: number; notificationIds?: number[]; readAt?: string; reactions?: ChatMessage["reactions"]; notification?: Notification };
             if (data.type === "message" && socketRoomIsCurrent() && data.message?.channelId === socketChannelId && !socketDmId) room.setMessages((items) => upsertBoundedMessage(items, data.message!, 100));
            if (data.type === "notification" && data.notification) setNotifications((items) => items.some((item) => item.id === data.notification!.id) ? items : [data.notification!, ...items].slice(0, 100));
            if (data.type === "notification_read" && Number.isInteger(data.notificationId)) setNotifications((items) => items.map((item) => item.id === data.notificationId ? { ...item, readAt: typeof data.readAt === "string" ? data.readAt : new Date().toISOString() } : item));
@@ -776,6 +780,25 @@ function ChatApp() {
             setChannels((items) => items.filter((item) => item.id !== data.channelId));
             if (currentChannelIdRef.current === data.channelId) void recoverFromUnavailableChannel(data.channelId);
           }
+            if (data.type === "workspace_membership_removed") {
+              const removedChannelIds = new Set(
+                (data.channelIds ?? []).filter((channelId) => Number.isSafeInteger(channelId)),
+              );
+              if (Number.isSafeInteger(data.communityId)) {
+                for (const channel of channels) {
+                  if (channel.communityId === data.communityId) removedChannelIds.add(channel.id);
+                }
+                setCategories((items) => items.filter((item) => item.communityId !== data.communityId));
+              }
+              if (removedChannelIds.size > 0) {
+                const availableChannels = channels.filter((channel) => !removedChannelIds.has(channel.id));
+                setChannels(availableChannels);
+                const unavailableChannelId = currentChannelIdRef.current;
+                if (unavailableChannelId !== null && removedChannelIds.has(unavailableChannelId)) {
+                  void recoverFromUnavailableChannel(unavailableChannelId, availableChannels);
+                }
+              }
+            }
            if (
              data.type === "typing" &&
              data.channelId === currentChannelIdRef.current &&
