@@ -1453,6 +1453,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
    const announcementReadCountById = new Map(announcementReadCounts.map((row) => [row.announcementId, Number(row.total)]));
    const announcementAckCountById = new Map(announcementAckCounts.map((row) => [row.announcementId, Number(row.total)]));
   const canManageOrganization = await requireOrganizationManager(userId, community.id);
+   const canViewModerationLogs = await communityPermission(userId, community.id, "view_moderation_logs");
   const employeeProfilesByUserId = new Map(employees.map((employee) => [employee.userId, employee]));
   const teamMembershipsByUserId = new Map<string, typeof teamMemberships>();
   for (const membership of teamMemberships.slice(0, pageTeamMemberships ? teamMembershipPage.limit : undefined)) {
@@ -1509,6 +1510,7 @@ router.get("/communities/:communityId", requireAuth, async (req: AuthenticatedRe
     })),
     canManage,
     canManageOrganization,
+    canViewModerationLogs,
     isOwner: community.ownerId === userId,
     teamMemberships: pageTeamMemberships ? teamMemberships.slice(0, teamMembershipPage.limit) : teamMemberships,
      pagination: {

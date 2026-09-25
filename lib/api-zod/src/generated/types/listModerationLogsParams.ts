@@ -5,19 +5,15 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import type { PageLimitParameter } from './pageLimitParameter';
-import type { PageOffsetParameter } from './pageOffsetParameter';
 
 export type ListModerationLogsParams = {
 /**
- * Maximum number of records to return. Values above 100 are capped.
  * @minimum 1
  * @maximum 100
  */
-limit?: PageLimitParameter;
+moderationLimit?: number;
 /**
- * Number of records to skip.
  * @minimum 0
  */
-offset?: PageOffsetParameter;
+moderationOffset?: number;
 };

@@ -160,6 +160,7 @@ export type CommunityWorkspaceResponsePagination = {[key: string]: PageInfo};
 
 export interface CommunityWorkspaceResponse {
   community: CommunityWorkspaceResponseCommunity;
+  canViewModerationLogs: boolean;
   members?: CommunityWorkspaceResponseMembersItem[];
   channels?: CommunityWorkspaceResponseChannelsItem[];
   categories?: CommunityWorkspaceResponseCategoriesItem[];
@@ -862,16 +863,14 @@ teamMembershipsCursor?: string;
 
 export type ListModerationLogsParams = {
 /**
- * Maximum number of records to return. Values above 100 are capped.
  * @minimum 1
  * @maximum 100
  */
-limit?: PageLimitParameter;
+moderationLimit?: number;
 /**
- * Number of records to skip.
  * @minimum 0
  */
-offset?: PageOffsetParameter;
+moderationOffset?: number;
 };
 
 export type ListCommunityActivityParams = {

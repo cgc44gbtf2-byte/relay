@@ -575,8 +575,12 @@ paths:
           in: path
           required: true
           schema: { type: integer }
-        - $ref: "#/components/parameters/PageLimit"
-        - $ref: "#/components/parameters/PageOffset"
+        - name: moderationLimit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: moderationOffset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         "200":
           description: Moderation actions
@@ -1300,9 +1304,10 @@ components:
           additionalProperties: { $ref: "#/components/schemas/PageInfo" }
     CommunityWorkspaceResponse:
       type: object
-      required: [community, pagination]
+      required: [community, canViewModerationLogs, pagination]
       properties:
         community: { type: object }
+        canViewModerationLogs: { type: boolean }
         members: { type: array, items: { type: object } }
         channels: { type: array, items: { type: object } }
         categories: { type: array, items: { type: object } }

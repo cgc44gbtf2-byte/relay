@@ -492,6 +492,7 @@ export const GetCommunityWorkspaceResponse = zod.object({
   "community": zod.object({
 
 }).passthrough(),
+  "canViewModerationLogs": zod.boolean(),
   "members": zod.array(zod.object({
 
 }).passthrough()).optional(),
@@ -659,17 +660,17 @@ export const ListModerationLogsParams = zod.object({
   "communityId": zod.coerce.number().int()
 })
 
-export const listModerationLogsQueryLimitDefault = 100;
-export const listModerationLogsQueryLimitMax = 100;
+export const listModerationLogsQueryModerationLimitDefault = 100;
+export const listModerationLogsQueryModerationLimitMax = 100;
 
-export const listModerationLogsQueryOffsetDefault = 0;
-export const listModerationLogsQueryOffsetMin = 0;
+export const listModerationLogsQueryModerationOffsetDefault = 0;
+export const listModerationLogsQueryModerationOffsetMin = 0;
 
 
 
 export const ListModerationLogsQueryParams = zod.object({
-  "limit": zod.coerce.number().int().min(1).max(listModerationLogsQueryLimitMax).default(listModerationLogsQueryLimitDefault).describe('Maximum number of records to return. Values above 100 are capped.'),
-  "offset": zod.coerce.number().int().min(listModerationLogsQueryOffsetMin).default(listModerationLogsQueryOffsetDefault).describe('Number of records to skip.')
+  "moderationLimit": zod.coerce.number().int().min(1).max(listModerationLogsQueryModerationLimitMax).default(listModerationLogsQueryModerationLimitDefault),
+  "moderationOffset": zod.coerce.number().int().min(listModerationLogsQueryModerationOffsetMin).default(listModerationLogsQueryModerationOffsetDefault)
 })
 
 export const ListModerationLogsResponseItem = zod.object({

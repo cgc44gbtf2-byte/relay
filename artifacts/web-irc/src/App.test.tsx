@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@clerk/react/internal", () => ({
@@ -22,7 +23,7 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ user: { id: "user-1" } }),
 }));
 
-import App, { AdminChannelRoomOrganizer, DocumentCenter, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, loadAdminScopeOptions, loadCustomRoleCatalog, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
+import App, { AdminChannelRoomOrganizer, DocumentCenter, ModerationHistoryPanel, OrganizationPanel, WorkspaceChannelOrganizer, allCollectionPages, appendWorkspaceDetailPage, loadAdminOverview, loadAdminScopeOptions, loadCustomRoleCatalog, ownerConfirmationPhrase, pagedApi, workspaceDetailPageQuery } from "./App";
 
 describe("IRC collection pagination", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -615,6 +616,69 @@ async function renderChat(options: Parameters<typeof installApi>[0]) {
   await waitFor(() => expect(screen.getByRole("heading", { name: "#deleted-room" })).toBeTruthy());
 }
 
+describe("workspace moderation history", () => {
+  beforeEach(() => cleanup());
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows saved actor names and loads subsequent pages from the scoped endpoint", async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) => ({
+      id: index + 1,
+      actorId: index === 0 ? "removed-account" : `actor-${index + 1}`,
+      actorDisplayName: index === 0 ? "Saved former moderator" : `Moderator ${index + 1}`,
+      targetUserId: null,
+      communityId: 44,
+      channelId: null,
+      action: index === 0 ? "user_banned" : "message_deleted",
+      details: index === 0 ? "Removed from this workspace" : null,
+      createdAt: "2026-09-20T12:00:00.000Z",
+    }));
+    const laterPage = [{
+      ...firstPage[0],
+      id: 51,
+      actorId: "current-moderator",
+      actorDisplayName: "Current moderator",
+      action: "user_unbanned",
+      details: null,
+    }];
+    const fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/communities/44/moderation-logs") {
+        return jsonResponse(url.searchParams.get("moderationOffset") === "50" ? laterPage : firstPage);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetch);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModerationHistoryPanel communityId={44} />
+      </QueryClientProvider>,
+    );
+
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("button-toggle-moderation-history"));
+    expect((await screen.findByTestId("text-moderation-actor-1")).textContent).toContain("Saved former moderator");
+    expect(screen.getByTestId("text-moderation-details-1").textContent).toBe("Removed from this workspace");
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/communities/44/moderation-logs?moderationLimit=50&moderationOffset=0",
+    ]);
+
+    fireEvent.click(screen.getByTestId("button-load-more-moderation-history"));
+    expect((await screen.findByTestId("text-moderation-action-51")).textContent).toContain("user unbanned");
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/communities/44/moderation-logs?moderationLimit=50&moderationOffset=0",
+      "/api/communities/44/moderation-logs?moderationLimit=50&moderationOffset=50",
+    ]);
+  });
+});
+
 describe("community organization polling", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -645,6 +709,7 @@ describe("community organization polling", () => {
       if (match) return jsonResponse({
         community: match[1] === "72" ? newWorkspace : oldWorkspace,
         canManage: false, canManageOrganization: false, isOwner: false,
+        canViewModerationLogs: match[1] === "72",
         members: [], employees: [], departments: [], locations: [], teams: [],
         teamMemberships: [], assignments: [], channels: [], categories: [],
         announcements: [], invitations: [], policies: [], documents: [], tasks: [],
@@ -657,12 +722,14 @@ describe("community organization polling", () => {
     window.history.pushState({}, "", "/communities/71");
     const app = render(<App />);
     await screen.findByRole("heading", { name: "Existing business" });
+    expect(screen.queryByTestId("section-moderation-history")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "new" }));
     fireEvent.change(screen.getByLabelText("business name"), { target: { value: "New business" } });
     fireEvent.click(screen.getByRole("button", { name: "create business workspace" }));
     await waitFor(() => expect(window.location.pathname).toBe("/communities/72"));
     expect(await screen.findByRole("heading", { name: "New business" })).toBeTruthy();
+    expect(screen.getByTestId("section-moderation-history")).toBeTruthy();
 
     app.unmount();
     render(<App />);

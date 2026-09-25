@@ -22,6 +22,7 @@ import type { CommunityWorkspaceResponseTeamsItem } from './communityWorkspaceRe
 
 export interface CommunityWorkspaceResponse {
   community: CommunityWorkspaceResponseCommunity;
+  canViewModerationLogs: boolean;
   members?: CommunityWorkspaceResponseMembersItem[];
   channels?: CommunityWorkspaceResponseChannelsItem[];
   categories?: CommunityWorkspaceResponseCategoriesItem[];

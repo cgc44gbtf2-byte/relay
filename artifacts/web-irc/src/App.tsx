@@ -49,6 +49,7 @@ import { shadcn } from "@clerk/themes";
 import { mergeRefreshedMessages, upsertBoundedMessage, upsertBoundedMessageGroup, upsertMessage } from "./message-state";
 import { Route, Router as WouterRouter, Switch, Redirect, useLocation, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import { getListModerationLogsQueryKey, useListModerationLogs, type ListModerationLogsQueryResult } from "@workspace/api-client-react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { clearTestAccountReturnContext, returnToTestAccountOwner, writeTestAccountReturnContext } from "./test-account-switch";
 import { NotificationCenter, type Notification, type LinkedNotificationMessage } from "./components/notification-center";
@@ -2661,6 +2662,7 @@ type CommunityDetail = {
   }>;
   canManage: boolean;
   canManageOrganization: boolean;
+  canViewModerationLogs: boolean;
   isOwner: boolean;
   pagination?: Record<WorkspaceDetailCollection, { hasMore: boolean; offset: number; limit: number; nextCursor?: string | null }>;
 };
@@ -4207,6 +4209,90 @@ export function WorkspaceChannelOrganizer({
   );
 }
 
+const MODERATION_LOG_PAGE_SIZE = 50;
+
+export function ModerationHistoryPanel({ communityId }: { communityId: number }) {
+  const [open, setOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [entries, setEntries] = useState<ListModerationLogsQueryResult>([]);
+  const params = { moderationLimit: MODERATION_LOG_PAGE_SIZE, moderationOffset: offset };
+  const query = useListModerationLogs(communityId, params, {
+    query: {
+      queryKey: getListModerationLogsQueryKey(communityId, params),
+      enabled: open,
+    },
+  });
+
+  useEffect(() => {
+    if (!query.data) return;
+    setEntries((current) => offset === 0
+      ? query.data
+      : [...current, ...query.data.filter((entry) => !current.some((existing) => existing.id === entry.id))]);
+  }, [offset, query.data]);
+
+  const hasMore = (query.data?.length ?? 0) === MODERATION_LOG_PAGE_SIZE;
+  return (
+    <section className="overflow-hidden rounded-xl border border-border bg-card" data-testid="section-moderation-history">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <div>
+          <h2 className="font-mono text-sm font-bold">moderation history</h2>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">Review moderation actions recorded in this workspace.</p>
+        </div>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls="moderation-history-entries"
+          data-testid="button-toggle-moderation-history"
+          onClick={() => setOpen((value) => !value)}
+          className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-primary hover:bg-muted"
+        >
+          {open ? "close history" : "open history"}
+        </button>
+      </div>
+      {open && <div id="moderation-history-entries" className="border-t border-border">
+        {query.isLoading && <p className="px-5 py-4 font-mono text-[10px] text-muted-foreground" role="status" data-testid="status-moderation-history-loading">loading moderation history…</p>}
+        {query.isError && <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <p className="font-mono text-[10px] text-destructive" role="alert" data-testid="error-moderation-history">Could not load moderation history.</p>
+          <button type="button" onClick={() => void query.refetch()} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary">retry</button>
+        </div>}
+        {!query.isLoading && !query.isError && entries.length === 0 && <p className="px-5 py-4 font-mono text-[10px] text-muted-foreground" data-testid="text-moderation-history-empty">No moderation actions recorded yet.</p>}
+        {entries.length > 0 && <div className="divide-y divide-border">
+          {entries.map((entry) => <article key={entry.id} className="px-5 py-4" data-testid={`row-moderation-action-${entry.id}`}>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="font-mono text-xs font-bold text-secondary-foreground" data-testid={`text-moderation-action-${entry.id}`}>{entry.action.replaceAll("_", " ")}</p>
+                <p className="mt-1 font-mono text-[10px] text-muted-foreground" data-testid={`text-moderation-actor-${entry.id}`}>
+                  by {entry.actorDisplayName?.trim() || "Former account"}
+                </p>
+              </div>
+              <time className="font-mono text-[9px] text-muted-foreground" dateTime={new Date(entry.createdAt).toISOString()} data-testid={`time-moderation-action-${entry.id}`}>
+                {new Date(entry.createdAt).toLocaleString()}
+              </time>
+            </div>
+            {entry.details && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground" data-testid={`text-moderation-details-${entry.id}`}>{entry.details}</p>}
+            {(entry.targetUserId || entry.channelId !== null && entry.channelId !== undefined) && <p className="mt-2 font-mono text-[9px] text-muted-foreground">
+              {entry.targetUserId && <span>member {entry.targetUserId}</span>}
+              {entry.targetUserId && entry.channelId !== null && entry.channelId !== undefined && <span> · </span>}
+              {entry.channelId !== null && entry.channelId !== undefined && <span>channel {entry.channelId}</span>}
+            </p>}
+          </article>)}
+        </div>}
+        {hasMore && <div className="border-t border-border px-5 py-4">
+          <button
+            type="button"
+            disabled={query.isFetching}
+            onClick={() => setOffset((current) => current + MODERATION_LOG_PAGE_SIZE)}
+            data-testid="button-load-more-moderation-history"
+            className="rounded-md border border-border px-3 py-2 font-mono text-[10px] text-primary disabled:opacity-50"
+          >
+            {query.isFetching ? "loading…" : "load more"}
+          </button>
+        </div>}
+      </div>}
+    </section>
+  );
+}
+
 function CommunityConsole() {
   const [, setLocation] = useLocation();
   const [, routeParams] = useRoute<{ id?: string }>("/communities/:id");
@@ -4616,6 +4702,7 @@ function CommunityConsole() {
               {detail.isOwner && <><TestAccountsPanel detail={detail} setError={setError} setNotice={setNotice} /><section className="rounded-xl border border-destructive/30 bg-card p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.16em] text-destructive">danger zone</p><h2 className="mt-2 font-mono text-sm font-bold">delete workspace</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">This permanently deletes every channel, member relationship, and business record in this workspace. This cannot be undone.</p></div><button type="button" disabled={working} onClick={() => { setOwnerActionError(""); setOwnerConfirmation({ kind: "delete-workspace", label: detail.community.name, phrase: detail.community.name }); }} className="rounded border border-destructive/40 px-3 py-2 font-mono text-[10px] font-bold text-destructive">delete workspace</button></div></section></>}
               {detail.canManage && <BusinessDashboard detail={detail} setError={setError} />}
               {detail.canManage && <BusinessAuditCenter detail={detail} setError={setError} />}
+              {detail.canViewModerationLogs && <ModerationHistoryPanel key={detail.community.id} communityId={detail.community.id} />}
              {detail.pagination && Object.values(detail.pagination).some((page) => page.hasMore) && <section className="rounded-xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><p className="font-mono text-[10px] text-muted-foreground">More workspace records are available.</p><button type="button" disabled={loadingMoreDetail} onClick={() => void loadMoreDetail()} className="rounded border border-border px-3 py-2 font-mono text-[10px] text-primary disabled:opacity-50">{loadingMoreDetail ? "loading…" : "load more workspace records"}</button></div>{loadMoreDetailError && <p role="alert" className="mt-2 font-mono text-[10px] text-destructive">{loadMoreDetailError}</p>}</section>}
              <DocumentCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} />
              <AnnouncementCenter detail={detail} working={working} setWorking={setWorking} setNotice={setNotice} setError={setError} onRefresh={() => loadDetail(detail.community.id)} />
